@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -19,6 +20,7 @@ func (errQueryer) QueryContext(context.Context, string, ...any) (*sql.Rows, erro
 
 func TestDuckDBArtifactFormat(t *testing.T) {
 	t.Run("memory_limit_parse", testDuckDBMemoryLimitParse)
+	t.Run("extension_dir_parse", testDuckDBExtensionDirParse)
 	t.Run("table_exists_error", testDuckDBTableExistsError)
 	t.Run("table_exists_missing", testDuckDBTableExistsMissing)
 }
@@ -51,4 +53,27 @@ func testDuckDBTableExistsMissing(t *testing.T) {
 	ok, err := tableExists(context.Background(), db, "missing_table")
 	require.NoError(t, err)
 	assert.False(t, ok)
+}
+
+func testDuckDBExtensionDirParse(t *testing.T) {
+	t.Run("offline_missing", func(t *testing.T) {
+		_, err := normalizeDuckDBExtensionDir(filepath.Join(t.TempDir(), "missing"), true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "offline mode")
+	})
+
+	t.Run("online_missing", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing")
+		val, err := normalizeDuckDBExtensionDir(path, false)
+		require.NoError(t, err)
+		assert.Equal(t, filepath.Clean(path), val)
+	})
+
+	t.Run("not_directory", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "ext-file")
+		require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
+		_, err := normalizeDuckDBExtensionDir(file, true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not a directory")
+	})
 }

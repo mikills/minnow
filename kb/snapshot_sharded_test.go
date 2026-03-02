@@ -70,6 +70,7 @@ func testSnapshotShardedPublishQueryableShards(t *testing.T) {
 				require.NotEmpty(t, shard.SHA256)
 				require.Greater(t, shard.SizeBytes, int64(0))
 				require.Greater(t, shard.VectorRows, int64(0))
+				require.Len(t, shard.Centroid, 3)
 
 				localShard := filepath.Join(harness.CacheDir(), fmt.Sprintf("check-shard-%02d.duckdb", i))
 				require.NoError(t, loader.BlobStore.Download(ctx, shard.Key, localShard))

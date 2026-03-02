@@ -37,7 +37,8 @@
 //
 // Result merging:
 //
-//   - Each shard returns its local top-K results. mergeShardTopKResults flattens
+//   - Each shard returns its local top-K results (optionally oversampled via
+//     QueryShardLocalTopKMult). mergeShardTopKResults flattens
 //     all shard results, sorts globally by distance (ascending), and returns the
 //     global top-K. Ties are broken deterministically by ID, content, shard
 //     index, and local index.
@@ -249,7 +250,9 @@ func (f *DuckDBArtifactFormat) searchTopK(ctx context.Context, kbID string, quer
 	if err != nil {
 		return nil, fmt.Errorf("select vector query path: %w", err)
 	}
-	results, shardErr := f.queryTopKFromShards(ctx, kbID, queryVec, k, selection.Plan)
+	policy := normalizeShardingPolicy(f.deps.ShardingPolicy)
+	localTopK := shardLocalTopK(k, policy)
+	results, shardErr := f.queryTopKFromShards(ctx, kbID, queryVec, k, localTopK, selection.Plan)
 	if shardErr != nil {
 		f.deps.Metrics.RecordShardExecutionFailure(kbID)
 		return nil, shardErr
@@ -257,14 +260,29 @@ func (f *DuckDBArtifactFormat) searchTopK(ctx context.Context, kbID string, quer
 	return results, nil
 }
 
-func (f *DuckDBArtifactFormat) queryTopKFromShards(ctx context.Context, kbID string, queryVec []float32, k int, plan shardQueryPlan) ([]QueryResult, error) {
+func shardLocalTopK(k int, policy ShardingPolicy) int {
+	if k <= 0 {
+		return 0
+	}
+	mult := policy.QueryShardLocalTopKMult
+	if mult <= 0 {
+		mult = 1
+	}
+	local := k * mult
+	if local < k {
+		return k
+	}
+	return local
+}
+
+func (f *DuckDBArtifactFormat) queryTopKFromShards(ctx context.Context, kbID string, queryVec []float32, k, localTopK int, plan shardQueryPlan) ([]QueryResult, error) {
 	if plan.Fanout <= 0 || len(plan.Shards) == 0 {
 		return []QueryResult{}, nil
 	}
 	f.deps.Metrics.RecordShardFanout(kbID, plan.Fanout, plan.Capped)
 	f.deps.Metrics.RecordShardExecution(kbID, plan.Fanout)
 
-	shardResults, err := f.queryShardsTopK(ctx, kbID, plan.Shards, queryVec, k, plan.Parallelism)
+	shardResults, err := f.queryShardsTopK(ctx, kbID, plan.Shards, queryVec, localTopK, plan.Parallelism)
 	if err != nil {
 		return nil, err
 	}

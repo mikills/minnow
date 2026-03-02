@@ -111,7 +111,7 @@ func Register(e *echo.Echo, deps Dependencies) {
 
 		chunkSize := req.ChunkSize
 		if chunkSize <= 0 {
-			chunkSize = 500
+			chunkSize = kb.DefaultTextChunkSize
 		}
 		chunker := kb.TextChunker{ChunkSize: chunkSize}
 
