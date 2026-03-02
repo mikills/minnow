@@ -17,6 +17,7 @@ type ShardingPolicy struct {
 	QueryShardFanout            int     `json:"query_shard_fanout"`
 	QueryShardFanoutAdaptiveMax int     `json:"query_shard_fanout_adaptive_max"`
 	QueryShardParallelism       int     `json:"query_shard_parallelism"`
+	QueryShardLocalTopKMult     int     `json:"query_shard_local_topk_multiplier"`
 	SmallKBMaxShards            int     `json:"small_kb_max_shards"`
 	CompactionEnabled           bool    `json:"compaction_enabled"`
 	CompactionMinShardCount     int     `json:"compaction_min_shard_count"`
@@ -33,6 +34,7 @@ func DefaultShardingPolicy() ShardingPolicy {
 		QueryShardFanout:            4,
 		QueryShardFanoutAdaptiveMax: 6,
 		QueryShardParallelism:       4,
+		QueryShardLocalTopKMult:     2,
 		SmallKBMaxShards:            2,
 		CompactionEnabled:           true,
 		CompactionMinShardCount:     8,
@@ -64,6 +66,10 @@ func normalizeShardingPolicy(policy ShardingPolicy) ShardingPolicy {
 	if policy.QueryShardParallelism > 0 {
 		defaults.QueryShardParallelism = policy.QueryShardParallelism
 	}
+	if policy.QueryShardLocalTopKMult > 0 {
+		defaults.QueryShardLocalTopKMult = policy.QueryShardLocalTopKMult
+	}
+
 	if policy.SmallKBMaxShards > 0 {
 		defaults.SmallKBMaxShards = policy.SmallKBMaxShards
 	}

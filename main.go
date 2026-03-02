@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -85,7 +86,7 @@ func main() {
 	if graphEnabled {
 		grapher := kb.NewOllamaGrapher(graphURL, graphModel)
 		grapher.MaxParallel = graphParallelism
-		gb := &kb.GraphBuilder{Chunker: &kb.TextChunker{}, Grapher: grapher}
+		gb := &kb.GraphBuilder{Chunker: &kb.TextChunker{ChunkSize: kb.DefaultTextChunkSize}, Grapher: grapher}
 		kbOpts = append(kbOpts, kb.WithGraphBuilder(gb))
 		logger.Info("configured ollama grapher", "url", graphURL, "model", graphModel, "parallelism", graphParallelism)
 	} else {
@@ -102,6 +103,7 @@ func main() {
 		"query_shard_fanout", shardingPolicy.QueryShardFanout,
 		"query_shard_fanout_adaptive_max", shardingPolicy.QueryShardFanoutAdaptiveMax,
 		"query_shard_parallelism", shardingPolicy.QueryShardParallelism,
+		"query_shard_local_topk_multiplier", shardingPolicy.QueryShardLocalTopKMult,
 		"small_kb_max_shards", shardingPolicy.SmallKBMaxShards,
 		"compaction_enabled", shardingPolicy.CompactionEnabled,
 		"compaction_min_shard_count", shardingPolicy.CompactionMinShardCount,
@@ -283,6 +285,7 @@ func parseShardingPolicyFromEnv(getenv func(string) string) (kb.ShardingPolicy, 
 		setInt("KBCORE_QUERY_SHARD_FANOUT", &policy.QueryShardFanout),
 		setInt("KBCORE_QUERY_SHARD_FANOUT_ADAPTIVE_MAX", &policy.QueryShardFanoutAdaptiveMax),
 		setInt("KBCORE_QUERY_SHARD_PARALLELISM", &policy.QueryShardParallelism),
+		setInt("KBCORE_QUERY_SHARD_LOCAL_TOPK_MULT", &policy.QueryShardLocalTopKMult),
 		setInt("KBCORE_SMALL_KB_MAX_SHARDS", &policy.SmallKBMaxShards),
 		setInt("KBCORE_COMPACTION_MIN_SHARD_COUNT", &policy.CompactionMinShardCount),
 		setBool("KBCORE_COMPACTION_ENABLED", &policy.CompactionEnabled),
@@ -302,6 +305,10 @@ func parseShardingPolicyFromEnv(getenv func(string) string) (kb.ShardingPolicy, 
 	}
 	if policy.QueryShardFanoutAdaptiveMax < policy.QueryShardFanout {
 		return kb.ShardingPolicy{}, fmt.Errorf("KBCORE_QUERY_SHARD_FANOUT_ADAPTIVE_MAX must be >= KBCORE_QUERY_SHARD_FANOUT")
+	}
+
+	if policy.QueryShardLocalTopKMult > 16 {
+		return kb.ShardingPolicy{}, errors.New("KBCORE_QUERY_SHARD_LOCAL_TOPK_MULT must be <= 16")
 	}
 
 	return policy, nil

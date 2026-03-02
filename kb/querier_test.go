@@ -278,6 +278,7 @@ func TestKBVectorQuery(t *testing.T) {
 	t.Run("topk_shard_execution_modes", testKBTopKShardExecutionModes)
 	t.Run("shard_execution_fallback", testKBShardExecutionFallback)
 	t.Run("topk_shard_fanout_plan", testKBTopKShardFanoutPlan)
+	t.Run("topk_shard_local_multiplier", testKBTopKShardLocalMultiplier)
 	t.Run("topk_shard_merge", testKBTopKShardMerge)
 }
 
@@ -885,6 +886,31 @@ func testKBTopKShardMerge(t *testing.T) {
 				assert.Equal(t, tc.wantIDs[i], got[i].ID)
 				assert.Equal(t, tc.wantContent[i], got[i].Content)
 			}
+		})
+	}
+}
+
+func testKBTopKShardLocalMultiplier(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		k      int
+		policy ShardingPolicy
+		want   int
+	}{
+		{name: "default_multiplier", k: 10, policy: ShardingPolicy{}, want: 20},
+		{name: "custom_multiplier", k: 10, policy: ShardingPolicy{QueryShardLocalTopKMult: 3}, want: 30},
+		{name: "negative_k", k: -1, policy: ShardingPolicy{QueryShardLocalTopKMult: 3}, want: 0},
+		{name: "multiplier_floor", k: 10, policy: ShardingPolicy{QueryShardLocalTopKMult: 0}, want: 20},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := shardLocalTopK(tc.k, normalizeShardingPolicy(tc.policy))
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }
