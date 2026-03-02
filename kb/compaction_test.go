@@ -19,6 +19,7 @@ func TestCompaction(t *testing.T) {
 	t.Run("select_candidates_size_tiered", testCompactionSelectCandidatesSizeTiered)
 	t.Run("select_candidates_tombstone_pressure_fallback", testCompactionSelectCandidatesTombstonePressureFallback)
 	t.Run("publish", testCompactionPublish)
+	t.Run("publish_preserves_graph", testCompactionPublishPreservesGraph)
 	t.Run("cas_conflict", testCompactionCASConflict)
 	t.Run("write_lease_conflict", testCompactionWriteLeaseConflict)
 	t.Run("gc_delay_grace_window", testCompactionGCDelayGraceWindow)
@@ -161,12 +162,55 @@ func testCompactionPublish(t *testing.T) {
 	require.Len(t, updatedManifest.Shards, 1)
 	assert.Equal(t, result.ReplacementShards[0].ShardID, updatedManifest.Shards[0].ShardID)
 	assert.Equal(t, int64(30+35+40), updatedManifest.Shards[0].VectorRows)
-	db, err := harness.KB().openConfiguredDB(ctx, reconstructed)
+	db, err := testOpenConfiguredDB(harness.KB(), ctx, reconstructed)
 	require.NoError(t, err)
 	defer db.Close()
 	var mergedRows int64
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs`).Scan(&mergedRows))
 	assert.Equal(t, int64(30+35+40), mergedRows)
+}
+
+func testCompactionPublishPreservesGraph(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-compaction-graph"
+	harness := NewTestHarness(t, kbID).WithOptions(WithShardingPolicy(ShardingPolicy{
+		CompactionEnabled:        true,
+		CompactionMinShardCount:  3,
+		CompactionTombstoneRatio: 0.20,
+		TargetShardBytes:         100,
+	})).Setup()
+	defer harness.Cleanup()
+
+	seedManifestWithShards(t, ctx, harness.KB(), kbID, []seedShardSpec{
+		{id: "s-a", vectorRows: 4, tombstone: 0.10, graph: true},
+		{id: "s-b", vectorRows: 5, tombstone: 0.25, graph: true},
+		{id: "s-c", vectorRows: 6, tombstone: 0.15, graph: true},
+	})
+
+	result, err := harness.KB().CompactShardsIfNeeded(ctx, kbID)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Performed)
+	require.Len(t, result.ReplacementShards, 1)
+	assert.True(t, result.ReplacementShards[0].GraphAvailable)
+
+	reconstructed := filepath.Join(harness.CacheDir(), "compacted-graph.duckdb")
+	manifest, err := harness.KB().DownloadSnapshotFromShards(ctx, kbID, reconstructed)
+	require.NoError(t, err)
+	require.Len(t, manifest.Shards, 1)
+	assert.True(t, manifest.Shards[0].GraphAvailable)
+
+	db, err := testOpenConfiguredDB(harness.KB(), ctx, reconstructed)
+	require.NoError(t, err)
+	defer db.Close()
+
+	var docEntities int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM doc_entities`).Scan(&docEntities))
+	assert.Positive(t, docEntities)
+
+	var edges int64
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM edges`).Scan(&edges))
+	assert.Positive(t, edges)
 }
 
 func testCompactionCASConflict(t *testing.T) {
@@ -342,6 +386,7 @@ type seedShardSpec struct {
 	id         string
 	vectorRows int64
 	tombstone  float64
+	graph      bool
 }
 
 func seedManifestWithShards(t *testing.T, ctx context.Context, kb *KB, kbID string, shards []seedShardSpec) {
@@ -361,7 +406,7 @@ func seedManifestWithShards(t *testing.T, ctx context.Context, kb *KB, kbID stri
 		if rows <= 0 {
 			rows = 1
 		}
-		require.NoError(t, writeTestShardDB(ctx, kb, shardPath, shard.id, docSeq, rows))
+		require.NoError(t, writeTestShardDB(ctx, kb, shardPath, shard.id, docSeq, rows, shard.graph))
 		docSeq += rows
 
 		key := kbID + ".duckdb.shards/seed/shard-" + shard.id + ".duckdb"
@@ -381,7 +426,7 @@ func seedManifestWithShards(t *testing.T, ctx context.Context, kb *KB, kbID stri
 			CreatedAt:      now.Add(time.Duration(i) * time.Second),
 			SealedAt:       now.Add(time.Duration(i) * time.Second),
 			TombstoneRatio: shard.tombstone,
-			GraphAvailable: false,
+			GraphAvailable: shard.graph,
 			SHA256:         sha,
 		}
 		total += meta.SizeBytes
@@ -398,8 +443,8 @@ func seedManifestWithShards(t *testing.T, ctx context.Context, kb *KB, kbID stri
 
 }
 
-func writeTestShardDB(ctx context.Context, kb *KB, path, shardID string, startDoc, rows int) error {
-	db, err := kb.openConfiguredDB(ctx, path)
+func writeTestShardDB(ctx context.Context, kb *KB, path, shardID string, startDoc, rows int, withGraph bool) error {
+	db, err := testOpenConfiguredDB(kb, ctx, path)
 	if err != nil {
 		return err
 	}
@@ -430,6 +475,28 @@ func writeTestShardDB(ctx context.Context, kb *KB, path, shardID string, startDo
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`); err != nil {
 		return err
 	}
+
+	if withGraph {
+		if err := EnsureGraphTables(ctx, db); err != nil {
+			return err
+		}
+		for i := 0; i < rows; i++ {
+			docNum := startDoc + i
+			docID := fmt.Sprintf("%s-doc-%03d", shardID, docNum)
+			entityID := fmt.Sprintf("ent-%s-%03d", shardID, docNum)
+			chunkID := fmt.Sprintf("%s-chunk-%03d", shardID, docNum)
+			if _, err := db.ExecContext(ctx, `INSERT INTO entities (id, name) VALUES (?, ?)`, entityID, entityID); err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, `INSERT INTO doc_entities (doc_id, entity_id, weight, chunk_id) VALUES (?, ?, ?, ?)`, docID, entityID, 1.0, chunkID); err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, `INSERT INTO edges (src, dst, weight, rel_type, chunk_id) VALUES (?, ?, ?, ?, ?)`, entityID, entityID, 1.0, "rel", chunkID); err != nil {
+				return err
+			}
+		}
+	}
+
 	return checkpointAndCloseDB(ctx, db, "close seeded shard db")
 }
 

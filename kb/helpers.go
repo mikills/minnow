@@ -26,10 +26,13 @@ func tableExists(ctx context.Context, q interface {
 }, tableName string) (bool, error) {
 	rows, err := q.QueryContext(ctx, fmt.Sprintf("SELECT 1 FROM %s LIMIT 0", tableName))
 	if err != nil {
-		return false, nil
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "does not exist") || strings.Contains(msg, "not found") {
+			return false, nil
+		}
+		return false, err
 	}
-	rows.Close()
-	return true, nil
+	return true, rows.Close()
 }
 
 func buildInClausePlaceholders(n int) string {

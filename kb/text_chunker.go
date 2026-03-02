@@ -17,6 +17,8 @@ import (
 //   - ""     character level (last resort)
 var defaultSeparators = []string{"\n\n", "\n", ".", " ", ""}
 
+const DefaultTextChunkSize = 500
+
 // TextChunker splits text using a recursive character text splitter algorithm
 // with no overlap between chunks.
 //
@@ -51,7 +53,7 @@ func (c TextChunker) Chunk(ctx context.Context, docID string, text string) ([]Ch
 
 	chunkSize := c.ChunkSize
 	if chunkSize <= 0 {
-		chunkSize = 500
+		chunkSize = DefaultTextChunkSize
 	}
 
 	// perform recursive split
