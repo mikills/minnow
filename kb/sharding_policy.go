@@ -17,6 +17,7 @@ type ShardingPolicy struct {
 	QueryShardFanout            int     `json:"query_shard_fanout"`
 	QueryShardFanoutAdaptiveMax int     `json:"query_shard_fanout_adaptive_max"`
 	QueryShardParallelism       int     `json:"query_shard_parallelism"`
+	QueryShardLocalTopKMult     int     `json:"query_shard_local_topk_multiplier"`
 	SmallKBMaxShards            int     `json:"small_kb_max_shards"`
 	CompactionEnabled           bool    `json:"compaction_enabled"`
 	CompactionMinShardCount     int     `json:"compaction_min_shard_count"`
@@ -33,6 +34,7 @@ func DefaultShardingPolicy() ShardingPolicy {
 		QueryShardFanout:            4,
 		QueryShardFanoutAdaptiveMax: 6,
 		QueryShardParallelism:       4,
+		QueryShardLocalTopKMult:     2,
 		SmallKBMaxShards:            2,
 		CompactionEnabled:           true,
 		CompactionMinShardCount:     8,
@@ -64,6 +66,10 @@ func normalizeShardingPolicy(policy ShardingPolicy) ShardingPolicy {
 	if policy.QueryShardParallelism > 0 {
 		defaults.QueryShardParallelism = policy.QueryShardParallelism
 	}
+	if policy.QueryShardLocalTopKMult > 0 {
+		defaults.QueryShardLocalTopKMult = policy.QueryShardLocalTopKMult
+	}
+
 	if policy.SmallKBMaxShards > 0 {
 		defaults.SmallKBMaxShards = policy.SmallKBMaxShards
 	}
@@ -76,6 +82,33 @@ func normalizeShardingPolicy(policy ShardingPolicy) ShardingPolicy {
 
 	return defaults
 }
+
+// ShardMetricsObserver receives shard-level metrics events from the DuckDB backend.
+// KB satisfies this interface via its record* methods.
+type ShardMetricsObserver interface {
+	RecordShardCount(kbID string, count int)
+	RecordShardExecutionFailure(kbID string)
+	RecordShardFanout(kbID string, fanout int, capped bool)
+	RecordShardExecution(kbID string, count int)
+	RecordShardCacheAccess(kbID string, hit bool)
+}
+
+// RecordShardCount implements ShardMetricsObserver.
+func (l *KB) RecordShardCount(kbID string, count int) { l.recordShardCount(kbID, count) }
+
+// RecordShardExecutionFailure implements ShardMetricsObserver.
+func (l *KB) RecordShardExecutionFailure(kbID string) { l.recordShardExecutionFailure(kbID) }
+
+// RecordShardFanout implements ShardMetricsObserver.
+func (l *KB) RecordShardFanout(kbID string, fanout int, capped bool) {
+	l.recordShardFanout(kbID, fanout, capped)
+}
+
+// RecordShardExecution implements ShardMetricsObserver.
+func (l *KB) RecordShardExecution(kbID string, count int) { l.recordShardExecution(kbID, count) }
+
+// RecordShardCacheAccess implements ShardMetricsObserver.
+func (l *KB) RecordShardCacheAccess(kbID string, hit bool) { l.recordShardCacheAccess(kbID, hit) }
 
 type shardMetrics struct {
 	ShardCount              int

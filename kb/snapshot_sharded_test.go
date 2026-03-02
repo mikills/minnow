@@ -56,7 +56,7 @@ func testSnapshotShardedPublishQueryableShards(t *testing.T) {
 			require.GreaterOrEqual(t, len(manifest.Shards), tc.wantMinShards)
 			assert.Greater(t, manifest.TotalSizeBytes, int64(0))
 
-			reconstructedDB, err := loader.openConfiguredDB(ctx, reconstructed)
+			reconstructedDB, err := testOpenConfiguredDB(loader, ctx, reconstructed)
 			require.NoError(t, err)
 			var gotRows int
 			require.NoError(t, reconstructedDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs`).Scan(&gotRows))
@@ -70,10 +70,11 @@ func testSnapshotShardedPublishQueryableShards(t *testing.T) {
 				require.NotEmpty(t, shard.SHA256)
 				require.Greater(t, shard.SizeBytes, int64(0))
 				require.Greater(t, shard.VectorRows, int64(0))
+				require.Len(t, shard.Centroid, 3)
 
 				localShard := filepath.Join(harness.CacheDir(), fmt.Sprintf("check-shard-%02d.duckdb", i))
 				require.NoError(t, loader.BlobStore.Download(ctx, shard.Key, localShard))
-				shardDB, err := loader.openConfiguredDB(ctx, localShard)
+				shardDB, err := testOpenConfiguredDB(loader, ctx, localShard)
 				require.NoError(t, err)
 
 				var shardRows int
@@ -134,7 +135,7 @@ func testSnapshotShardedWriteLeaseConflict(t *testing.T) {
 }
 
 func writeSnapshotSourceDB(ctx context.Context, loader *KB, path string, docs int) error {
-	db, err := loader.openConfiguredDB(ctx, path)
+	db, err := testOpenConfiguredDB(loader, ctx, path)
 	if err != nil {
 		return err
 	}
