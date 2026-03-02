@@ -69,6 +69,12 @@ type captureRetryObserver struct {
 	stats []MutationRetryStats
 }
 
+type countingEmbedder struct {
+	base  Embedder
+	mu    sync.Mutex
+	calls int
+}
+
 func (o *captureRetryObserver) ObserveMutationRetry(s MutationRetryStats) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -82,6 +88,19 @@ func (o *captureRetryObserver) Last() (MutationRetryStats, bool) {
 		return MutationRetryStats{}, false
 	}
 	return o.stats[len(o.stats)-1], true
+}
+
+func (e *countingEmbedder) Embed(ctx context.Context, input string) ([]float32, error) {
+	e.mu.Lock()
+	e.calls++
+	e.mu.Unlock()
+	return e.base.Embed(ctx, input)
+}
+
+func (e *countingEmbedder) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
 }
 
 func (f *flakyUploadBlobStore) Head(ctx context.Context, key string) (*BlobObjectInfo, error) {
@@ -113,6 +132,7 @@ func (f *flakyUploadBlobStore) List(ctx context.Context, prefix string) ([]BlobO
 
 func TestKBMutations(t *testing.T) {
 	t.Run("upsert_and_soft_delete", testKBUpsertAndSoftDelete)
+	t.Run("upsert_embed_once", testKBUpsertEmbedOnce)
 	t.Run("hard_delete_prunes_graph_links", testKBHardDeletePrunesGraphLinks)
 	t.Run("mutate_upload_visible_to_fresh_loader", testKBMutateUploadVisibleFreshLoader)
 	t.Run("upsert_upload_bootstrap", testKBUpsertUploadBootstrap)
@@ -171,6 +191,24 @@ func testKBUpsertAndSoftDelete(t *testing.T) {
 			require.FailNowf(t, "test failed", "soft-deleted doc c should not appear in results")
 		}
 	}
+}
+
+func testKBUpsertEmbedOnce(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-mutations-embed-count"
+
+	counted := &countingEmbedder{base: newFixtureEmbedder(3)}
+	harness := NewTestHarness(t, kbID).
+		WithEmbedder(counted).
+		Setup()
+	defer harness.Cleanup()
+
+	err := harness.KB().UpsertDocs(ctx, kbID, []Document{
+		{ID: "a", Text: "first doc"},
+		{ID: "b", Text: "second doc"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, counted.Calls())
 }
 
 func testKBHardDeletePrunesGraphLinks(t *testing.T) {

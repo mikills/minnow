@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -99,59 +100,74 @@ func (f *DuckDBArtifactFormat) lockFor(kbID string) *sync.Mutex {
 }
 
 func (f *DuckDBArtifactFormat) openConfiguredDB(ctx context.Context, dbPath string) (*sql.DB, error) {
+	memLimit, err := normalizeDuckDBMemoryLimit(f.deps.MemoryLimit)
+	if err != nil {
+		return nil, err
+	}
+
 	db, err := sql.Open("duckdb", dbPath)
 	if err != nil {
 		return nil, err
 	}
 
 	if f.deps.ExtensionDir != "" {
-		if _, err := db.Exec(fmt.Sprintf(`SET extension_directory = '%s'`, f.deps.ExtensionDir)); err != nil {
+		extensionDir := quoteSQLString(f.deps.ExtensionDir)
+		if _, err := db.ExecContext(ctx, fmt.Sprintf(`SET extension_directory = '%s'`, extensionDir)); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("set extension_directory: %w", err)
 		}
 	}
 
 	if f.deps.OfflineExt {
-		if _, err := db.Exec(`SET autoinstall_known_extensions = false`); err != nil {
+		if _, err := db.ExecContext(ctx, `SET autoinstall_known_extensions = false`); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("disable autoinstall: %w", err)
 		}
 	}
 
-	if _, err := db.Exec(`LOAD vss`); err != nil {
+	if _, err := db.ExecContext(ctx, `LOAD vss`); err != nil {
 		if f.deps.OfflineExt {
 			db.Close()
 			return nil, fmt.Errorf("failed to load vss extension in offline mode (check extension_directory %q): %w", f.deps.ExtensionDir, err)
 		}
-		if _, installErr := db.Exec(`INSTALL vss`); installErr != nil {
+		if _, installErr := db.ExecContext(ctx, `INSTALL vss`); installErr != nil {
 			db.Close()
 			return nil, fmt.Errorf("failed to install vss: %w", installErr)
 		}
-		if _, loadErr := db.Exec(`LOAD vss`); loadErr != nil {
+		if _, loadErr := db.ExecContext(ctx, `LOAD vss`); loadErr != nil {
 			db.Close()
 			return nil, fmt.Errorf("failed to load vss after install: %w", loadErr)
 		}
 	}
 
-	if _, err := db.Exec(`SET hnsw_enable_experimental_persistence = true`); err != nil {
+	if _, err := db.ExecContext(ctx, `SET hnsw_enable_experimental_persistence = true`); err != nil {
 		db.Close()
 		return nil, err
 	}
 
-	memLimit := f.deps.MemoryLimit
-	if memLimit == "" {
-		memLimit = "128MB"
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(`SET memory_limit = '%s'`, quoteSQLString(memLimit))); err != nil {
+		db.Close()
+		return nil, err
 	}
-	_, err = db.Exec(fmt.Sprintf(`
-		SET memory_limit = '%s';
-		PRAGMA threads = 1;
-	`, memLimit))
-	if err != nil {
+	if _, err := db.ExecContext(ctx, `PRAGMA threads = 1`); err != nil {
 		db.Close()
 		return nil, err
 	}
 
 	return db, nil
+}
+
+var duckDBMemoryLimitPattern = regexp.MustCompile(`(?i)^\s*\d+\s*(b|kb|mb|gb|tb)\s*$`)
+
+func normalizeDuckDBMemoryLimit(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		trimmed = "128MB"
+	}
+	if !duckDBMemoryLimitPattern.MatchString(trimmed) {
+		return "", fmt.Errorf("invalid memory limit %q", raw)
+	}
+	return trimmed, nil
 }
 
 func (f *DuckDBArtifactFormat) BuildArtifacts(ctx context.Context, kbID, srcPath string, targetBytes int64) ([]SnapshotShardMetadata, error) {
@@ -295,6 +311,11 @@ func (f *DuckDBArtifactFormat) Upsert(ctx context.Context, req IngestUpsertReque
 		return IngestResult{}, nil
 	}
 
+	preparedDocs, err := f.prepareDocsForUpsert(ctx, req.Docs)
+	if err != nil {
+		return IngestResult{}, err
+	}
+
 	graphBuilder := f.deps.GraphBuilder()
 	if req.Options.GraphEnabled != nil {
 		if *req.Options.GraphEnabled {
@@ -312,10 +333,7 @@ func (f *DuckDBArtifactFormat) Upsert(ctx context.Context, req IngestUpsertReque
 
 	kbDir := filepath.Join(f.deps.CacheDir, req.KBID)
 	dbPath := filepath.Join(kbDir, "vectors.duckdb")
-	seedVec, err := f.deps.Embed(ctx, req.Docs[0].Text)
-	if err != nil {
-		return IngestResult{}, fmt.Errorf("embed doc %q for shard bootstrap: %w", req.Docs[0].ID, err)
-	}
+	seedVec := preparedDocs[0].Embedding
 	if len(seedVec) == 0 {
 		return IngestResult{}, fmt.Errorf("embed doc %q for shard bootstrap: empty embedding", req.Docs[0].ID)
 	}
@@ -329,7 +347,7 @@ func (f *DuckDBArtifactFormat) Upsert(ctx context.Context, req IngestUpsertReque
 	}
 	defer db.Close()
 
-	if err := f.applyUpsert(ctx, db, req.Docs, graphBuilder); err != nil {
+	if err := f.applyUpsert(ctx, db, preparedDocs, graphBuilder); err != nil {
 		return IngestResult{}, err
 	}
 
@@ -625,15 +643,19 @@ func (f *DuckDBArtifactFormat) uploadQueryableSnapshotShards(ctx context.Context
 	estimatedShards := int((activeRows + int64(rowsPerShard) - 1) / int64(rowsPerShard))
 	parts := make([]SnapshotShardMetadata, 0, estimatedShards)
 	totalSize := int64(0)
-	for shardIndex, offset := 0, 0; int64(offset) < activeRows; shardIndex, offset = shardIndex+1, offset+rowsPerShard {
+	processedRows := int64(0)
+	lastDocID := ""
+	for shardIndex := 0; processedRows < activeRows; shardIndex++ {
 		shardPath := filepath.Join(tmpDir, fmt.Sprintf("shard-%05d.duckdb", shardIndex))
-		vectorRows, graphAvailable, err := f.buildShardDBFromSourceRange(ctx, localDBPath, hasTombstones, shardPath, rowsPerShard, offset)
+		vectorRows, graphAvailable, nextDocID, err := f.buildShardDBFromSourceRange(ctx, localDBPath, hasTombstones, shardPath, rowsPerShard, lastDocID)
 		if err != nil {
 			return nil, 0, err
 		}
 		if vectorRows <= 0 {
-			continue
+			return nil, 0, fmt.Errorf("failed to advance shard cursor while building snapshot shards")
 		}
+		lastDocID = nextDocID
+		processedRows += vectorRows
 
 		sha, err := fileContentSHA256(shardPath)
 		if err != nil {
@@ -671,30 +693,34 @@ func (f *DuckDBArtifactFormat) uploadQueryableSnapshotShards(ctx context.Context
 	return parts, totalSize, nil
 }
 
-func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(ctx context.Context, sourceDBPath string, hasTombstones bool, shardPath string, limit, offset int) (int64, bool, error) {
+func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(ctx context.Context, sourceDBPath string, hasTombstones bool, shardPath string, limit int, lastDocID string) (int64, bool, string, error) {
 	if limit <= 0 {
-		return 0, false, fmt.Errorf("limit must be > 0")
-	}
-	if offset < 0 {
-		offset = 0
+		return 0, false, "", fmt.Errorf("limit must be > 0")
 	}
 
 	shardDB, err := f.openConfiguredDB(ctx, shardPath)
 	if err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	defer shardDB.Close()
 
 	if _, err := shardDB.ExecContext(ctx, fmt.Sprintf("ATTACH '%s' AS src (READ_ONLY)", quoteSQLString(sourceDBPath))); err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	defer func() {
 		_, _ = shardDB.ExecContext(context.Background(), "DETACH src")
 	}()
 
-	where := ""
+	whereClauses := make([]string, 0, 2)
 	if hasTombstones {
-		where = "WHERE NOT EXISTS (SELECT 1 FROM src.doc_tombstones t WHERE t.doc_id = d.id)"
+		whereClauses = append(whereClauses, "NOT EXISTS (SELECT 1 FROM src.doc_tombstones t WHERE t.doc_id = d.id)")
+	}
+	if lastDocID != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("d.id > '%s'", quoteSQLString(lastDocID)))
+	}
+	where := ""
+	if len(whereClauses) > 0 {
+		where = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
 	createSQL := fmt.Sprintf(`
@@ -703,20 +729,20 @@ func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(ctx context.Context, 
 		FROM src.docs d
 		%s
 		ORDER BY d.id
-		LIMIT %d OFFSET %d
-	`, where, limit, offset)
+		LIMIT %d
+	`, where, limit)
 	if _, err := shardDB.ExecContext(ctx, createSQL); err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	if _, err := shardDB.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`); err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 
 	if err := EnsureGraphTables(ctx, shardDB); err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
 	if ok, err := sourceGraphTablesReady(ctx, shardDB); err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	} else if ok {
 		if _, err := shardDB.ExecContext(ctx, `
 			INSERT INTO doc_entities (doc_id, entity_id, weight, chunk_id)
@@ -724,7 +750,7 @@ func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(ctx context.Context, 
 			FROM src.doc_entities de
 			JOIN docs d ON d.id = de.doc_id
 		`); err != nil {
-			return 0, false, err
+			return 0, false, "", err
 		}
 		if _, err := shardDB.ExecContext(ctx, `
 			INSERT OR IGNORE INTO entities (id, name)
@@ -732,7 +758,7 @@ func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(ctx context.Context, 
 			FROM src.entities e
 			JOIN doc_entities de ON de.entity_id = e.id
 		`); err != nil {
-			return 0, false, err
+			return 0, false, "", err
 		}
 		if _, err := shardDB.ExecContext(ctx, `
 			INSERT INTO edges (src, dst, weight, rel_type, chunk_id)
@@ -740,19 +766,30 @@ func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(ctx context.Context, 
 			FROM src.edges e
 			JOIN doc_entities de ON de.chunk_id = e.chunk_id
 		`); err != nil {
-			return 0, false, err
+			return 0, false, "", err
 		}
 	}
 
 	var rowCount int64
 	if err := shardDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs`).Scan(&rowCount); err != nil {
-		return 0, false, err
+		return 0, false, "", err
+	}
+	if rowCount <= 0 {
+		if err := checkpointAndCloseDB(ctx, shardDB, "close empty shard db"); err != nil {
+			return 0, false, "", err
+		}
+		return 0, false, lastDocID, nil
+	}
+
+	var maxDocID string
+	if err := shardDB.QueryRowContext(ctx, `SELECT MAX(id) FROM docs`).Scan(&maxDocID); err != nil {
+		return 0, false, "", err
 	}
 	graphAvailable := hasGraphQueryData(ctx, shardDB)
 	if err := checkpointAndCloseDB(ctx, shardDB, "close shard db"); err != nil {
-		return 0, false, err
+		return 0, false, "", err
 	}
-	return rowCount, graphAvailable, nil
+	return rowCount, graphAvailable, maxDocID, nil
 }
 
 func (f *DuckDBArtifactFormat) downloadSnapshotFromShards(ctx context.Context, kbID, dest string) (*SnapshotShardManifest, error) {
@@ -855,7 +892,6 @@ func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(ctx context.C
 	defer db.Close()
 
 	vectorRows := int64(0)
-	graphAvailable := false
 	for i, shard := range shards {
 		partPath := filepath.Join(tmpDir, fmt.Sprintf("in-%05d.duckdb", i))
 		if err := f.deps.BlobStore.Download(ctx, shard.Key, partPath); err != nil {
@@ -863,29 +899,19 @@ func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(ctx context.C
 		}
 
 		alias := fmt.Sprintf("s%d", i)
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("ATTACH '%s' AS %s (READ_ONLY)", quoteSQLString(partPath), alias)); err != nil {
-			return SnapshotShardMetadata{}, err
-		}
-		if i == 0 {
-			if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE TABLE docs AS SELECT * FROM %s.docs WHERE 1=0", alias)); err != nil {
-				_, _ = db.ExecContext(ctx, fmt.Sprintf("DETACH %s", alias))
-				return SnapshotShardMetadata{}, err
-			}
-		}
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("INSERT INTO docs SELECT * FROM %s.docs", alias)); err != nil {
-			_, _ = db.ExecContext(ctx, fmt.Sprintf("DETACH %s", alias))
-			return SnapshotShardMetadata{}, err
-		}
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("DETACH %s", alias)); err != nil {
+		if err := mergeShardIntoDB(ctx, db, alias, partPath, i == 0); err != nil {
 			return SnapshotShardMetadata{}, err
 		}
 
 		vectorRows += shard.VectorRows
-		graphAvailable = graphAvailable || shard.GraphAvailable
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs`).Scan(&vectorRows); err != nil {
+		return SnapshotShardMetadata{}, err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`); err != nil {
 		return SnapshotShardMetadata{}, err
 	}
+	graphAvailable := hasGraphQueryData(ctx, db)
 	if err := checkpointAndCloseDB(ctx, db, "close compacted shard db"); err != nil {
 		return SnapshotShardMetadata{}, err
 	}
@@ -955,7 +981,36 @@ func (f *DuckDBArtifactFormat) ensureGraphModeAvailable(ctx context.Context, kbI
 	return nil
 }
 
-func (f *DuckDBArtifactFormat) applyUpsert(ctx context.Context, db *sql.DB, docs []Document, graphBuilder *GraphBuilder) error {
+type preparedUpsertDoc struct {
+	Doc       Document
+	Embedding []float32
+}
+
+func (f *DuckDBArtifactFormat) prepareDocsForUpsert(ctx context.Context, docs []Document) ([]preparedUpsertDoc, error) {
+	prepared := make([]preparedUpsertDoc, 0, len(docs))
+	for _, doc := range docs {
+		if strings.TrimSpace(doc.ID) == "" {
+			return nil, fmt.Errorf("doc id cannot be empty")
+		}
+		if strings.TrimSpace(doc.Text) == "" {
+			return nil, fmt.Errorf("doc %q text cannot be empty", doc.ID)
+		}
+
+		vec, err := f.deps.Embed(ctx, doc.Text)
+		if err != nil {
+			return nil, fmt.Errorf("embed doc %q: %w", doc.ID, err)
+		}
+		if len(vec) == 0 {
+			return nil, fmt.Errorf("embed doc %q: empty embedding", doc.ID)
+		}
+
+		prepared = append(prepared, preparedUpsertDoc{Doc: doc, Embedding: vec})
+	}
+	return prepared, nil
+}
+
+func (f *DuckDBArtifactFormat) applyUpsert(ctx context.Context, db *sql.DB, docs []preparedUpsertDoc, graphBuilder *GraphBuilder) error {
+
 	if err := ensureDocTombstonesTable(ctx, db); err != nil {
 		return err
 	}
@@ -963,7 +1018,11 @@ func (f *DuckDBArtifactFormat) applyUpsert(ctx context.Context, db *sql.DB, docs
 	var graphResult *GraphBuildResult
 	var err error
 	if graphBuilder != nil {
-		graphResult, err = graphBuilder.Build(ctx, docs)
+		graphDocs := make([]Document, 0, len(docs))
+		for _, prepared := range docs {
+			graphDocs = append(graphDocs, prepared.Doc)
+		}
+		graphResult, err = graphBuilder.Build(ctx, graphDocs)
 		if err != nil {
 			return fmt.Errorf("build graph for upsert docs: %w", err)
 		}
@@ -984,26 +1043,9 @@ func (f *DuckDBArtifactFormat) applyUpsert(ctx context.Context, db *sql.DB, docs
 	}
 	defer stmtUndelete.Close()
 
-	for _, doc := range docs {
-		if strings.TrimSpace(doc.ID) == "" {
-			tx.Rollback()
-			return fmt.Errorf("doc id cannot be empty")
-		}
-		if strings.TrimSpace(doc.Text) == "" {
-			tx.Rollback()
-			return fmt.Errorf("doc %q text cannot be empty", doc.ID)
-		}
-
-		vec, err := f.deps.Embed(ctx, doc.Text)
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("embed doc %q: %w", doc.ID, err)
-		}
-		if len(vec) == 0 {
-			tx.Rollback()
-			return fmt.Errorf("embed doc %q: empty embedding", doc.ID)
-		}
-
+	for _, prepared := range docs {
+		doc := prepared.Doc
+		vec := prepared.Embedding
 		vecStr := formatVectorForSQL(vec)
 		if _, err := tx.ExecContext(ctx, `DELETE FROM docs WHERE id = ?`, doc.ID); err != nil {
 			tx.Rollback()
@@ -1022,8 +1064,8 @@ func (f *DuckDBArtifactFormat) applyUpsert(ctx context.Context, db *sql.DB, docs
 
 	if graphResult != nil {
 		docIDs := make([]string, 0, len(docs))
-		for _, d := range docs {
-			docIDs = append(docIDs, d.ID)
+		for _, prepared := range docs {
+			docIDs = append(docIDs, prepared.Doc.ID)
 		}
 		if err := pruneGraphForDocsTx(ctx, tx, docIDs, true); err != nil {
 			tx.Rollback()
