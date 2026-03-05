@@ -17,6 +17,7 @@ import (
 
 type DuckDBArtifactFormat struct {
 	deps DuckDBArtifactDeps
+	pool shardConnPool
 }
 
 type DuckDBArtifactDeps struct {
@@ -33,6 +34,7 @@ type DuckDBArtifactDeps struct {
 
 	EvictCacheIfNeeded func(context.Context, string) error
 	LockFor            func(string) *sync.Mutex
+	ClosePooledConns   func(pathPrefix string)
 	Metrics            ShardMetricsObserver
 }
 
@@ -81,6 +83,11 @@ func NewDuckDBArtifactFormat(deps DuckDBArtifactDeps) (*DuckDBArtifactFormat, er
 		return nil, fmt.Errorf("%w: %v", ErrArtifactFormatNotConfigured, err)
 	}
 	return &DuckDBArtifactFormat{deps: deps}, nil
+}
+
+// Close drains the shard connection pool
+func (f *DuckDBArtifactFormat) Close() {
+	f.pool.CloseAll()
 }
 
 func (f *DuckDBArtifactFormat) Kind() string {
@@ -291,7 +298,7 @@ func (f *DuckDBArtifactFormat) QueryGraph(ctx context.Context, req GraphQueryReq
 				cancel()
 				return
 			}
-			db, err := f.openConfiguredDB(ctx, localPath)
+			conn, err := f.pool.GetOrOpen(ctx, localPath, f.openConfiguredDB)
 			if err != nil {
 				select {
 				case errCh <- err:
@@ -300,9 +307,10 @@ func (f *DuckDBArtifactFormat) QueryGraph(ctx context.Context, req GraphQueryReq
 				cancel()
 				return
 			}
-			defer db.Close()
+			conn.mu.Lock()
+			defer conn.mu.Unlock()
 
-			shardResults, err := searchExpandedWithDB(ctx, db, req.QueryVec, req.Options.TopK, options)
+			shardResults, err := searchExpandedWithDB(ctx, conn.db, req.QueryVec, req.Options.TopK, options)
 			if err != nil {
 				select {
 				case errCh <- err:
