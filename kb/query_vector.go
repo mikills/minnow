@@ -351,13 +351,14 @@ func (f *DuckDBArtifactFormat) querySingleShardTopK(ctx context.Context, kbID st
 	}
 	f.deps.Metrics.RecordShardCacheAccess(kbID, hit)
 
-	db, err := f.openConfiguredDB(ctx, localPath)
+	conn, err := f.pool.GetOrOpen(ctx, localPath, f.openConfiguredDB)
 	if err != nil {
 		return nil, fmt.Errorf("open shard %s: %w", shard.ShardID, err)
 	}
-	defer db.Close()
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
 
-	results, err := queryTopKWithDB(ctx, db, queryVec, k)
+	results, err := queryTopKWithDB(ctx, conn.db, queryVec, k)
 	if err != nil {
 		return nil, fmt.Errorf("query shard %s: %w", shard.ShardID, err)
 	}

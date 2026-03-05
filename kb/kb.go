@@ -72,6 +72,8 @@ type KB struct {
 	cacheBudgetExceededTotal uint64
 	shardMetricsByKB         map[string]shardMetrics
 
+	closePooledConns func(pathPrefix string)
+
 	mu      sync.Mutex
 	locks   map[string]*sync.Mutex
 	shardGC []delayedShardGCEntry
@@ -223,7 +225,16 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 	}
 
 	if kb.ArtifactFormat == nil {
-		format, err := NewDuckDBArtifactFormat(DuckDBArtifactDeps{
+		// Use a pointer indirection so the closure can reference format after assignment.
+		var format *DuckDBArtifactFormat
+		closePool := func(pathPrefix string) {
+			if format != nil {
+				format.pool.CloseByPrefix(pathPrefix)
+			}
+		}
+
+		var err error
+		format, err = NewDuckDBArtifactFormat(DuckDBArtifactDeps{
 			BlobStore:      kb.BlobStore,
 			ManifestStore:  kb.ManifestStore,
 			CacheDir:       kb.CacheDir,
@@ -236,14 +247,16 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 			EvictCacheIfNeeded: func(ctx context.Context, protectKBID string) error {
 				return kb.evictCacheIfNeeded(ctx, protectKBID)
 			},
-			LockFor: kb.lockFor,
-			Metrics: kb,
+			LockFor:          kb.lockFor,
+			ClosePooledConns: closePool,
+			Metrics:          kb,
 		})
 
 		if err != nil {
 			panic(fmt.Sprintf("kbcore: NewKB(): default DuckDB artifact format: %v", err))
 		}
 		kb.ArtifactFormat = format
+		kb.closePooledConns = closePool
 	}
 
 	return kb
@@ -313,6 +326,13 @@ func (l *KB) lockFor(kbID string) *sync.Mutex {
 		l.locks[kbID] = &sync.Mutex{}
 	}
 	return l.locks[kbID]
+}
+
+// Close releases resources held by the KB, including pooled shard connections.
+func (l *KB) Close() {
+	if f, ok := l.ArtifactFormat.(*DuckDBArtifactFormat); ok {
+		f.Close()
+	}
 }
 
 func (l *KB) Load(ctx context.Context, kbID string) (*sql.DB, error) {

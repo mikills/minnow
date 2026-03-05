@@ -200,6 +200,10 @@ func (l *KB) removeCacheEntry(entry cacheKBEntry) bool {
 	lock.Lock()
 	defer lock.Unlock()
 
+	if l.closePooledConns != nil {
+		l.closePooledConns(entry.path)
+	}
+
 	if err := os.RemoveAll(entry.path); err != nil {
 		l.recordCacheEvictionError()
 		return false
