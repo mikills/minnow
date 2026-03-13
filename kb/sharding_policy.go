@@ -20,6 +20,7 @@ type ShardingPolicy struct {
 	QueryShardLocalTopKMult     int     `json:"query_shard_local_topk_multiplier"`
 	SmallKBMaxShards            int     `json:"small_kb_max_shards"`
 	CompactionEnabled           bool    `json:"compaction_enabled"`
+	CompactionEnabledSet        bool    `json:"-"`
 	CompactionMinShardCount     int     `json:"compaction_min_shard_count"`
 	CompactionTombstoneRatio    float64 `json:"compaction_tombstone_ratio"`
 }
@@ -42,7 +43,7 @@ func DefaultShardingPolicy() ShardingPolicy {
 	}
 }
 
-func normalizeShardingPolicy(policy ShardingPolicy) ShardingPolicy {
+func NormalizeShardingPolicy(policy ShardingPolicy) ShardingPolicy {
 	defaults := DefaultShardingPolicy()
 
 	if policy.ShardTriggerBytes > 0 {
@@ -79,6 +80,10 @@ func normalizeShardingPolicy(policy ShardingPolicy) ShardingPolicy {
 	if policy.CompactionTombstoneRatio > 0 && policy.CompactionTombstoneRatio <= 1 {
 		defaults.CompactionTombstoneRatio = policy.CompactionTombstoneRatio
 	}
+	if policy.CompactionEnabledSet || policy.CompactionEnabled {
+		defaults.CompactionEnabled = policy.CompactionEnabled
+	}
+	defaults.CompactionEnabledSet = policy.CompactionEnabledSet
 
 	return defaults
 }
@@ -142,6 +147,7 @@ func (l *KB) recordShardFanout(kbID string, fanout int, capped bool) {
 	if l == nil || strings.TrimSpace(kbID) == "" {
 		return
 	}
+
 	if fanout < 0 {
 		fanout = 0
 	}
@@ -151,6 +157,7 @@ func (l *KB) recordShardFanout(kbID string, fanout int, capped bool) {
 	if capped {
 		m.FanoutCappedTotal++
 	}
+
 	l.shardMetricsByKB[kbID] = m
 	l.mu.Unlock()
 }
@@ -159,6 +166,7 @@ func (l *KB) recordShardExecution(kbID string, shardCount int) {
 	if l == nil || strings.TrimSpace(kbID) == "" {
 		return
 	}
+
 	if shardCount < 0 {
 		shardCount = 0
 	}
@@ -184,6 +192,7 @@ func (l *KB) recordCompactionResult(kbID string, duration time.Duration, result 
 	if l == nil || strings.TrimSpace(kbID) == "" {
 		return
 	}
+
 	l.mu.Lock()
 	m := l.shardMetricsByKB[kbID]
 	if err != nil {
@@ -202,6 +211,7 @@ func (l *KB) recordManifestCASConflict(kbID string) {
 	if l == nil || strings.TrimSpace(kbID) == "" {
 		return
 	}
+
 	slog.Default().Warn("manifest CAS conflict", "kb_id", kbID, "reason", "manifest_cas_conflict")
 	l.mu.Lock()
 	m := l.shardMetricsByKB[kbID]
@@ -214,6 +224,7 @@ func (l *KB) recordShardCacheAccess(kbID string, hit bool) {
 	if l == nil || strings.TrimSpace(kbID) == "" {
 		return
 	}
+
 	l.mu.Lock()
 	m := l.shardMetricsByKB[kbID]
 	if hit {
@@ -229,6 +240,7 @@ func (l *KB) shardMetricsSnapshot() map[string]shardMetrics {
 	if l == nil {
 		return nil
 	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	out := make(map[string]shardMetrics, len(l.shardMetricsByKB))

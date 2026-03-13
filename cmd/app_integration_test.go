@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mikills/kbcore/kb"
+	kbduckdb "github.com/mikills/kbcore/kb/duckdb"
 	"github.com/mikills/kbcore/kb/testutil"
 
 	miniredis "github.com/alicebob/miniredis/v2"
@@ -60,6 +61,12 @@ func setupAppTestWithOptions(t *testing.T, embedder kb.Embedder, kbID string, op
 	kbOpts = append(kbOpts, opts...)
 
 	loader := kb.NewKB(blobStore, cacheDir, kbOpts...)
+
+	af, err := kbduckdb.NewArtifactFormat(kbduckdb.NewDepsFromKB(loader,
+		kbduckdb.WithMemoryLimit("128MB"),
+	))
+	require.NoError(t, err)
+	require.NoError(t, loader.RegisterFormat(af))
 
 	app := NewApp(loader, AppConfig{Address: "127.0.0.1:0"})
 	require.NoError(t, app.Start())

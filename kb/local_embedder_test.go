@@ -24,6 +24,13 @@ func TestLocalEmbedder(t *testing.T) {
 		assert.Contains(t, err.Error(), "empty")
 	})
 
+	t.Run("zero_value_returns_error_not_panic", func(t *testing.T) {
+		var e LocalEmbedder
+		_, err := e.Embed(context.Background(), "hello")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidEmbeddingDimension)
+	})
+
 	t.Run("deterministic", func(t *testing.T) {
 		e, err := NewLocalEmbedder(128)
 		require.NoError(t, err)

@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/mikills/kbcore/kb"
+	kbduckdb "github.com/mikills/kbcore/kb/duckdb"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -29,14 +30,17 @@ func main() {
 	blobStore := kb.NewS3BlobStore(s3Client, "my-knowledge-bases", "prod/")
 
 	knowledgeBase := kb.NewKB(blobStore, "/tmp/kb-cache")
+	artifactFormat, err := kbduckdb.NewArtifactFormat(kbduckdb.NewDepsFromKB(knowledgeBase,
+		kbduckdb.WithMemoryLimit("128MB"),
+	))
 
-	// Use KB normally - it will download from S3 on first access
-	// and cache locally for subsequent accesses
-	db, err := knowledgeBase.Load(ctx, "my-kb")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
 
-	fmt.Println("Successfully loaded KB from S3")
+	if err := knowledgeBase.RegisterFormat(artifactFormat); err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("Successfully configured KB + DuckDB format for S3-backed storage")
 }

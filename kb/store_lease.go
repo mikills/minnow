@@ -53,23 +53,27 @@ type WriteLeaseManager interface {
 // falling back to an in-memory manager and defaultWriteLeaseTTL when either is
 // unset. This ensures single-pod deployments work without explicit configuration.
 func (l *KB) writeLeaseManagerAndTTL() (WriteLeaseManager, time.Duration) {
+	l.mu.Lock()
 	leaseManager := l.WriteLeaseManager
+	ttl := l.WriteLeaseTTL
+	l.mu.Unlock()
+
 	if leaseManager == nil {
 		leaseManager = NewInMemoryWriteLeaseManager()
 	}
-	ttl := l.WriteLeaseTTL
 	if ttl <= 0 {
 		ttl = defaultWriteLeaseTTL
 	}
+
 	return leaseManager, ttl
 }
 
-// acquireWriteLease acquires a write lease for kbID and returns the manager
+// AcquireWriteLease acquires a write lease for kbID and returns the manager
 // and lease. The caller must defer leaseManager.Release(context.Background(), lease)
 // regardless of subsequent errors to avoid holding the lease until TTL expiry.
 //
 // Conflicts are logged at WARN level; other errors at ERROR level.
-func (l *KB) acquireWriteLease(ctx context.Context, kbID string) (WriteLeaseManager, *WriteLease, error) {
+func (l *KB) AcquireWriteLease(ctx context.Context, kbID string) (WriteLeaseManager, *WriteLease, error) {
 	leaseManager, ttl := l.writeLeaseManagerAndTTL()
 	lease, err := leaseManager.Acquire(ctx, kbID, ttl)
 	if err != nil {
@@ -80,5 +84,6 @@ func (l *KB) acquireWriteLease(ctx context.Context, kbID string) (WriteLeaseMana
 		}
 		return nil, nil, fmt.Errorf("acquire write lease: %w", err)
 	}
+
 	return leaseManager, lease, nil
 }
