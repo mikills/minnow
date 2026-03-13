@@ -3,7 +3,6 @@ package kb
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -57,7 +56,6 @@ type TestHarness struct {
 	blobRoot     string
 	cacheDir     string
 	embedder     Embedder
-	memLimit     string
 	fixturePath  string
 	extraOptions []KBOption
 
@@ -70,21 +68,14 @@ type TestHarness struct {
 // The harness will create temporary directories and clean them up automatically.
 func NewTestHarness(t *testing.T, kbID string) *TestHarness {
 	return &TestHarness{
-		t:        t,
-		kbID:     kbID,
-		memLimit: "128MB",
+		t:    t,
+		kbID: kbID,
 	}
 }
 
 // WithEmbedder sets a custom embedder for the harness.
 func (h *TestHarness) WithEmbedder(embedder Embedder) *TestHarness {
 	h.embedder = embedder
-	return h
-}
-
-// WithMemLimit sets the memory limit for DuckDB (e.g., "128MB", "1GB").
-func (h *TestHarness) WithMemLimit(limit string) *TestHarness {
-	h.memLimit = limit
 	return h
 }
 
@@ -124,6 +115,8 @@ func (h *TestHarness) WithFixture(fixture *TestFixture) *TestHarness {
 
 // Setup initializes the test environment.
 // This creates temporary directories and initializes the KB.
+// Tests that need a specific ArtifactFormat must register one via
+// WithArtifactFormat(), WithFormats(), or call RegisterFormat() after Setup().
 func (h *TestHarness) Setup() *TestHarness {
 	if h.initialized {
 		h.t.Fatal("Harness already initialized")
@@ -157,7 +150,7 @@ func (h *TestHarness) Setup() *TestHarness {
 	blobStore := &LocalBlobStore{Root: h.blobRoot}
 
 	// Build options list
-	opts := []KBOption{WithMemoryLimit(h.memLimit)}
+	var opts []KBOption
 	if h.embedder != nil {
 		opts = append(opts, WithEmbedder(h.embedder))
 	}
@@ -181,8 +174,6 @@ func (h *TestHarness) Cleanup() {
 		h.db = nil
 	}
 
-	// KB doesn't have a Close method, but temp dirs are cleaned up by t.TempDir()
-
 	h.cleanedUp = true
 }
 
@@ -200,9 +191,19 @@ func (h *TestHarness) DBContext(ctx context.Context) *sql.DB {
 	}
 
 	if h.db == nil {
-		db, err := h.kb.Load(ctx, h.kbID)
+		format, err := h.kb.resolveFormat(ctx, h.kbID)
 		if err != nil {
-			h.t.Fatalf("Failed to load KB: %v", err)
+			h.t.Fatalf("Failed to resolve format: %v", err)
+		}
+		loader, ok := format.(interface {
+			PrepareAndOpenDB(context.Context, string) (*sql.DB, error)
+		})
+		if !ok {
+			h.t.Fatalf("Format %q does not support DB load", format.Kind())
+		}
+		db, err := loader.PrepareAndOpenDB(ctx, h.kbID)
+		if err != nil {
+			h.t.Fatalf("Failed to open KB DB: %v", err)
 		}
 		h.db = db
 	}
@@ -265,43 +266,4 @@ func copyHarnessFixture(src, dst string) error {
 	}
 
 	return dstFile.Sync()
-}
-
-// testOpenConfiguredDB opens a DuckDB file with the standard configuration
-// (vss extension, HNSW persistence, memory limit, threads) using the KB's
-// artifact format. Tests should use this instead of the removed KB.openConfiguredDB.
-// When the KB has no ArtifactFormat, a temporary DuckDBArtifactFormat is
-// created with the KB's config values for test convenience.
-func testOpenConfiguredDB(kb *KB, ctx context.Context, dbPath string) (*sql.DB, error) {
-	if f, ok := kb.ArtifactFormat.(*DuckDBArtifactFormat); ok {
-		return f.openConfiguredDB(ctx, dbPath)
-	}
-	// Fallback for tests that construct a bare KB{} without NewKB.
-	f := &DuckDBArtifactFormat{
-		deps: DuckDBArtifactDeps{
-			MemoryLimit:  kb.MemoryLimit,
-			ExtensionDir: kb.ExtensionDir,
-			OfflineExt:   kb.OfflineExt,
-		},
-	}
-	return f.openConfiguredDB(ctx, dbPath)
-}
-
-// testLoadVSS loads the vss extension into a raw *sql.DB for test fixture
-// builders that bypass openConfiguredDB. It uses the local extension directory
-// so no network access is needed.
-func testLoadVSS(db *sql.DB) error {
-	extDir := resolveExtensionDir()
-	if extDir != "" {
-		if _, err := db.Exec(fmt.Sprintf(`SET extension_directory = '%s'`, extDir)); err != nil {
-			return fmt.Errorf("set extension_directory: %w", err)
-		}
-	}
-	if _, err := db.Exec(`SET autoinstall_known_extensions = false`); err != nil {
-		return fmt.Errorf("disable autoinstall: %w", err)
-	}
-	if _, err := db.Exec(`LOAD vss`); err != nil {
-		return fmt.Errorf("load vss: %w", err)
-	}
-	return nil
 }

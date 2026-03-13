@@ -17,10 +17,11 @@ type UpsertDocsOptions struct {
 
 // UpsertDocs inserts or updates documents in the KB.
 func (l *KB) UpsertDocs(ctx context.Context, kbID string, docs []Document) error {
-	if l.ArtifactFormat == nil {
-		return ErrArtifactFormatNotConfigured
+	format, err := l.resolveFormat(ctx, kbID)
+	if err != nil {
+		return err
 	}
-	_, err := l.ArtifactFormat.Upsert(ctx, IngestUpsertRequest{KBID: kbID, Docs: docs, Upload: false, Options: UpsertDocsOptions{}})
+	_, err = format.Ingest(ctx, IngestUpsertRequest{KBID: kbID, Docs: docs, Upload: false, Options: UpsertDocsOptions{}})
 	return err
 }
 
@@ -42,27 +43,31 @@ func (l *KB) UpsertDocsAndUploadWithRetry(ctx context.Context, kbID string, docs
 // UpsertDocsAndUploadWithRetryAndOptions upserts docs and uploads with retry logic.
 func (l *KB) UpsertDocsAndUploadWithRetryAndOptions(ctx context.Context, kbID string, docs []Document, maxRetries int, opts UpsertDocsOptions) error {
 	return runWithUploadRetry(ctx, "upsert_docs_upload", maxRetries, l.RetryObserver, func() error {
-		if l.ArtifactFormat == nil {
-			return ErrArtifactFormatNotConfigured
+		format, err := l.resolveFormat(ctx, kbID)
+		if err != nil {
+			return err
 		}
-		_, err := l.ArtifactFormat.Upsert(ctx, IngestUpsertRequest{KBID: kbID, Docs: docs, Upload: true, Options: opts})
+
+		_, err = format.Ingest(ctx, IngestUpsertRequest{KBID: kbID, Docs: docs, Upload: true, Options: opts})
 		return err
 	})
 }
 
 func shouldActivateSharding(policy ShardingPolicy, snapshotBytes int64, vectorRows int64) bool {
-	resolved := normalizeShardingPolicy(policy)
+	resolved := NormalizeShardingPolicy(policy)
 	if snapshotBytes >= resolved.ShardTriggerBytes {
 		return true
 	}
+
 	if vectorRows >= int64(resolved.ShardTriggerVectorRows) {
 		return true
 	}
+
 	return false
 }
 
 func shardingActivationReason(policy ShardingPolicy, snapshotBytes int64, vectorRows int64) string {
-	resolved := normalizeShardingPolicy(policy)
+	resolved := NormalizeShardingPolicy(policy)
 	switch {
 	case snapshotBytes >= resolved.ShardTriggerBytes && vectorRows >= int64(resolved.ShardTriggerVectorRows):
 		return "bytes_and_vector_rows"

@@ -14,6 +14,7 @@ import (
 
 	appcmd "github.com/mikills/kbcore/cmd"
 	kb "github.com/mikills/kbcore/kb"
+	kbduckdb "github.com/mikills/kbcore/kb/duckdb"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	mongooptions "go.mongodb.org/mongo-driver/v2/mongo/options"
 )
@@ -31,7 +32,7 @@ func main() {
 	graphURL := getenvDefault("KBCORE_GRAPH_URL", "http://localhost:11434")
 	graphModel := getenvDefault("KBCORE_GRAPH_MODEL", "gemma3:4b")
 	graphParallelism := getenvIntDefault(logger, "KBCORE_GRAPH_PARALLELISM", 4)
-	extDir := getenvDefault("KBCORE_DUCKDB_EXTENSION_DIR", kb.DefaultExtensionDir)
+	extDir := getenvDefault("KBCORE_DUCKDB_EXTENSION_DIR", kbduckdb.DefaultExtensionDir)
 	extOffline := getenvBoolDefault(logger, "KBCORE_DUCKDB_EXTENSION_OFFLINE", true)
 	shardingPolicy := shardingPolicyFromEnv(logger)
 	addr := getenvDefault("KBCORE_HTTP_ADDR", "127.0.0.1:8080")
@@ -74,11 +75,8 @@ func main() {
 	}
 
 	kbOpts := []kb.KBOption{
-		kb.WithMemoryLimit(memLimit),
 		kb.WithEmbedder(embedder),
 		kb.WithShardingPolicy(shardingPolicy),
-		kb.WithDuckDBExtensionDir(extDir),
-		kb.WithDuckDBOfflineExtensions(extOffline),
 	}
 	if manifestStoreOpt != nil {
 		kbOpts = append(kbOpts, manifestStoreOpt)
@@ -93,6 +91,20 @@ func main() {
 		logger.Info("graph extraction disabled", "hint", "set KBCORE_GRAPH_ENABLED=true to enable")
 	}
 	loader := kb.NewKB(store, cacheDir, kbOpts...)
+
+	af, err := kbduckdb.NewArtifactFormat(kbduckdb.NewDepsFromKB(loader,
+		kbduckdb.WithMemoryLimit(memLimit),
+		kbduckdb.WithExtensionDir(extDir),
+		kbduckdb.WithOfflineExt(extOffline),
+	))
+	if err != nil {
+		logger.Error("failed to create artifact format", "error", err)
+		os.Exit(1)
+	}
+	if err := loader.RegisterFormat(af); err != nil {
+		logger.Error("failed to register artifact format", "error", err)
+		os.Exit(1)
+	}
 
 	logger.Info(
 		"configured sharding policy",
@@ -294,6 +306,9 @@ func parseShardingPolicyFromEnv(getenv func(string) string) (kb.ShardingPolicy, 
 		if call != nil {
 			return kb.ShardingPolicy{}, call
 		}
+	}
+	if strings.TrimSpace(getenv("KBCORE_COMPACTION_ENABLED")) != "" {
+		policy.CompactionEnabledSet = true
 	}
 
 	const maxSafeFanout = 64

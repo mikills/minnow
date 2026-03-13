@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"time"
 )
+
 
 // BlobManifestStore implements ManifestStore on top of a BlobStore.
 // It absorbs all temp-file mechanics for manifest serialization.
@@ -16,19 +19,11 @@ type BlobManifestStore struct {
 }
 
 func (s *BlobManifestStore) manifestKey(kbID string) string {
-	return shardManifestKey(kbID)
+	return ShardManifestKey(kbID)
 }
 
 func (s *BlobManifestStore) Get(ctx context.Context, kbID string) (*ManifestDocument, error) {
 	key := s.manifestKey(kbID)
-
-	info, err := s.Store.Head(ctx, key)
-	if err != nil {
-		if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
-			return nil, ErrManifestNotFound
-		}
-		return nil, err
-	}
 
 	tmpDir, err := os.MkdirTemp("", "kbcore-manifest-get-*")
 	if err != nil {
@@ -37,11 +32,44 @@ func (s *BlobManifestStore) Get(ctx context.Context, kbID string) (*ManifestDocu
 	defer os.RemoveAll(tmpDir)
 
 	manifestPath := filepath.Join(tmpDir, "manifest.json")
-	if err := s.Store.Download(ctx, key, manifestPath); err != nil {
-		if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
-			return nil, ErrManifestNotFound
+
+	var info *BlobObjectInfo
+	const maxAttempts = 4
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		info, err = s.Store.Head(ctx, key)
+		if err != nil {
+			if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
+				return nil, ErrManifestNotFound
+			}
+			return nil, err
 		}
-		return nil, err
+
+		if err := s.Store.Download(ctx, key, manifestPath); err != nil {
+			if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
+				return nil, ErrManifestNotFound
+			}
+			return nil, err
+		}
+
+		latest, headErr := s.Store.Head(ctx, key)
+		if headErr != nil {
+			if errors.Is(headErr, ErrBlobNotFound) || errors.Is(headErr, os.ErrNotExist) {
+				return nil, ErrManifestNotFound
+			}
+			return nil, headErr
+		}
+		if latest.Version == info.Version {
+			break
+		}
+		if attempt == maxAttempts-1 {
+			return nil, fmt.Errorf("manifest changed during read: %w", ErrBlobVersionMismatch)
+		}
+		// Backoff before retry: 10ms, 20ms, 40ms + up to 5ms jitter.
+		backoff := time.Duration(5<<uint(attempt+1)) * time.Millisecond
+		jitter := time.Duration(rand.Int63n(int64(5 * time.Millisecond)))
+		if err := sleepWithContext(ctx, backoff+jitter); err != nil {
+			return nil, err
+		}
 	}
 
 	data, err := os.ReadFile(manifestPath)
@@ -55,11 +83,10 @@ func (s *BlobManifestStore) Get(ctx context.Context, kbID string) (*ManifestDocu
 	}
 
 	if manifest.FormatKind == "" {
-		manifest.FormatKind = DuckDBFormatKind
+		manifest.FormatKind = "duckdb_sharded" // legacy default
 	}
-
 	if manifest.FormatVersion <= 0 {
-		manifest.FormatVersion = DuckDBFormatVersion
+		manifest.FormatVersion = 1 // legacy default
 	}
 
 	return &ManifestDocument{

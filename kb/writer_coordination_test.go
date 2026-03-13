@@ -134,7 +134,7 @@ func TestWriteLeaseInjectedManager(t *testing.T) {
 	localPath := filepath.Join(harness.CacheDir(), "local.duckdb")
 	require.NoError(t, os.WriteFile(localPath, []byte("v1"), 0o644))
 
-	_, err := harness.KB().UploadSnapshotShardedIfMatch(ctx, "kb-opt", localPath, "", defaultSnapshotShardSize)
+	_, err := harness.KB().UploadSnapshotShardedIfMatch(ctx, "kb-opt", localPath, "", DefaultSnapshotShardSize)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrWriteLeaseConflict))
 }

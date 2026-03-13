@@ -30,9 +30,16 @@ package kb
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 )
+
+// GraphSink persists graph build results incrementally. Implementations
+// must create any required tables in EnsureGraphTables and write batch
+// results in InsertGraphBuildResult.
+type GraphSink interface {
+	EnsureGraphTables(ctx context.Context) error
+	InsertGraphBuildResult(ctx context.Context, result *GraphBuildResult) error
+}
 
 // EntityCandidate is a raw entity name extracted by a Grapher.
 type EntityCandidate struct {
@@ -142,6 +149,7 @@ func (b *GraphBuilder) buildGraph(ctx context.Context, docs []Document, sink fun
 	allChunks := make([]Chunk, 0)
 	entityChunkMappings := make([]EntityChunkMapping, 0)
 	pendingEntities := make([]GraphEntity, 0)
+	pendingEntityChunkMappings := make([]EntityChunkMapping, 0)
 
 	flush := func(chunks []Chunk, extraction *GraphExtraction) error {
 		if extraction == nil {
@@ -154,23 +162,29 @@ func (b *GraphBuilder) buildGraph(ctx context.Context, docs []Document, sink fun
 			if ent.Name == "" {
 				continue
 			}
+
 			id, err := canonicalize(ent.Name)
 			if err != nil {
 				return err
 			}
+
 			if id == "" {
 				continue
 			}
+
 			if _, ok := entityMap[id]; !ok {
 				entity := GraphEntity{ID: id, Name: ent.Name}
 				entityMap[id] = entity
 				pendingEntities = append(pendingEntities, entity)
 			}
+
 			if ent.ChunkID != "" {
-				entityChunkMappings = append(entityChunkMappings, EntityChunkMapping{
+				mapping := EntityChunkMapping{
 					EntityID: id,
 					ChunkID:  ent.ChunkID,
-				})
+				}
+				entityChunkMappings = append(entityChunkMappings, mapping)
+				pendingEntityChunkMappings = append(pendingEntityChunkMappings, mapping)
 			}
 		}
 
@@ -178,21 +192,26 @@ func (b *GraphBuilder) buildGraph(ctx context.Context, docs []Document, sink fun
 			if edge.Src == "" || edge.Dst == "" {
 				continue
 			}
+
 			srcID, err := canonicalize(edge.Src)
 			if err != nil {
 				return err
 			}
+
 			dstID, err := canonicalize(edge.Dst)
 			if err != nil {
 				return err
 			}
+
 			if srcID == "" || dstID == "" {
 				continue
 			}
+
 			weight := edge.Weight
 			if weight <= 0 {
 				weight = 1.0
 			}
+
 			batchEdges = append(batchEdges, GraphEdge{
 				SrcID:   srcID,
 				DstID:   dstID,
@@ -207,15 +226,18 @@ func (b *GraphBuilder) buildGraph(ctx context.Context, docs []Document, sink fun
 
 		if sink != nil {
 			batchResult := &GraphBuildResult{
-				Chunks:   chunks,
-				Entities: pendingEntities,
-				Edges:    batchEdges,
+				Chunks:              chunks,
+				Entities:            pendingEntities,
+				Edges:               batchEdges,
+				EntityChunkMappings: pendingEntityChunkMappings,
 			}
+
 			if err := sink(ctx, batchResult); err != nil {
 				return err
 			}
 		}
 		pendingEntities = pendingEntities[:0]
+		pendingEntityChunkMappings = pendingEntityChunkMappings[:0]
 
 		return nil
 	}
@@ -233,9 +255,11 @@ func (b *GraphBuilder) buildGraph(ctx context.Context, docs []Document, sink fun
 				if err != nil {
 					return nil, err
 				}
+
 				if err := flush(chunkBatch, extraction); err != nil {
 					return nil, err
 				}
+
 				chunkBatch = chunkBatch[:0]
 			}
 		}
@@ -246,6 +270,7 @@ func (b *GraphBuilder) buildGraph(ctx context.Context, docs []Document, sink fun
 		if err != nil {
 			return nil, err
 		}
+
 		if err := flush(chunkBatch, extraction); err != nil {
 			return nil, err
 		}
@@ -271,17 +296,20 @@ func (b *GraphBuilder) Build(ctx context.Context, docs []Document) (*GraphBuildR
 	return b.buildGraph(ctx, docs, nil)
 }
 
-// BuildAndInsert runs the pipeline and persists each batch to DuckDB as it
-// completes, keeping peak memory proportional to BatchSize. Graph tables are
-// created if they do not already exist before the first batch is written.
-func (b *GraphBuilder) BuildAndInsert(ctx context.Context, db *sql.DB, docs []Document) (*GraphBuildResult, error) {
-	if db == nil {
-		return nil, fmt.Errorf("db is required")
+// BuildAndInsert runs the pipeline and persists each batch via the given
+// GraphSink as it completes, keeping peak memory proportional to BatchSize.
+// Graph tables are created if they do not already exist before the first
+// batch is written.
+func (b *GraphBuilder) BuildAndInsert(ctx context.Context, sink GraphSink, docs []Document) (*GraphBuildResult, error) {
+	if sink == nil {
+		return nil, fmt.Errorf("graph sink is required")
 	}
-	if err := EnsureGraphTables(ctx, db); err != nil {
+
+	if err := sink.EnsureGraphTables(ctx); err != nil {
 		return nil, err
 	}
+
 	return b.buildGraph(ctx, docs, func(ctx context.Context, batch *GraphBuildResult) error {
-		return InsertGraphBuildResult(ctx, db, batch)
+		return sink.InsertGraphBuildResult(ctx, batch)
 	})
 }
