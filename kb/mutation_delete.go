@@ -4,10 +4,13 @@ import "context"
 
 // DeleteDocs deletes documents from the KB.
 func (l *KB) DeleteDocs(ctx context.Context, kbID string, docIDs []string, opts DeleteDocsOptions) error {
-	if l.ArtifactFormat == nil {
-		return ErrArtifactFormatNotConfigured
+	format, err := l.resolveFormat(ctx, kbID)
+	if err != nil {
+		return err
 	}
-	_, err := l.ArtifactFormat.Delete(ctx, IngestDeleteRequest{KBID: kbID, DocIDs: docIDs, Upload: false, Options: opts})
+
+	_, err = format.Delete(ctx, IngestDeleteRequest{KBID: kbID, DocIDs: docIDs, Upload: false, Options: opts})
+
 	return err
 }
 
@@ -19,10 +22,12 @@ func (l *KB) DeleteDocsAndUpload(ctx context.Context, kbID string, docIDs []stri
 // DeleteDocsAndUploadWithRetry deletes docs and uploads with retry logic.
 func (l *KB) DeleteDocsAndUploadWithRetry(ctx context.Context, kbID string, docIDs []string, opts DeleteDocsOptions, maxRetries int) error {
 	return runWithUploadRetry(ctx, "delete_docs_upload", maxRetries, l.RetryObserver, func() error {
-		if l.ArtifactFormat == nil {
-			return ErrArtifactFormatNotConfigured
+		format, err := l.resolveFormat(ctx, kbID)
+		if err != nil {
+			return err
 		}
-		_, err := l.ArtifactFormat.Delete(ctx, IngestDeleteRequest{KBID: kbID, DocIDs: docIDs, Upload: true, Options: opts})
+
+		_, err = format.Delete(ctx, IngestDeleteRequest{KBID: kbID, DocIDs: docIDs, Upload: true, Options: opts})
 		return err
 	})
 }

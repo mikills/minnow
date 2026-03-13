@@ -2,7 +2,6 @@ package kb
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 )
 
@@ -60,14 +59,11 @@ type ArtifactFormat interface {
 	BuildArtifacts(ctx context.Context, kbID, srcPath string, targetBytes int64) ([]SnapshotShardMetadata, error)
 	QueryRag(ctx context.Context, req RagQueryRequest) ([]ExpandedResult, error)
 	QueryGraph(ctx context.Context, req GraphQueryRequest) ([]ExpandedResult, error)
-	Upsert(ctx context.Context, req IngestUpsertRequest) (IngestResult, error)
+	Ingest(ctx context.Context, req IngestUpsertRequest) (IngestResult, error)
 	Delete(ctx context.Context, req IngestDeleteRequest) (IngestResult, error)
-	PrepareAndOpenDB(ctx context.Context, kbID string) (*sql.DB, error)
-	BuildAndUploadCompactionReplacement(ctx context.Context, kbID string, shards []SnapshotShardMetadata) (SnapshotShardMetadata, error)
-	DownloadSnapshotFromShards(ctx context.Context, kbID, dest string) (*SnapshotShardManifest, error)
 }
 
-func validateRagQueryRequest(req RagQueryRequest) error {
+func ValidateRagQueryRequest(req RagQueryRequest) error {
 	if req.Options.TopK <= 0 {
 		return fmt.Errorf("%w: top_k must be > 0", ErrInvalidQueryRequest)
 	}
@@ -80,7 +76,7 @@ func validateRagQueryRequest(req RagQueryRequest) error {
 	return nil
 }
 
-func validateGraphQueryRequest(req GraphQueryRequest) error {
+func ValidateGraphQueryRequest(req GraphQueryRequest) error {
 	if req.Options.TopK <= 0 {
 		return fmt.Errorf("%w: top_k must be > 0", ErrInvalidQueryRequest)
 	}

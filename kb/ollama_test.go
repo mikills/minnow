@@ -12,10 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// -----------------------------------------------------------------------------
-// OllamaEmbedder tests
-// -----------------------------------------------------------------------------
-
 func TestOllamaEmbedder(t *testing.T) {
 	testCases := []struct {
 		name        string
@@ -85,10 +81,6 @@ func TestOllamaEmbedder(t *testing.T) {
 		})
 	}
 }
-
-// -----------------------------------------------------------------------------
-// OllamaGrapher tests
-// -----------------------------------------------------------------------------
 
 func ollamaGrapherResponse(innerJSON string) []byte {
 	body, err := json.Marshal(ollamaGenerateResponse{Response: innerJSON})

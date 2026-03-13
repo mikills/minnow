@@ -2,15 +2,12 @@ package kb
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io"
 	"strings"
 	"sync"
 	"time"
-
-	_ "github.com/marcboeker/go-duckdb"
 )
 
 // Embedder generates embeddings for text inputs.
@@ -48,13 +45,9 @@ type Chunker interface {
 // KB is the core knowledge base orchestrator for loading, querying,
 // mutating, uploading, and maintaining HNSW indices.
 type KB struct {
-	BlobStore      BlobStore
-	ManifestStore  ManifestStore
-	ArtifactFormat ArtifactFormat
-	CacheDir       string
-	MemoryLimit    string
-	ExtensionDir   string
-	OfflineExt     bool
+	BlobStore     BlobStore
+	ManifestStore ManifestStore
+	CacheDir      string
 	Embedder       Embedder
 	GraphBuilder   *GraphBuilder
 
@@ -72,7 +65,10 @@ type KB struct {
 	cacheBudgetExceededTotal uint64
 	shardMetricsByKB         map[string]shardMetrics
 
-	closePooledConns func(pathPrefix string)
+	formatMu          sync.RWMutex
+	formatRegistry    map[string]ArtifactFormat
+	defaultFormatKind string
+	initErr           error
 
 	mu      sync.Mutex
 	locks   map[string]*sync.Mutex
@@ -82,57 +78,10 @@ type KB struct {
 // KBOption configures KB instances.
 type KBOption func(*KB)
 
-// WithMemoryLimit sets the memory limit for DuckDB.
-func WithMemoryLimit(limit string) KBOption {
-	return func(kb *KB) {
-		if limit != "" {
-			kb.MemoryLimit = limit
-		}
-	}
-}
-
 // WithEmbedder sets the embedder for generating document embeddings.
 func WithEmbedder(embedder Embedder) KBOption {
 	return func(kb *KB) {
 		kb.Embedder = embedder
-	}
-}
-
-// DefaultExtensionDir is the directory name for pre-downloaded DuckDB extensions.
-const DefaultExtensionDir = ".duckdb/extensions"
-
-// resolveExtensionDir walks up from the working directory to find a
-// DefaultExtensionDir directory. Returns the absolute path if found, or "".
-func resolveExtensionDir() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	for {
-		candidate := filepath.Join(dir, DefaultExtensionDir)
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
-		}
-		dir = parent
-	}
-}
-
-// WithDuckDBExtensionDir sets the root directory for pre-downloaded DuckDB extensions.
-func WithDuckDBExtensionDir(dir string) KBOption {
-	return func(kb *KB) {
-		kb.ExtensionDir = dir
-	}
-}
-
-// WithDuckDBOfflineExtensions controls offline extension mode.
-// When true, extensions are only LOADed (never INSTALLed at runtime).
-func WithDuckDBOfflineExtensions(offline bool) KBOption {
-	return func(kb *KB) {
-		kb.OfflineExt = offline
 	}
 }
 
@@ -143,9 +92,27 @@ func WithManifestStore(store ManifestStore) KBOption {
 	}
 }
 
+// WithArtifactFormat registers a single artifact format.
+// When multiple formats are registered, the first registered format becomes the
+// default for new KBs; call SetDefaultFormatKind after construction to override.
 func WithArtifactFormat(format ArtifactFormat) KBOption {
 	return func(kb *KB) {
-		kb.ArtifactFormat = format
+		if err := kb.RegisterFormat(format); err != nil {
+			kb.setInitErr(fmt.Errorf("with artifact format: %w", err))
+		}
+	}
+}
+
+// WithFormats registers multiple artifact formats in order.
+// When multiple formats are registered, the first registered format becomes the
+// default for new KBs; call SetDefaultFormatKind after construction to override.
+func WithFormats(formats ...ArtifactFormat) KBOption {
+	return func(kb *KB) {
+		for _, f := range formats {
+			if err := kb.RegisterFormat(f); err != nil {
+				kb.setInitErr(fmt.Errorf("with formats: %w", err))
+			}
+		}
 	}
 }
 
@@ -181,7 +148,17 @@ func WithWriteLeaseTTL(ttl time.Duration) KBOption {
 // WithShardingPolicy sets sharding/query/compaction policy thresholds.
 func WithShardingPolicy(policy ShardingPolicy) KBOption {
 	return func(kb *KB) {
-		kb.ShardingPolicy = normalizeShardingPolicy(policy)
+		kb.ShardingPolicy = NormalizeShardingPolicy(policy)
+	}
+}
+
+// WithCompactionEnabled overrides compaction enablement in sharding policy.
+func WithCompactionEnabled(enabled bool) KBOption {
+	return func(kb *KB) {
+		policy := kb.ShardingPolicy
+		policy.CompactionEnabled = enabled
+		policy.CompactionEnabledSet = true
+		kb.ShardingPolicy = NormalizeShardingPolicy(policy)
 	}
 }
 
@@ -200,16 +177,17 @@ func WithCacheEntryTTL(ttl time.Duration) KBOption {
 }
 
 // NewKB creates a new KB instance with the given blob store and cache directory.
+// Callers must provide at least one ArtifactFormat via WithArtifactFormat,
+// WithFormats, or RegisterFormat; without one, query/ingest/delete
+// operations will return ErrArtifactFormatNotConfigured.
 func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 	kb := &KB{
 		BlobStore:         bs,
 		CacheDir:          cacheDir,
-		MemoryLimit:       "128MB",
-		ExtensionDir:      resolveExtensionDir(),
-		OfflineExt:        true,
 		WriteLeaseManager: NewInMemoryWriteLeaseManager(),
 		WriteLeaseTTL:     defaultWriteLeaseTTL,
-		ShardingPolicy:    normalizeShardingPolicy(ShardingPolicy{}),
+		ShardingPolicy:    NormalizeShardingPolicy(ShardingPolicy{}),
+		formatRegistry:    make(map[string]ArtifactFormat),
 		locks:             make(map[string]*sync.Mutex),
 		shardMetricsByKB:  make(map[string]shardMetrics),
 	}
@@ -224,52 +202,7 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 		kb.ManifestStore = &BlobManifestStore{Store: kb.BlobStore}
 	}
 
-	if kb.ArtifactFormat == nil {
-		// Use a pointer indirection so the closure can reference format after assignment.
-		var format *DuckDBArtifactFormat
-		closePool := func(pathPrefix string) {
-			if format != nil {
-				format.pool.CloseByPrefix(pathPrefix)
-			}
-		}
-
-		var err error
-		format, err = NewDuckDBArtifactFormat(DuckDBArtifactDeps{
-			BlobStore:      kb.BlobStore,
-			ManifestStore:  kb.ManifestStore,
-			CacheDir:       kb.CacheDir,
-			MemoryLimit:    kb.MemoryLimit,
-			ExtensionDir:   kb.ExtensionDir,
-			OfflineExt:     kb.OfflineExt,
-			ShardingPolicy: kb.ShardingPolicy,
-			Embed:          kb.Embed,
-			GraphBuilder:   func() *GraphBuilder { return kb.GraphBuilder },
-			EvictCacheIfNeeded: func(ctx context.Context, protectKBID string) error {
-				return kb.evictCacheIfNeeded(ctx, protectKBID)
-			},
-			LockFor:          kb.lockFor,
-			ClosePooledConns: closePool,
-			Metrics:          kb,
-		})
-
-		if err != nil {
-			panic(fmt.Sprintf("kbcore: NewKB(): default DuckDB artifact format: %v", err))
-		}
-		kb.ArtifactFormat = format
-		kb.closePooledConns = closePool
-	}
-
 	return kb
-}
-
-// NewKBWithMemLimit creates a KB with a specific memory limit.
-func NewKBWithMemLimit(bs BlobStore, cacheDir, memLimit string) *KB {
-	return NewKB(bs, cacheDir, WithMemoryLimit(memLimit))
-}
-
-// NewKBWithEmbedder creates a KB with a specific embedder.
-func NewKBWithEmbedder(bs BlobStore, cacheDir, memLimit string, embedder Embedder) *KB {
-	return NewKB(bs, cacheDir, WithMemoryLimit(memLimit), WithEmbedder(embedder))
 }
 
 func (l *KB) SetWriteLeaseManager(mgr WriteLeaseManager) {
@@ -318,7 +251,7 @@ func (l *KB) SetGraphBuilder(builder *GraphBuilder) {
 	l.GraphBuilder = builder
 }
 
-func (l *KB) lockFor(kbID string) *sync.Mutex {
+func (l *KB) LockFor(kbID string) *sync.Mutex {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -328,19 +261,158 @@ func (l *KB) lockFor(kbID string) *sync.Mutex {
 	return l.locks[kbID]
 }
 
+// EvictCacheIfNeeded runs cache eviction, protecting the given KB ID.
+func (l *KB) EvictCacheIfNeeded(ctx context.Context, protectKBID string) error {
+	return l.evictCacheIfNeeded(ctx, protectKBID)
+}
+
 // Close releases resources held by the KB, including pooled shard connections.
 func (l *KB) Close() {
-	if f, ok := l.ArtifactFormat.(*DuckDBArtifactFormat); ok {
-		f.Close()
+	for _, format := range l.registeredFormatsSnapshot() {
+		if c, ok := format.(io.Closer); ok {
+			c.Close()
+		}
 	}
 }
 
-func (l *KB) Load(ctx context.Context, kbID string) (*sql.DB, error) {
-	if l.ArtifactFormat == nil {
-		return nil, ErrArtifactFormatNotConfigured
+// RegisterFormat registers an artifact format under its Kind().
+// The first registered format becomes the default for new KBs.
+// Returns ErrInvalidArtifactFormat when format is nil or Kind() is empty.
+func (l *KB) RegisterFormat(format ArtifactFormat) error {
+	if format == nil {
+		return fmt.Errorf("%w: nil format", ErrInvalidArtifactFormat)
+	}
+	kind := strings.TrimSpace(format.Kind())
+	if kind == "" {
+		return fmt.Errorf("%w: empty format kind", ErrInvalidArtifactFormat)
 	}
 
-	return l.ArtifactFormat.PrepareAndOpenDB(ctx, kbID)
+	l.formatMu.Lock()
+	defer l.formatMu.Unlock()
+
+	if len(l.formatRegistry) == 0 {
+		l.defaultFormatKind = kind
+	}
+
+	l.formatRegistry[kind] = format
+
+	return nil
+}
+
+// SetDefaultFormatKind changes which registered format is used for new KBs.
+func (l *KB) SetDefaultFormatKind(kind string) error {
+	l.formatMu.Lock()
+	defer l.formatMu.Unlock()
+
+	if _, ok := l.formatRegistry[kind]; !ok {
+		return fmt.Errorf("%w: %s", ErrFormatNotRegistered, kind)
+	}
+
+	l.defaultFormatKind = kind
+
+	return nil
+}
+
+// HasFormat returns true if at least one artifact format is registered.
+func (l *KB) HasFormat() bool {
+	l.formatMu.RLock()
+	defer l.formatMu.RUnlock()
+	return len(l.formatRegistry) > 0
+}
+
+// FormatByKind returns a registered format by kind, or nil if not found.
+func (l *KB) FormatByKind(kind string) ArtifactFormat {
+	l.formatMu.RLock()
+	defer l.formatMu.RUnlock()
+
+	if f, ok := l.formatRegistry[kind]; ok {
+		return f
+	}
+
+	return nil
+}
+
+// DefaultFormat returns the default registered artifact format, or nil if none.
+func (l *KB) DefaultFormat() ArtifactFormat {
+	l.formatMu.RLock()
+	defer l.formatMu.RUnlock()
+
+	if f, ok := l.formatRegistry[l.defaultFormatKind]; ok {
+		return f
+	}
+
+	return nil
+}
+
+// resolveFormat returns the ArtifactFormat for a given kbID by reading
+// the manifest's format_kind. Falls back to the default for new KBs.
+func (l *KB) resolveFormat(ctx context.Context, kbID string) (ArtifactFormat, error) {
+	if err := l.getInitErr(); err != nil {
+		return nil, err
+	}
+	doc, err := l.ManifestStore.Get(ctx, kbID)
+	if err != nil {
+		if errors.Is(err, ErrManifestNotFound) {
+			// New KB — use default format
+			if format := l.DefaultFormat(); format != nil {
+				return format, nil
+			}
+
+			return nil, ErrArtifactFormatNotConfigured
+		}
+
+		return nil, err
+	}
+
+	return l.resolveFormatByKind(doc.Manifest.FormatKind)
+}
+
+func (l *KB) setInitErr(err error) {
+	if err == nil {
+		return
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.initErr == nil {
+		l.initErr = err
+	}
+}
+
+func (l *KB) getInitErr() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.initErr
+}
+
+// resolveFormatByKind looks up a format by kind string without reading the manifest.
+func (l *KB) resolveFormatByKind(kind string) (ArtifactFormat, error) {
+	l.formatMu.RLock()
+	defer l.formatMu.RUnlock()
+
+	if f, ok := l.formatRegistry[kind]; ok {
+		return f, nil
+	}
+
+	return nil, fmt.Errorf("%w: %s", ErrFormatNotRegistered, kind)
+}
+
+func (l *KB) registeredFormatsSnapshot() []ArtifactFormat {
+	l.formatMu.RLock()
+	defer l.formatMu.RUnlock()
+
+	if len(l.formatRegistry) == 0 {
+		return nil
+	}
+
+	formats := make([]ArtifactFormat, 0, len(l.formatRegistry))
+	for _, format := range l.formatRegistry {
+		formats = append(formats, format)
+	}
+
+	return formats
 }
 
 // Embed returns an embedding for input using the configured Embedder.
@@ -348,8 +420,29 @@ func (k *KB) Embed(ctx context.Context, input string) ([]float32, error) {
 	if k.Embedder == nil {
 		return nil, fmt.Errorf("embedder is not configured")
 	}
+
 	if strings.TrimSpace(input) == "" {
 		return nil, fmt.Errorf("input cannot be empty")
 	}
+
 	return k.Embedder.Embed(ctx, input)
+}
+
+// Compactor is an optional interface that ArtifactFormat implementations can
+// satisfy to support background compaction of sharded data.
+type Compactor interface {
+	CompactIfNeeded(ctx context.Context, kbID string) (*CompactionPublishResult, error)
+}
+
+// CompactIfNeeded triggers compaction for the given KB if the resolved format
+// supports it. Returns a zero result when the format does not implement Compactor.
+func (l *KB) CompactIfNeeded(ctx context.Context, kbID string) (*CompactionPublishResult, error) {
+	format, err := l.resolveFormat(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	if c, ok := format.(Compactor); ok {
+		return c.CompactIfNeeded(ctx, kbID)
+	}
+	return &CompactionPublishResult{}, nil
 }

@@ -309,11 +309,15 @@ func (o *OllamaGrapher) Extract(ctx context.Context, chunks []Chunk) (*GraphExtr
 		}()
 	}
 
+	// Producer goroutine: sends chunk indices to the jobs channel.
+	// Context cancellation is propagated to workers via extractChunk(ctx, ...),
+	// which checks ctx on each HTTP call. The producer stops sending on ctx.Done().
 	go func() {
+	outer:
 		for i := range chunks {
 			select {
 			case <-ctx.Done():
-				break
+				break outer
 			case jobs <- i:
 			}
 		}

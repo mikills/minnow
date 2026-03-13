@@ -17,15 +17,18 @@ var (
 
 	ErrInvalidEmbeddingDimension  = errors.New("invalid embedding dimension")
 	ErrEmbeddingDimensionMismatch = errors.New("embedding dimension mismatch")
+	ErrInvalidArtifactFormat      = errors.New("invalid artifact format")
 
 	ErrManifestNotFound            = errors.New("manifest not found")
+	ErrInvalidManifestStore        = errors.New("invalid manifest store")
 	ErrWriteLeaseConflict          = errors.New("write lease conflict")
 	ErrInvalidQueryRequest         = errors.New("invalid query request")
 	ErrArtifactFormatNotConfigured = errors.New("artifact format is not configured")
+	ErrFormatNotRegistered         = errors.New("artifact format not registered for this KB's format_kind")
 	ErrUnsupportedOperation        = errors.New("operation not supported by this artifact format")
 )
 
-func wrapEmbeddingDimensionMismatch(err error, operation string) error {
+func WrapEmbeddingDimensionMismatch(err error, operation string) error {
 	if err == nil {
 		return nil
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -13,6 +14,7 @@ import (
 
 func TestBlobLocal(t *testing.T) {
 	t.Run("upload_if_match", testBlobLocalUploadIfMatch)
+	t.Run("upload_if_match_concurrent", testBlobLocalUploadIfMatchConcurrent)
 	t.Run("delete", testBlobLocalDelete)
 	t.Run("list", testBlobLocalList)
 }
@@ -43,6 +45,56 @@ func testBlobLocalUploadIfMatch(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(store.Root, "kb.duckdb"))
 	require.NoError(t, err)
 	require.Equal(t, "v2", string(content))
+}
+
+func testBlobLocalUploadIfMatchConcurrent(t *testing.T) {
+	ctx := context.Background()
+	harness := NewTestHarness(t, "kb-local-blob-concurrent").Setup()
+	defer harness.Cleanup()
+	store := &LocalBlobStore{Root: harness.BlobRoot()}
+
+	srcV1 := filepath.Join(harness.CacheDir(), "src-v1.duckdb")
+	require.NoError(t, os.WriteFile(srcV1, []byte("v1"), 0o644))
+	objV1, err := store.UploadIfMatch(ctx, "kb.duckdb", srcV1, "")
+	require.NoError(t, err)
+
+	srcA := filepath.Join(harness.CacheDir(), "src-a.duckdb")
+	srcB := filepath.Join(harness.CacheDir(), "src-b.duckdb")
+	require.NoError(t, os.WriteFile(srcA, []byte("v2-a"), 0o644))
+	require.NoError(t, os.WriteFile(srcB, []byte("v2-b"), 0o644))
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	errCh := make(chan error, 2)
+
+	go func() {
+		defer wg.Done()
+		_, upErr := store.UploadIfMatch(ctx, "kb.duckdb", srcA, objV1.Version)
+		errCh <- upErr
+	}()
+	go func() {
+		defer wg.Done()
+		_, upErr := store.UploadIfMatch(ctx, "kb.duckdb", srcB, objV1.Version)
+		errCh <- upErr
+	}()
+
+	wg.Wait()
+	close(errCh)
+
+	var successCount int
+	var conflictCount int
+	for upErr := range errCh {
+		switch {
+		case upErr == nil:
+			successCount++
+		case errors.Is(upErr, ErrBlobVersionMismatch):
+			conflictCount++
+		default:
+			require.NoError(t, upErr)
+		}
+	}
+	require.Equal(t, 1, successCount)
+	require.Equal(t, 1, conflictCount)
 }
 
 func testBlobLocalDelete(t *testing.T) {

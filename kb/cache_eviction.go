@@ -193,15 +193,24 @@ func (l *KB) evictCacheSweepOnce(protectKBID string) cacheSweepResult {
 	}
 }
 
+// PooledConnCloser is an optional interface that ArtifactFormat implementations
+// can satisfy to close pooled connections before cache directory removal.
+type PooledConnCloser interface {
+	ClosePooledConns(pathPrefix string)
+}
+
 // removeCacheEntry deletes a KB's cache directory while holding its lock.
 // Returns true if removal succeeded, false otherwise (error is recorded as metric).
 func (l *KB) removeCacheEntry(entry cacheKBEntry) bool {
-	lock := l.lockFor(entry.kbID)
+	lock := l.LockFor(entry.kbID)
 	lock.Lock()
 	defer lock.Unlock()
 
-	if l.closePooledConns != nil {
-		l.closePooledConns(entry.path)
+	formats := l.registeredFormatsSnapshot()
+	for _, format := range formats {
+		if closer, ok := format.(PooledConnCloser); ok {
+			closer.ClosePooledConns(entry.path)
+		}
 	}
 
 	if err := os.RemoveAll(entry.path); err != nil {
@@ -283,7 +292,7 @@ func (l *KB) collectCacheEntries() ([]cacheKBEntry, int64) {
 // cacheDirStats walks a directory tree and returns total size and latest mtime.
 //
 // Returns (size, latestMtime, true) on success, or (0, zero, false) if the
-// directory cannot be read or is empty.
+// directory cannot be read.
 func cacheDirStats(root string) (int64, time.Time, bool) {
 	var total int64
 	var latest time.Time
@@ -306,9 +315,15 @@ func cacheDirStats(root string) (int64, time.Time, bool) {
 		}
 		return nil
 	})
-	if err != nil || total == 0 {
+
+	if err != nil {
 		return 0, time.Time{}, false
 	}
+
+	if latest.IsZero() {
+		latest = time.Now()
+	}
+
 	return total, latest, true
 }
 

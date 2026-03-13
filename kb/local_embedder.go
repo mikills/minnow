@@ -43,6 +43,10 @@ func NewLocalEmbedder(dim int) (*LocalEmbedder, error) {
 // Each word is decomposed into character n-grams (3-6), hashed into the
 // vector space, then word vectors are averaged and L2-normalized.
 func (e *LocalEmbedder) Embed(_ context.Context, input string) ([]float32, error) {
+	if err := e.validate(); err != nil {
+		return nil, err
+	}
+
 	normalized := normalizeLocalInput(input)
 	if normalized == "" {
 		return nil, fmt.Errorf("input cannot be empty")
@@ -59,6 +63,7 @@ func (e *LocalEmbedder) Embed(_ context.Context, input string) ([]float32, error
 		e.addWordVector(vec, tok)
 		wordCount++
 	}
+
 	if wordCount == 0 {
 		return nil, fmt.Errorf("input has no indexable tokens after stopword filtering")
 	}
@@ -72,7 +77,26 @@ func (e *LocalEmbedder) Embed(_ context.Context, input string) ([]float32, error
 	if !normalizeLocalVector(vec) {
 		return nil, fmt.Errorf("failed to build embedding: zero vector")
 	}
+
 	return vec, nil
+}
+
+// validate checks that the receiver and its fields are usable. The nil check
+// is reachable when a nil *LocalEmbedder is stored in an Embedder interface.
+func (e *LocalEmbedder) validate() error {
+	if e == nil {
+		return fmt.Errorf("embedder is nil")
+	}
+
+	if e.dim <= 0 {
+		return fmt.Errorf("%w: got %d", ErrInvalidEmbeddingDimension, e.dim)
+	}
+
+	if e.minNgram <= 0 || e.maxNgram <= 0 || e.minNgram > e.maxNgram {
+		return fmt.Errorf("invalid n-gram range: min=%d max=%d", e.minNgram, e.maxNgram)
+	}
+
+	return nil
 }
 
 // addWordVector adds the subword-hashed vector for a single word into vec.
@@ -124,9 +148,12 @@ func tokenizeLocalInput(input string) []string {
 			b.WriteRune(r)
 			continue
 		}
+
 		flush()
 	}
+
 	flush()
+
 	return tokens
 }
 
@@ -143,6 +170,7 @@ func normalizeLocalVector(vec []float32) bool {
 		fv := float64(v)
 		sumSq += fv * fv
 	}
+
 	if sumSq == 0 {
 		return false
 	}
@@ -150,6 +178,7 @@ func normalizeLocalVector(vec []float32) bool {
 	for i := range vec {
 		vec[i] /= norm
 	}
+
 	return true
 }
 

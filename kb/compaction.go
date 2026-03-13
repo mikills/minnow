@@ -34,10 +34,6 @@
 package kb
 
 import (
-	"context"
-	"errors"
-	"fmt"
-	"log/slog"
 	"math"
 	"sort"
 	"time"
@@ -59,89 +55,6 @@ type CompactionPublishResult struct {
 	ReplacementShards  []SnapshotShardMetadata
 	ManifestVersionOld string
 	ManifestVersionNew string
-}
-
-// CompactShardsIfNeeded performs one compaction pass for a sharded KB.
-//
-// It acquires a write lease, evaluates compaction candidates, and if at least
-// two candidates exist, merges them into a single replacement shard. The new
-// manifest is published via compare-and-set; on CAS conflict the operation
-// aborts with ErrBlobVersionMismatch.
-//
-// Side effects on success:
-//   - Replacement shard uploaded to BlobStore.
-//   - New manifest published (old manifest version superseded).
-//   - Replaced shards enqueued for garbage collection.
-//   - Metrics recorded via recordCompactionResult and recordShardCount.
-//
-// Returns Performed=false when there is no compaction debt or fewer than two
-// candidates. Returns an error on lease acquisition failure, blob I/O errors,
-// or manifest CAS conflict.
-func (l *KB) CompactShardsIfNeeded(ctx context.Context, kbID string) (result *CompactionPublishResult, err error) {
-	if l.ArtifactFormat == nil {
-		return nil, ErrArtifactFormatNotConfigured
-	}
-	if kbID == "" {
-		return nil, fmt.Errorf("kbID cannot be empty")
-	}
-	startedAt := time.Now()
-	defer func() {
-		l.recordCompactionResult(kbID, time.Since(startedAt), result, err)
-	}()
-
-	leaseManager, lease, err := l.acquireWriteLease(ctx, kbID)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = leaseManager.Release(context.Background(), lease)
-	}()
-
-	manifestVersion, err := l.ManifestStore.HeadVersion(ctx, kbID)
-	if err != nil {
-		return nil, err
-	}
-	if manifestVersion == "" {
-		return &CompactionPublishResult{Performed: false}, nil
-	}
-
-	doc, err := l.ManifestStore.Get(ctx, kbID)
-	if err != nil {
-		return nil, err
-	}
-	manifest := &doc.Manifest
-
-	candidates, candidateReason := selectCompactionCandidatesWithReason(l.ShardingPolicy, manifest)
-	slog.Default().InfoContext(ctx, "evaluated compaction candidates", "kb_id", kbID, "reason", candidateReason, "candidate_count", len(candidates), "shard_count", len(manifest.Shards))
-	if len(candidates) < 2 {
-		return &CompactionPublishResult{Performed: false, ManifestVersionOld: manifestVersion}, nil
-	}
-
-	replacement, err := l.ArtifactFormat.BuildAndUploadCompactionReplacement(ctx, kbID, candidates)
-	if err != nil {
-		return nil, err
-	}
-
-	nextManifest := buildCompactedManifest(kbID, manifest, candidates, replacement)
-	newVersion, err := l.ManifestStore.UpsertIfMatch(ctx, kbID, nextManifest, manifestVersion)
-	if err != nil {
-		if errors.Is(err, ErrBlobVersionMismatch) {
-			l.recordManifestCASConflict(kbID)
-			slog.Default().WarnContext(ctx, "compaction manifest CAS conflict", "kb_id", kbID, "reason", "manifest_cas_conflict")
-		}
-		return nil, err
-	}
-	l.recordShardCount(kbID, len(nextManifest.Shards))
-	l.enqueueReplacedShardsForGC(kbID, candidates, time.Now().UTC())
-	slog.Default().InfoContext(ctx, "completed shard compaction", "kb_id", kbID, "reason", "publish_compaction", "replaced_count", len(candidates), "new_manifest_version", newVersion)
-
-	return &CompactionPublishResult{
-		Performed:          true,
-		ReplacedShards:     append([]SnapshotShardMetadata(nil), candidates...),
-		ReplacementShards:  []SnapshotShardMetadata{replacement},
-		ManifestVersionOld: manifestVersion,
-		ManifestVersionNew: newVersion,
-	}, nil
 }
 
 // buildCompactedManifest produces a new manifest with the replaced shards
@@ -204,7 +117,7 @@ func buildCompactedManifest(kbID string, current *SnapshotShardManifest, replace
 // Candidates are sorted by tombstone ratio (desc), size (asc), shard ID (asc)
 // for deterministic selection.
 func selectCompactionCandidatesWithReason(policy ShardingPolicy, manifest *SnapshotShardManifest) ([]SnapshotShardMetadata, string) {
-	policy = normalizeShardingPolicy(policy)
+	policy = NormalizeShardingPolicy(policy)
 	if !shouldCompact(policy, manifest) {
 		return nil, "no_compaction_debt"
 	}

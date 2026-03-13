@@ -21,8 +21,7 @@ func TestTextChunker(t *testing.T) {
 
 		assert.Equal(t, "doc-chunk-000", chunks[0].ChunkID)
 		assert.Equal(t, strings.TrimSpace(text), chunks[0].Text)
-		assert.Equal(t, 0, chunks[0].Start)
-		assert.Equal(t, len(strings.TrimSpace(text)), chunks[0].End)
+		assert.Equal(t, strings.TrimSpace(text), text[chunks[0].Start:chunks[0].End])
 	})
 
 	t.Run("recursive split with separators", func(t *testing.T) {
@@ -96,8 +95,6 @@ Delta section provides examples and illustrations. The quick brown fox jumps ove
 Epsilon section wraps up the discussion with final thoughts and recommendations for further exploration of these topics.`
 
 		chunker := TextChunker{ChunkSize: 120}
-		trimmed := strings.TrimSpace(text)
-
 		chunks, err := chunker.Chunk(context.Background(), "test-doc", text)
 		require.NoError(t, err)
 		require.NotEmpty(t, chunks)
@@ -112,10 +109,10 @@ Epsilon section wraps up the discussion with final thoughts and recommendations 
 			// verify offsets are valid
 			assert.GreaterOrEqual(t, chunk.Start, 0, "chunk %d start should be non-negative", i)
 			assert.Greater(t, chunk.End, chunk.Start, "chunk %d end should be greater than start", i)
-			assert.LessOrEqual(t, chunk.End, len(trimmed), "chunk %d end should not exceed text length", i)
+			assert.LessOrEqual(t, chunk.End, len(text), "chunk %d end should not exceed text length", i)
 
 			// verify text matches offset range
-			assert.Equal(t, chunk.Text, trimmed[chunk.Start:chunk.End],
+			assert.Equal(t, chunk.Text, text[chunk.Start:chunk.End],
 				"chunk %d text should match offset range", i)
 
 			// verify no overlap with previous chunk
@@ -124,5 +121,37 @@ Epsilon section wraps up the discussion with final thoughts and recommendations 
 			}
 		}
 
+	})
+
+	t.Run("offsets_use_original_text", func(t *testing.T) {
+		text := "\n\t  first sentence. second sentence.  \n"
+		chunker := TextChunker{ChunkSize: 256}
+
+		chunks, err := chunker.Chunk(context.Background(), "doc-offsets", text)
+		require.NoError(t, err)
+		require.Len(t, chunks, 1)
+
+		chunk := chunks[0]
+		require.Greater(t, chunk.Start, 0)
+		require.Less(t, chunk.End, len(text))
+		assert.Equal(t, chunk.Text, text[chunk.Start:chunk.End])
+	})
+
+	t.Run("offsets_leading_whitespace_matches_chunk", func(t *testing.T) {
+		// Leading whitespace contains a substring matching the first chunk piece.
+		// Verify offsets point to the trimmed content, not the whitespace prefix.
+		text := "  hello hello world"
+		chunker := TextChunker{ChunkSize: 10}
+
+		chunks, err := chunker.Chunk(context.Background(), "doc-adversarial", text)
+		require.NoError(t, err)
+		require.NotEmpty(t, chunks)
+
+		for i, chunk := range chunks {
+			assert.Equal(t, chunk.Text, text[chunk.Start:chunk.End],
+				"chunk %d offset mismatch", i)
+			assert.NotEmpty(t, strings.TrimSpace(chunk.Text),
+				"chunk %d should not be only whitespace", i)
+		}
 	})
 }

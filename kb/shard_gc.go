@@ -17,7 +17,7 @@
 //
 // Safety guarantees:
 //
-//   - Grace window (defaultShardGCGraceWindow) ensures in-flight readers have
+//   - Grace window (DefaultShardGCGraceWindow) ensures in-flight readers have
 //     time to finish before shard files are removed.
 //   - Manifest check prevents deleting shards that are still active (e.g., if
 //     compaction was rolled back or a concurrent writer re-added the shard).
@@ -40,29 +40,22 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"time"
 )
 
-// defaultShardGCGraceWindow is the minimum time to wait after a shard is
+// DefaultShardGCGraceWindow is the minimum time to wait after a shard is
 // replaced before it can be deleted. This allows in-flight readers to finish.
-const defaultShardGCGraceWindow = 2 * time.Minute
+const DefaultShardGCGraceWindow = 2 * time.Minute
 
-// defaultShardGCRetryDelay is the delay before retrying a failed GC operation
+// DefaultShardGCRetryDelay is the delay before retrying a failed GC operation
 // (manifest download failure, delete failure, or shard still referenced).
-const defaultShardGCRetryDelay = 10 * time.Second
+const DefaultShardGCRetryDelay = 10 * time.Second
 
 // delayedShardGCEntry represents a shard queued for delayed garbage collection.
 type delayedShardGCEntry struct {
 	KBID      string                // knowledge base the shard belongs to
 	Shard     SnapshotShardMetadata // metadata of the shard to delete
 	NotBefore time.Time             // earliest time the shard can be deleted
-}
-
-// shardObjectDeleter is an optional interface for blob stores that support
-// direct object deletion.
-type shardObjectDeleter interface {
-	Delete(ctx context.Context, key string) error
 }
 
 // ShardGCSweepResult summarizes the outcome of one delayed GC sweep.
@@ -88,10 +81,12 @@ func (l *KB) enqueueReplacedShardsForGC(kbID string, shards []SnapshotShardMetad
 	if kbID == "" || len(shards) == 0 {
 		return
 	}
+
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	notBefore := now.Add(defaultShardGCGraceWindow)
+
+	notBefore := now.Add(DefaultShardGCGraceWindow)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -100,6 +95,7 @@ func (l *KB) enqueueReplacedShardsForGC(kbID string, shards []SnapshotShardMetad
 		if shard.Key == "" {
 			continue
 		}
+
 		replaced := false
 		for i := range l.shardGC {
 			entry := &l.shardGC[i]
@@ -111,6 +107,7 @@ func (l *KB) enqueueReplacedShardsForGC(kbID string, shards []SnapshotShardMetad
 				break
 			}
 		}
+
 		if replaced {
 			continue
 		}
@@ -122,31 +119,29 @@ func (l *KB) enqueueReplacedShardsForGC(kbID string, shards []SnapshotShardMetad
 	}
 }
 
+// EnqueueReplacedShardsForGC exposes delayed shard GC queueing for backend-owned
+// compaction implementations.
+func (l *KB) EnqueueReplacedShardsForGC(kbID string, shards []SnapshotShardMetadata, now time.Time) {
+	l.enqueueReplacedShardsForGC(kbID, shards, now)
+}
+
 // deleteShardObject removes a shard file from blob storage.
 //
-// It first attempts to use the shardObjectDeleter interface if the blob store
-// implements it, otherwise falls back to direct file removal for LocalBlobStore.
 // Returns nil if the file is already deleted (idempotent).
 func (l *KB) deleteShardObject(ctx context.Context, key string) error {
 	if key == "" {
 		return nil
 	}
-	if deleter, ok := l.BlobStore.(shardObjectDeleter); ok {
-		err := deleter.Delete(ctx, key)
-		if err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrBlobNotFound) {
-			return nil
-		}
-		return err
-	}
-	local, ok := l.BlobStore.(*LocalBlobStore)
-	if !ok {
-		return nil
-	}
-	path := filepath.Join(local.Root, key)
-	err := os.Remove(path)
+
+	err := l.BlobStore.Delete(ctx, key)
 	if err == nil || errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+
+	if errors.Is(err, ErrBlobNotFound) {
+		return nil
+	}
+
 	return err
 }
 
@@ -187,6 +182,7 @@ func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSwe
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
+
 		if now.Before(entry.NotBefore) {
 			slog.Default().InfoContext(ctx, "deferred shard GC pending grace window", "kb_id", entry.KBID, "reason", "grace_window", "shard_key", entry.Shard.Key, "not_before", entry.NotBefore)
 			next = append(next, entry)
@@ -205,7 +201,7 @@ func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSwe
 				if firstErr == nil {
 					firstErr = fmt.Errorf("download manifest for shard gc: %w", err)
 				}
-				entry.NotBefore = now.Add(defaultShardGCRetryDelay)
+				entry.NotBefore = now.Add(DefaultShardGCRetryDelay)
 				next = append(next, entry)
 				result.Retried++
 				continue
@@ -223,7 +219,7 @@ func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSwe
 
 		if _, stillReferenced := activeKeys[entry.Shard.Key]; stillReferenced {
 			slog.Default().InfoContext(ctx, "deferred shard GC skipped referenced shard", "kb_id", entry.KBID, "reason", "still_referenced", "shard_key", entry.Shard.Key)
-			entry.NotBefore = now.Add(defaultShardGCRetryDelay)
+			entry.NotBefore = now.Add(DefaultShardGCRetryDelay)
 			next = append(next, entry)
 			result.Retried++
 			continue
@@ -234,7 +230,7 @@ func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSwe
 			if firstErr == nil {
 				firstErr = fmt.Errorf("delete replaced shard %s: %w", entry.Shard.Key, err)
 			}
-			entry.NotBefore = now.Add(defaultShardGCRetryDelay)
+			entry.NotBefore = now.Add(DefaultShardGCRetryDelay)
 			next = append(next, entry)
 			result.Retried++
 			continue

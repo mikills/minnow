@@ -9,11 +9,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // LocalBlobStore implements BlobStore for local filesystem storage.
 type LocalBlobStore struct {
 	Root string
+
+	mu       sync.Mutex
+	keyLocks map[string]*sync.Mutex
 }
 
 func (l *LocalBlobStore) Download(ctx context.Context, key, dest string) error {
@@ -26,17 +30,20 @@ func (l *LocalBlobStore) Download(ctx context.Context, key, dest string) error {
 	if err != nil {
 		return fmt.Errorf("download %s: %w", src, err)
 	}
+
 	defer in.Close()
 
 	out, err := os.Create(dest)
 	if err != nil {
 		return fmt.Errorf("download %s: create %s: %w", src, dest, err)
 	}
+
 	defer out.Close()
 
 	if _, err := io.Copy(out, in); err != nil {
 		return fmt.Errorf("download %s: copy to %s: %w", src, dest, err)
 	}
+
 	return nil
 }
 
@@ -51,7 +58,7 @@ func (l *LocalBlobStore) Head(ctx context.Context, key string) (*BlobObjectInfo,
 		return nil, err
 	}
 
-	version, err := fileContentSHA256(path)
+	version, err := FileContentSHA256(path)
 	if err != nil {
 		return nil, err
 	}
@@ -68,6 +75,10 @@ func (l *LocalBlobStore) UploadIfMatch(ctx context.Context, key string, src stri
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
+	keyLock := l.lockForKey(key)
+	keyLock.Lock()
+	defer keyLock.Unlock()
 
 	dest := filepath.Join(l.Root, key)
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
@@ -86,7 +97,7 @@ func (l *LocalBlobStore) UploadIfMatch(ctx context.Context, key string, src stri
 	}
 
 	// compute sha256 of source file before copy (avoids hashing twice)
-	srcHash, err := fileContentSHA256(src)
+	srcHash, err := FileContentSHA256(src)
 	if err != nil {
 		return nil, err
 	}
@@ -109,10 +120,30 @@ func (l *LocalBlobStore) UploadIfMatch(ctx context.Context, key string, src stri
 	}, nil
 }
 
+// lockForKey returns a per-key mutex for serializing uploads to the same blob.
+// The map grows proportionally to distinct blob keys, which are bounded by
+// KB manifest/shard paths (not user-generated), so unbounded growth is not a concern.
+func (l *LocalBlobStore) lockForKey(key string) *sync.Mutex {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.keyLocks == nil {
+		l.keyLocks = make(map[string]*sync.Mutex)
+	}
+
+	if m, ok := l.keyLocks[key]; ok {
+		return m
+	}
+
+	m := &sync.Mutex{}
+	l.keyLocks[key] = m
+	return m
+}
+
 func (l *LocalBlobStore) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+
 	if key == "" {
 		return nil
 	}
@@ -141,9 +172,11 @@ func (l *LocalBlobStore) List(ctx context.Context, prefix string) ([]BlobObjectI
 		if walkErr != nil {
 			return walkErr
 		}
+
 		if d.IsDir() {
 			return nil
 		}
+
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -152,6 +185,7 @@ func (l *LocalBlobStore) List(ctx context.Context, prefix string) ([]BlobObjectI
 		if err != nil {
 			return err
 		}
+
 		key := filepath.ToSlash(rel)
 		if prefix != "" && !strings.HasPrefix(key, prefix) {
 			return nil
@@ -177,6 +211,7 @@ func (l *LocalBlobStore) List(ctx context.Context, prefix string) ([]BlobObjectI
 		if errors.Is(err, os.ErrNotExist) {
 			return []BlobObjectInfo{}, nil
 		}
+
 		return nil, err
 	}
 

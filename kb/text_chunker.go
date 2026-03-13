@@ -50,6 +50,7 @@ func (c TextChunker) Chunk(ctx context.Context, docID string, text string) ([]Ch
 	if trimmed == "" {
 		return nil, nil
 	}
+	sourceText := text
 
 	chunkSize := c.ChunkSize
 	if chunkSize <= 0 {
@@ -62,7 +63,7 @@ func (c TextChunker) Chunk(ctx context.Context, docID string, text string) ([]Ch
 	// build chunks with offsets
 	chunks := make([]Chunk, 0, len(pieces))
 	pos := 0
-	trimmedLen := len(trimmed)
+	sourceLen := len(sourceText)
 	for i, piece := range pieces {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -71,15 +72,15 @@ func (c TextChunker) Chunk(ctx context.Context, docID string, text string) ([]Ch
 		if pos < 0 {
 			pos = 0
 		}
-		if pos > trimmedLen {
-			pos = trimmedLen
+		if pos > sourceLen {
+			pos = sourceLen
 		}
 
 		// find piece in original text starting from pos
-		idx := strings.Index(trimmed[pos:], piece)
+		idx := strings.Index(sourceText[pos:], piece)
 		if idx < 0 {
 			// fallback: best-effort search across full text; if still missing, anchor at pos
-			if absoluteIdx := strings.Index(trimmed, piece); absoluteIdx >= 0 {
+			if absoluteIdx := strings.Index(sourceText, piece); absoluteIdx >= 0 {
 				idx = absoluteIdx - pos
 			} else {
 				idx = 0
@@ -89,12 +90,12 @@ func (c TextChunker) Chunk(ctx context.Context, docID string, text string) ([]Ch
 		if start < 0 {
 			start = 0
 		}
-		if start > trimmedLen {
-			start = trimmedLen
+		if start > sourceLen {
+			start = sourceLen
 		}
 		end := start + len(piece)
-		if end > trimmedLen {
-			end = trimmedLen
+		if end > sourceLen {
+			end = sourceLen
 		}
 		if end < start {
 			end = start
