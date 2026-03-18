@@ -2,9 +2,12 @@ package duckdb
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -105,6 +108,53 @@ func testDuckDBExtensionDirParse(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not a directory")
 	})
+}
+
+// TestOfflineExtensionLoadAll verifies that every pre-downloaded extension
+// can be loaded offline without downloading.
+func TestOfflineExtensionLoadAll(t *testing.T) {
+	localExtDir := ResolveExtensionDir()
+	if localExtDir == "" {
+		t.Skip("pre-downloaded extensions not found")
+	}
+
+	// Discover extensions from the resolved directory by scanning for
+	// *.duckdb_extension files under the platform subdirectory.
+	entries, err := filepath.Glob(filepath.Join(localExtDir, "*", "*", "*.duckdb_extension"))
+	require.NoError(t, err)
+
+	seen := map[string]bool{}
+	for _, e := range entries {
+		name := strings.TrimSuffix(filepath.Base(e), ".duckdb_extension")
+		seen[name] = true
+	}
+	require.NotEmpty(t, seen, "expected at least one extension in %s", localExtDir)
+
+	for ext := range seen {
+		t.Run(ext, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "test.duckdb")
+
+			db, err := sql.Open("duckdb", dbPath)
+			require.NoError(t, err)
+			defer db.Close()
+
+			_, err = db.Exec(fmt.Sprintf(`SET extension_directory = '%s'`, quoteSQLString(localExtDir)))
+			require.NoError(t, err)
+
+			_, err = db.Exec(`SET autoinstall_known_extensions = false`)
+			require.NoError(t, err)
+
+			_, err = db.Exec(fmt.Sprintf(`LOAD %s`, ext))
+			require.NoError(t, err, "%s extension should load offline without downloading", ext)
+
+			var installed bool
+			err = db.QueryRow(fmt.Sprintf(
+				`SELECT installed FROM duckdb_extensions() WHERE extension_name = '%s'`, ext,
+			)).Scan(&installed)
+			require.NoError(t, err)
+			require.True(t, installed, "%s extension should be installed", ext)
+		})
+	}
 }
 
 // TestOfflineExtensionLoad verifies openConfiguredDB behavior with offline
