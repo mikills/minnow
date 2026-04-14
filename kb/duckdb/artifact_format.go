@@ -19,7 +19,7 @@ import (
 	kb "github.com/mikills/kbcore/kb"
 )
 
-const DefaultExtensionDir = ".duckdb/extensions"
+const DefaultExtensionDir = "extensions"
 
 // ResolveExtensionDir walks up from the working directory to find a
 // DefaultExtensionDir directory. Returns the absolute path if found, or "".
@@ -166,11 +166,16 @@ func (f *DuckDBArtifactFormat) openConfiguredDB(ctx context.Context, dbPath stri
 		}
 	}
 
-	if f.deps.OfflineExt {
-		if _, err := db.ExecContext(ctx, `SET autoinstall_known_extensions = false`); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("disable autoinstall: %w", err)
-		}
+	// Always disable DuckDB's implicit extension fetch/load paths. The only
+	// way an extension gets INSTALLed is an explicit INSTALL below, gated on
+	// OfflineExt=false.
+	if _, err := db.ExecContext(ctx, `SET autoinstall_known_extensions = false`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("disable autoinstall: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `SET autoload_known_extensions = false`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("disable autoload: %w", err)
 	}
 
 	if _, err := db.ExecContext(ctx, `LOAD vss`); err != nil {
@@ -226,6 +231,9 @@ func loadVSS(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`SET autoinstall_known_extensions = false`); err != nil {
 		return fmt.Errorf("disable autoinstall: %w", err)
+	}
+	if _, err := db.Exec(`SET autoload_known_extensions = false`); err != nil {
+		return fmt.Errorf("disable autoload: %w", err)
 	}
 	if _, err := db.Exec(`LOAD vss`); err != nil {
 		return fmt.Errorf("load vss: %w", err)
