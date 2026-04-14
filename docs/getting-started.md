@@ -4,7 +4,7 @@
 
 - Go toolchain matching module requirements (`go.mod`)
 - CGO-capable environment for DuckDB driver
-- Pre-downloaded DuckDB extensions in `.duckdb/extensions/` (shipped with the repo; no network access needed by default)
+- Pre-downloaded DuckDB extensions in `extensions/` (shipped with the repo; no network access needed by default)
 
 ## Run Locally
 
@@ -38,8 +38,8 @@ Expected:
 
 ## DuckDB Extension Env
 
-- `KBCORE_DUCKDB_EXTENSION_DIR` (default `./.duckdb/extensions`) — root directory for pre-downloaded DuckDB extensions
-- `KBCORE_DUCKDB_EXTENSION_OFFLINE` (default `true`) — when `true`, extensions are only `LOAD`ed from the local directory (no runtime `INSTALL`); set to `false` to allow downloading extensions on first use
+- `KBCORE_DUCKDB_EXTENSION_DIR` (default `./extensions`) — root directory for pre-downloaded DuckDB extensions
+- `KBCORE_DUCKDB_EXTENSION_OFFLINE` (default `true`) — when `true`, extensions are only `LOAD`ed from the local directory (no runtime `INSTALL`); set to `false` to allow downloading extensions on first use. DuckDB's `autoinstall_known_extensions` and `autoload_known_extensions` are always disabled, so the only way an extension is downloaded is an explicit `INSTALL` issued when `OFFLINE=false`.
 
 ## Sharding and Query Planner Env
 
