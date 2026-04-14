@@ -18,7 +18,7 @@ func TestNewDepsFromKB(t *testing.T) {
 
 		assert.True(t, deps.OfflineExt, "OfflineExt should default to true")
 		// ExtensionDir should be set to whatever ResolveExtensionDir returns.
-		// In this repo it finds .duckdb/extensions; in CI it may be empty.
+		// In this repo it finds extensions/; in CI it may be empty.
 		// The key invariant is that it equals the resolver output, not that it's non-empty.
 		assert.Equal(t, ResolveExtensionDir(), deps.ExtensionDir, "ExtensionDir should default to ResolveExtensionDir()")
 	})
