@@ -1,0 +1,12 @@
+# Minimum valid minnow config - local dev, no external services.
+#
+# Every other knob (HTTP port, blob/cache paths, DuckDB memory, sharding
+# thresholds, scheduler cadence, worker sizing, media timings) falls back
+# to the schema default documented in docs/configuration.md.
+#
+# Run: MINNOW_CONFIG=./examples/minnow.min.yaml ./minnow
+
+embedder:
+  provider: local
+  local:
+    dim: 384

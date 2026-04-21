@@ -1,0 +1,4 @@
+embedder:
+  provider: gpt4all
+  local:
+    dim: 64

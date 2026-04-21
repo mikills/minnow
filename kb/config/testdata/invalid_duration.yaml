@@ -1,0 +1,8 @@
+embedder:
+  provider: local
+  local:
+    dim: 64
+
+http:
+  # "five seconds" is not a valid duration - must fail with line number
+  read_header_timeout: five seconds

@@ -1,0 +1,13 @@
+embedder:
+  provider: local
+  local:
+    dim: 64
+
+# Mongo block present but URI missing - validation must fail.
+mongo:
+  database: minnow
+  collections:
+    manifests: manifests
+    events: kb_events
+    inbox: kb_event_inbox
+    media: media
