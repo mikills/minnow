@@ -2,109 +2,86 @@
 
 ## Prerequisites
 
-- Go toolchain matching module requirements (`go.mod`)
-- CGO-capable environment for DuckDB driver
-- Pre-downloaded DuckDB extensions in `extensions/` (shipped with the repo; no network access needed by default)
+- Go toolchain matching the module's version.
+- CGO-capable environment for the DuckDB driver.
+- DuckDB extensions in `extensions/` (shipped with the repo; no network access needed by default).
 
-## Run Locally
+## Configuration
 
-From `kbcorego/`:
+minnow is configured from a single YAML file, discovered at:
+
+1. `$MINNOW_CONFIG` if set, or
+2. `./minnow.yaml` in the process working directory.
+
+See [configuration.md](configuration.md) for the full schema and
+[`examples/minnow.min.yaml`](../examples/minnow.min.yaml) /
+[`examples/minnow.yaml`](../examples/minnow.yaml) for ready-to-copy starting
+points.
+
+Only two environment variables are read directly by the binary; every other
+deployment knob lives in the YAML.
+
+| Env var             | Purpose                                                  |
+| ------------------- | -------------------------------------------------------- |
+| `MINNOW_CONFIG`     | Path to the YAML config. Defaults to `./minnow.yaml`.    |
+| `MINNOW_LOG_FORMAT` | Logger format (`text` / `json`). Read before the config. |
+
+Secret values (Mongo URI, tokens) are referenced from YAML via `${VAR}`
+interpolation and set as regular environment variables.
+
+## Run locally
 
 ```bash
-go test ./... -count=1
+cp examples/minnow.min.yaml minnow.yaml
 go run .
 ```
 
-Default server address is `127.0.0.1:8080`.
+The default bind address is `127.0.0.1:8080` (override `http.address` in the YAML).
 
-## Quick Health Check
+## Validate a config
+
+Before rolling out a config, run the built-in validator. It loads, interpolates
+`${VAR}` references, applies defaults, and dry-runs the runtime builder - no
+Mongo connection, no port bind.
+
+```bash
+go run . config validate ./minnow.yaml
+# => config OK
+```
+
+The validator exits 1 on any error; wire it into CI to gate merges.
+
+## Send a first request
+
+Health check:
 
 ```bash
 curl -s http://127.0.0.1:8080/healthz
+# => {"status":"ok"}
 ```
 
-Expected:
+`POST /rag/ingest` and `POST /rag/media/upload` are asynchronous and return an
+operation handle. Poll `GET /rag/operations/:id` for terminal status.
 
-```json
-{"status":"ok"}
+## Optional: MongoDB for durable event state
+
+Without a `mongo` block, minnow runs in local/dev mode: manifests are blob-backed
+(and survive restarts as long as the blob root does), while the event store and
+inbox are in-memory (and reset on restart). To make event and inbox state durable,
+add a `mongo` block:
+
+```yaml
+mongo:
+  uri: ${MINNOW_MONGO_URI}
+  database: minnow
+  collections:
+    manifests: manifests
+    events: kb_events
+    inbox: kb_event_inbox
+    media: media
 ```
 
-## Minimal Runtime Env
+Media wiring follows `media.enabled` independently of Mongo: with media
+disabled, `/rag/media/*` routes return `503`.
 
-- `KBCORE_BLOB_ROOT` (default `./.temp/fixtures`)
-- `KBCORE_CACHE_DIR` (default `./.temp/cache`)
-- `KBCORE_MEMORY_LIMIT` (default `128MB`)
-- `KBCORE_HTTP_ADDR` (default `127.0.0.1:8080`)
-
-## DuckDB Extension Env
-
-- `KBCORE_DUCKDB_EXTENSION_DIR` (default `./extensions`) — root directory for pre-downloaded DuckDB extensions
-- `KBCORE_DUCKDB_EXTENSION_OFFLINE` (default `true`) — when `true`, extensions are only `LOAD`ed from the local directory (no runtime `INSTALL`); set to `false` to allow downloading extensions on first use. DuckDB's `autoinstall_known_extensions` and `autoload_known_extensions` are always disabled, so the only way an extension is downloaded is an explicit `INSTALL` issued when `OFFLINE=false`.
-
-## Sharding and Query Planner Env
-
-These defaults are tuned for thresholded sharding in multi-tenant deployments:
-
-- `KBCORE_SHARD_TRIGGER_BYTES` (default `67108864` / `64MB`)
-- `KBCORE_SHARD_TRIGGER_VECTOR_ROWS` (default `150000`)
-- `KBCORE_TARGET_SHARD_BYTES` (default `33554432` / `32MB`)
-- `KBCORE_MAX_VECTOR_ROWS_PER_SHARD` (default `75000`)
-- `KBCORE_QUERY_SHARD_FANOUT` (default `4`)
-- `KBCORE_QUERY_SHARD_FANOUT_ADAPTIVE_MAX` (default `6`)
-- `KBCORE_QUERY_SHARD_PARALLELISM` (default `4`)
-- `KBCORE_SMALL_KB_MAX_SHARDS` (default `2`)
-- `KBCORE_COMPACTION_ENABLED` (default `true`)
-- `KBCORE_COMPACTION_MIN_SHARD_COUNT` (default `8`)
-- `KBCORE_COMPACTION_TOMBSTONE_RATIO` (default `0.20`)
-
-Sharding activation is based on snapshot bytes and vector row counts. It does not depend on source document count or chunk count.
-
-Example:
-
-```bash
-KBCORE_BLOB_ROOT=./.temp/fixtures \
-KBCORE_CACHE_DIR=./.temp/cache \
-KBCORE_MEMORY_LIMIT=256MB \
-KBCORE_HTTP_ADDR=127.0.0.1:8080 \
-go run .
-```
-
-Sharding example:
-
-```bash
-KBCORE_SHARD_TRIGGER_BYTES=67108864 \
-KBCORE_TARGET_SHARD_BYTES=33554432 \
-KBCORE_QUERY_SHARD_FANOUT=4 \
-go run .
-```
-
-## Manifest Store
-
-By default, manifests are stored alongside shard data in the blob store. To use MongoDB instead, set:
-
-- `KBCORE_MANIFEST_MONGO_URI` (default empty) — MongoDB connection string (e.g. `mongodb://localhost:27017`). When set, enables the Mongo-backed manifest store.
-- `KBCORE_MANIFEST_MONGO_DB` (default `kbcore`) — database name.
-- `KBCORE_MANIFEST_MONGO_COLLECTION` (default `manifests`) — collection name.
-
-When `KBCORE_MANIFEST_MONGO_URI` is empty, the blob-backed default is used and no MongoDB connection is made.
-
-## For Multi-Pod Deployments
-
-- Use shared blob storage (for example S3) and keep `KBCORE_CACHE_DIR` pod-local (ephemeral or node-local PVC).
-- For multi-pod writes and compaction, use `RedisWriteLeaseManager` so workers coordinate per KB ID.
-- Keep CAS semantics enabled on manifest writes (`ManifestStore.UpsertIfMatch` path) as the final correctness guard during races.
-
-# HNSW Maintenance
-
-HNSW index refresh is shard-build driven.
-
-## Current Behavior
-
-- Every shard DuckDB file is built with a `docs` HNSW index.
-- Compaction outputs replacement shard files with fresh HNSW indexes.
-- There is no standalone HNSW scheduler, rebuild endpoint, or rebuild metrics surface.
-
-## Operational Impact
-
-- Index freshness follows normal mutation publish and compaction flow.
-- Query performance tuning is controlled through sharding and compaction policy, not a separate HNSW maintenance subsystem.
+See [configuration.md](configuration.md) for the full set of fields.

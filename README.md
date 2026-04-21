@@ -1,92 +1,38 @@
-# KB Core Docs Overview
+# Minnow
 
-Please use this README as an entry point, then jump to the detailed docs:
+> [!WARNING]
+> **Breaking changes expected.** The on-disk format, event schemas, and public API are still moving. Do not pin a production system to a commit SHA without pinning its data too. DuckDB VSS (HNSW) is an experimental upstream dependency - tail latency at 1M+ docs / 768 dim is a known soft spot (see [`BENCHMARK.md`](BENCHMARK.md)).
 
-- Architecture details: `docs/architecture.md`
-- Data model and lifecycle: `docs/data-lifecycle.md`
-- Local setup and runtime config: `docs/getting-started.md`
+Embedded vector search for Go. DuckDB-backed, HNSW-indexed, multi-tenant via per-knowledge-base isolation. A small self-hosted alternative to managed vector databases.
 
-## TL;DR
-
-- Storage is shard-only: manifest + immutable shard DuckDB files.
-- Writes use per-KB lease + manifest CAS (`UploadIfMatch`) to prevent lost updates.
-- Queries read manifest, choose small-KB full scan or centroid-ranked fanout, then merge deterministically.
-- Cache is pod-local and protected by TTL + size budget eviction.
-- Graph query mode is strict: if knowledge graph data is unavailable, request fails.
-
-## End-to-End Flow
-
-```mermaid
-flowchart LR
-    Client([Client]) --> App[KB App]
-    App --> Ingest["/rag/ingest"]
-    App --> Query["/rag/query"]
-
-    Ingest --> Mutate[Mutable tx + checkpoint]
-    Mutate --> Publish[Upload shards + CAS manifest]
-    Publish --> Blob[(Blob store)]
-
-    Query --> Planner[Path selection + shard ranking]
-    Planner --> Cache[(Local shard cache)]
-    Planner --> Blob
-    Planner --> Merge[Deterministic top-K merge]
-```
-
-## Write Path (Ingest)
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant C as Client
-    participant A as App
-    participant K as KB Runtime
-    participant L as Write Lease
-    participant B as Blob Store
-
-    C->>A: POST /rag/ingest
-    A->>K: UpsertDocsAndUpload*
-    K->>L: Acquire(kb_id)
-    K->>K: apply mutation + checkpoint
-    K->>B: upload shard files
-    K->>B: UploadIfMatch(manifest)
-    alt CAS success
-        K-->>A: success
-        A-->>C: 200
-    else CAS conflict
-        K-->>A: conflict
-        A-->>C: retry-capable error
-    end
-```
-
-## Query Path
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant C as Client
-    participant A as App
-    participant K as KB Runtime
-    participant B as Blob Store
-
-    C->>A: POST /rag/query
-    A->>K: Search
-    K->>B: download manifest
-    alt missing manifest
-        K-->>A: ErrKBUninitialized
-        A-->>C: 400
-    else manifest exists
-        K->>K: select small-KB or fanout path
-        K->>K: query selected shards in parallel
-        K->>K: deterministic global merge
-        K-->>A: results
-        A-->>C: 200
-    end
-```
-
-## Quick Run
+## Quickstart
 
 ```bash
-go test ./... -count=1
 go run .
 curl -s http://127.0.0.1:8080/healthz
 ```
+
+The default config at `./minnow.yaml` is sufficient for local development (embedder-only, no external services). See [`docs/getting-started.md`](docs/getting-started.md) for a deployment-grade setup.
+
+## What it does
+
+- Vector and graph RAG over your corpus, exposed at `/rag/query` and `/rag/ingest`.
+- Per-tenant isolation through knowledge bases. Each one has its own manifest, shards, and HNSW indexes.
+- Two storage modes: local disk for always-hot workloads, S3-backed for SaaS with a long-tail distribution of cold tenants.
+- Event-driven ingest pipeline with at-least-once delivery, durable operation lineage, and retry semantics.
+
+## Documentation
+
+- [Getting started](docs/getting-started.md) - install, configure, first request.
+- [Architecture](docs/architecture.md) - components, concurrency, graph extraction.
+- [Data and pipeline](docs/data-lifecycle.md) - storage model, write pipeline, event model, query path.
+- [Configuration reference](docs/configuration.md) - every YAML knob.
+- [Benchmark](BENCHMARK.md) - query latency, ingest throughput, sizing estimates, S3 vs local cost comparison.
+
+## Status
+
+Production-ready for small-to-medium corpora (up to ~1M docs per knowledge base). See [`BENCHMARK.md`](BENCHMARK.md) for latency numbers and the known-slow scenarios.
+
+## License
+
+Apache 2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). Vendored code under `kb/internal/cron/` remains under its original MIT license (PocketBase); the MIT header stays on those files and the attribution is captured in `NOTICE`.
