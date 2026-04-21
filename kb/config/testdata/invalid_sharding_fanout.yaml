@@ -1,0 +1,9 @@
+embedder:
+  provider: local
+  local:
+    dim: 64
+
+sharding:
+  # adaptive max < fanout violates the cross-field constraint
+  query_shard_fanout: 10
+  query_shard_fanout_adaptive_max: 6

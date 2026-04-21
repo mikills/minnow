@@ -1,0 +1,9 @@
+# Smallest valid minnow config for local dev.
+# Relies on schema defaults for everything else (HTTP port, blob root, cache
+# dir, DuckDB memory, sharding, media timings, scheduler cadence, workers).
+# No mongo block -> in-memory stores.
+
+embedder:
+  provider: local
+  local:
+    dim: 64

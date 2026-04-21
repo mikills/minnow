@@ -1,0 +1,9 @@
+embedder:
+  provider: local
+  local:
+    dim: 64
+
+workers:
+  document_upsert:
+    # typo: "currency" instead of "concurrency" - strict decoder must reject
+    currency: 4
