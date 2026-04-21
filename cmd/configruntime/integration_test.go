@@ -82,9 +82,10 @@ media:
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&accepted))
 	require.NotEmpty(t, accepted.EventID, "in-memory event store must produce an event id")
 
-	// Poll the operation endpoint. With workers running on the in-memory
-	// store, the document should reach a terminal state quickly.
-	deadline := time.Now().Add(5 * time.Second)
+	// Poll the operation endpoint. First-run publish bootstraps a DuckDB
+	// shard and loads VSS, so allow generous headroom when the broader
+	// test suite is contending for the machine.
+	deadline := time.Now().Add(45 * time.Second)
 	var lastBody string
 	for time.Now().Before(deadline) {
 		opResp, err := http.Get(baseURL + "/rag/operations/" + accepted.EventID)
