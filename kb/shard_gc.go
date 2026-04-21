@@ -49,7 +49,7 @@ func (l *KB) enqueueReplacedShardsForGC(kbID string, shards []SnapshotShardMetad
 	}
 
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = l.Clock.Now()
 	}
 
 	notBefore := now.Add(DefaultShardGCGraceWindow)
@@ -128,7 +128,7 @@ func (l *KB) deleteShardObject(ctx context.Context, key string) error {
 // Returns the first error encountered (but continues processing all entries).
 func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSweepResult, error) {
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = l.Clock.Now()
 	}
 
 	l.mu.Lock()

@@ -199,7 +199,7 @@ func (l *KB) SweepAbortedMediaUploads(ctx context.Context, now time.Time) (int, 
 		return 0, nil
 	}
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = l.Clock.Now()
 	}
 	cutoff := now.Add(-l.MediaGCConfigOrDefault().UploadCompletion)
 	count := 0

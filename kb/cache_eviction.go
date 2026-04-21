@@ -47,14 +47,14 @@ type cacheSweepResult struct {
 //
 // TODO(j):Capacity should be QPS-based instead of correctness-based
 func (l *KB) evictCacheIfNeeded(ctx context.Context, protectKBID string) error {
-	deadline := time.Now().UTC().Add(defaultCacheEvictionRetryWindow)
+	deadline := l.Clock.Now().Add(defaultCacheEvictionRetryWindow)
 	for {
 		result := l.evictCacheSweepOnce(protectKBID)
 		l.recordCacheBytesCurrent(result.currentBytes)
 		if !result.overBudget {
 			return nil
 		}
-		now := time.Now().UTC()
+		now := l.Clock.Now()
 		if !now.Before(deadline) {
 			l.recordCacheBudgetExceeded()
 			return fmt.Errorf("%w: current_bytes=%d max_bytes=%d protected_kb_count=%d", ErrCacheBudgetExceeded, result.currentBytes, result.maxBytes, result.protectedKBCount)
@@ -108,7 +108,7 @@ func (l *KB) evictCacheSweepOnce(protectKBID string) cacheSweepResult {
 	// may cause it to drift slightly from actual disk usage between scans.
 	var removed map[string]bool
 	if entryTTL > 0 {
-		now := time.Now().UTC()
+		now := l.Clock.Now()
 		removed = make(map[string]bool)
 		for _, entry := range entries {
 			if protected[entry.kbID] {
