@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"sort"
 
-	kb "github.com/mikills/kbcore/kb"
+	kb "github.com/mikills/minnow/kb"
 )
 
 func searchExpandedWithDB(ctx context.Context, db *sql.DB, queryVec []float32, topK int, options kb.ExpansionOptions) ([]kb.ExpandedResult, error) {
@@ -168,6 +168,7 @@ func buildExpandedResults(ctx context.Context, db *sql.DB, queryVec []float32, t
 			Distance:   match.Distance,
 			GraphScore: graph,
 			Score:      score,
+			MediaRefs:  match.MediaRefs,
 		})
 	}
 

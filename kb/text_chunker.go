@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -269,14 +268,4 @@ func hardSplitByRunes(text string, chunkSize int) []string {
 	}
 
 	return result
-}
-
-// trimBounds returns the leading whitespace count and the end position after
-// trimming trailing whitespace. kept for potential future use.
-func trimBounds(s string) (int, int) {
-	leftTrimmed := strings.TrimLeftFunc(s, unicode.IsSpace)
-	leading := len(s) - len(leftTrimmed)
-	bothTrimmed := strings.TrimRightFunc(leftTrimmed, unicode.IsSpace)
-	trailing := leading + len(bothTrimmed)
-	return leading, trailing
 }

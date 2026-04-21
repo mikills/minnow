@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	kb "github.com/mikills/kbcore/kb"
+	kb "github.com/mikills/minnow/kb"
 )
 
 func openConfiguredDBForTest(ctx context.Context, dbPath, memLimit, extensionDir string, offlineExt bool) (*sql.DB, error) {

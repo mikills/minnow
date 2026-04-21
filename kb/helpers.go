@@ -87,6 +87,7 @@ func ExpandedFromVector(results []QueryResult) []ExpandedResult {
 			Distance:   r.Distance,
 			GraphScore: 0,
 			Score:      sim,
+			MediaRefs:  r.MediaRefs,
 		})
 	}
 	return expanded

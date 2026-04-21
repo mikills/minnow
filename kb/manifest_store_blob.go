@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-
 // BlobManifestStore implements ManifestStore on top of a BlobStore.
 // It absorbs all temp-file mechanics for manifest serialization.
 type BlobManifestStore struct {
@@ -25,7 +24,7 @@ func (s *BlobManifestStore) manifestKey(kbID string) string {
 func (s *BlobManifestStore) Get(ctx context.Context, kbID string) (*ManifestDocument, error) {
 	key := s.manifestKey(kbID)
 
-	tmpDir, err := os.MkdirTemp("", "kbcore-manifest-get-*")
+	tmpDir, err := os.MkdirTemp("", "minnow-manifest-get-*")
 	if err != nil {
 		return nil, err
 	}
@@ -83,10 +82,12 @@ func (s *BlobManifestStore) Get(ctx context.Context, kbID string) (*ManifestDocu
 	}
 
 	if manifest.FormatKind == "" {
-		manifest.FormatKind = "duckdb_sharded" // legacy default
+		// default when format_kind is absent in a stored manifest document
+		manifest.FormatKind = "duckdb_sharded"
 	}
 	if manifest.FormatVersion <= 0 {
-		manifest.FormatVersion = 1 // legacy default
+		// default when format_version is absent in a stored manifest document
+		manifest.FormatVersion = 1
 	}
 
 	return &ManifestDocument{
@@ -107,7 +108,7 @@ func (s *BlobManifestStore) HeadVersion(ctx context.Context, kbID string) (strin
 }
 
 func (s *BlobManifestStore) UpsertIfMatch(ctx context.Context, kbID string, manifest SnapshotShardManifest, expectedVersion string) (string, error) {
-	tmpDir, err := os.MkdirTemp("", "kbcore-manifest-upsert-*")
+	tmpDir, err := os.MkdirTemp("", "minnow-manifest-upsert-*")
 	if err != nil {
 		return "", err
 	}

@@ -11,7 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const defaultRedisLeasePrefix = "kbcore:lease:"
+const defaultRedisLeasePrefix = "minnow:lease:"
 
 // RedisWriteLeaseManager coordinates per-KB write leases via Redis.
 //

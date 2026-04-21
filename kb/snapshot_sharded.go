@@ -1,14 +1,17 @@
-// Snapshot publishing and reconstruction for sharded knowledge bases.
+// Publish model: Write-Audit-Publish (WAP), as practiced by Apache Iceberg
+// and Delta Lake.
 //
-// This file implements the two-direction transfer of a KB between local DuckDB
-// files and BlobStore-backed shard objects:
+//  1. Write: workers produce immutable, content-addressed staged artifacts
+//     (shards). Visible in blob storage but not referenced by any manifest.
+//  2. Audit: the publish path validates that all artifacts exist and the
+//     candidate manifest is internally consistent.
+//  3. Publish: single CAS update on the manifest blob via
+//     ManifestStore.UpsertIfMatch flips visibility atomically.
 //
-//   - Upload: a mutable local DuckDB is split into fixed-size, independently
-//     queryable shard files, each uploaded as an immutable blob, and a manifest
-//     JSON is published to replace the previous snapshot.
-//   - Download: the manifest is fetched, every shard is downloaded and verified,
-//     and all shard tables are merged into a single reconstructed DuckDB file
-//     with a fresh HNSW index.
+// On CAS conflict the convention is to rebase, not abort: re-read the manifest,
+// re-validate, and retry the CAS up to a bounded number of attempts. Because
+// staged artifacts are content-addressed, re-publishing the same set is
+// idempotent at the blob layer.
 
 package kb
 
@@ -37,6 +40,10 @@ type SnapshotShardMetadata struct {
 	GraphAvailable bool      `json:"graph_available"`
 	Centroid       []float32 `json:"centroid,omitempty"`
 	SHA256         string    `json:"sha256,omitempty"`
+	// MediaIDs lists media object ids referenced by chunks in this shard.
+	// Empty for shards that predate the media subsystem; readers must treat
+	// a nil slice as "no refs" rather than "unknown".
+	MediaIDs []string `json:"media_ids,omitempty"`
 }
 
 // SnapshotShardManifest describes a sharded snapshot using one manifest key.

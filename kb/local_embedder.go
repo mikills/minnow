@@ -16,8 +16,8 @@ const (
 )
 
 var (
-	seedIndexBytes = []byte("kbcore-subword-idx-v1::")
-	seedSignBytes  = []byte("kbcore-subword-sgn-v1::")
+	seedIndexBytes = []byte("minnow-subword-idx-v1::")
+	seedSignBytes  = []byte("minnow-subword-sgn-v1::")
 )
 
 // LocalEmbedder is a deterministic, pure-Go embedding implementation using

@@ -1,31 +1,3 @@
-// graph_pipeline.go defines the graph extraction pipeline and the types that
-// flow through it.
-//
-// Pipeline stages:
-//
-//  1. Chunk   — Chunker splits each Document into fixed-size Chunk values.
-//  2. Extract — Grapher receives a batch of Chunks and returns raw
-//               EntityCandidates and EdgeCandidates.
-//  3. Canonicalize — Canonicalizer maps each raw entity name to a stable ID
-//               (e.g. lowercase, deduplicated). If no Canonicalizer is set,
-//               the raw name is used as-is.
-//
-// Type progression:
-//
-//   EntityCandidate / EdgeCandidate  →  GraphEntity / GraphEdge  →  GraphBuildResult
-//   (raw, string names)                 (canonicalized IDs)         (persisted)
-//
-// Batching:
-//
-//   Chunks are accumulated up to GraphBuilder.BatchSize before each Grapher
-//   call, reducing the number of LLM API round-trips for large document sets.
-//
-// Incremental persistence:
-//
-//   BuildAndInsert passes a sink to buildGraph that writes each completed batch
-//   to DuckDB immediately, keeping peak memory proportional to batch size rather
-//   than total document count.
-
 package kb
 
 import (
@@ -104,7 +76,7 @@ type GraphBuildResult struct {
 
 // GraphBuilder coordinates chunking, graph extraction, and canonicalization.
 // BatchSize controls how many chunks are sent to Grapher.Extract per call;
-// it defaults to 500 when <= 0. Canonicalizer is optional — when nil, raw
+// it defaults to 500 when <= 0. Canonicalizer is optional; when nil, raw
 // entity names are used as IDs directly.
 type GraphBuilder struct {
 	Chunker       Chunker

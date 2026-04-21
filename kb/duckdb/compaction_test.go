@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	kb "github.com/mikills/kbcore/kb"
+	kb "github.com/mikills/minnow/kb"
 )
 
 func TestDuckDBCompaction(t *testing.T) {
@@ -314,7 +314,8 @@ func uploadRealShardManifest(t *testing.T, bs kb.BlobStore, kbID string, shardCo
 		_, err = db.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE docs (
 			id TEXT,
 			content TEXT,
-			embedding FLOAT[%d]
+			embedding FLOAT[%d],
+			media_refs TEXT
 		)`, embDim))
 		require.NoError(t, err)
 
@@ -323,7 +324,7 @@ func uploadRealShardManifest(t *testing.T, bs kb.BlobStore, kbID string, shardCo
 			vec[d] = float32(i*embDim+d) * 0.1
 		}
 		_, err = db.ExecContext(ctx, fmt.Sprintf(
-			`INSERT INTO docs VALUES ('doc-%d', 'content %d', %s::FLOAT[%d])`,
+			`INSERT INTO docs VALUES ('doc-%d', 'content %d', %s::FLOAT[%d], NULL)`,
 			i, i, FormatVectorForSQL(vec), embDim,
 		))
 		require.NoError(t, err)

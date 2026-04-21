@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	kb "github.com/mikills/kbcore/kb"
+	kb "github.com/mikills/minnow/kb"
 )
 
 type vectorQueryPath int

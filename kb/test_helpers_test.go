@@ -13,8 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"math/rand/v2"
+
 	"github.com/stretchr/testify/require"
-	"golang.org/x/exp/rand"
 )
 
 // flakyUploadBlobStore wraps a BlobStore and fails the first N upload attempts
@@ -153,7 +154,7 @@ func (e fixtureEmbedder) Embed(_ context.Context, input string) ([]float32, erro
 	hasher := fnv.New64a()
 	_, _ = hasher.Write([]byte(input))
 	seed := uint64(hasher.Sum64())
-	rng := rand.New(rand.NewSource(seed))
+	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
 	vec := make([]float32, e.dim)
 	for i := range vec {
 		vec[i] = float32(rng.NormFloat64())

@@ -113,61 +113,54 @@ func TestResolveFormat(t *testing.T) {
 	}
 }
 
-func TestResolveFormatByKindMismatch(t *testing.T) {
-	formatA := &stubArtifactFormat{kind: "format-a"}
-	kb := NewKB(
-		&LocalBlobStore{Root: t.TempDir()},
-		t.TempDir(),
-		WithArtifactFormat(formatA),
-	)
+func TestArtifactFormatRegistration(t *testing.T) {
+	t.Run("resolve by kind returns error for unregistered format", func(t *testing.T) {
+		formatA := &stubArtifactFormat{kind: "format-a"}
+		kb := NewKB(
+			&LocalBlobStore{Root: t.TempDir()},
+			t.TempDir(),
+			WithArtifactFormat(formatA),
+		)
 
-	_, err := kb.resolveFormatByKind("format-b")
-	if !errors.Is(err, ErrFormatNotRegistered) {
-		t.Fatalf("expected ErrFormatNotRegistered, got %v", err)
-	}
-}
+		_, err := kb.resolveFormatByKind("format-b")
+		if !errors.Is(err, ErrFormatNotRegistered) {
+			t.Fatalf("expected ErrFormatNotRegistered, got %v", err)
+		}
+	})
 
-func TestRegisterFormatValidation(t *testing.T) {
-	tests := []struct {
-		name   string
-		format ArtifactFormat
-	}{
-		{
-			name:   "nil_format",
-			format: nil,
-		},
-		{
-			name:   "empty_kind",
-			format: &stubArtifactFormat{},
-		},
-	}
+	t.Run("rejects nil format", func(t *testing.T) {
+		kb := NewKB(&LocalBlobStore{Root: t.TempDir()}, t.TempDir())
+		err := kb.RegisterFormat(nil)
+		if !errors.Is(err, ErrInvalidArtifactFormat) {
+			t.Fatalf("expected ErrInvalidArtifactFormat, got %v", err)
+		}
+		if kb.HasFormat() {
+			t.Fatal("expected registry to remain empty")
+		}
+	})
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			kb := NewKB(&LocalBlobStore{Root: t.TempDir()}, t.TempDir())
+	t.Run("rejects format with empty kind", func(t *testing.T) {
+		kb := NewKB(&LocalBlobStore{Root: t.TempDir()}, t.TempDir())
+		err := kb.RegisterFormat(&stubArtifactFormat{})
+		if !errors.Is(err, ErrInvalidArtifactFormat) {
+			t.Fatalf("expected ErrInvalidArtifactFormat, got %v", err)
+		}
+		if kb.HasFormat() {
+			t.Fatal("expected registry to remain empty")
+		}
+	})
 
-			err := kb.RegisterFormat(tc.format)
-			if !errors.Is(err, ErrInvalidArtifactFormat) {
-				t.Fatalf("expected ErrInvalidArtifactFormat, got %v", err)
-			}
-			if kb.HasFormat() {
-				t.Fatal("expected registry to remain empty")
-			}
-		})
-	}
-}
-
-func TestOptionRegistrationErrorsSurfaceAtResolve(t *testing.T) {
-	kb := NewKB(
-		&LocalBlobStore{Root: t.TempDir()},
-		t.TempDir(),
-		WithArtifactFormat(nil),
-	)
-
-	_, err := kb.resolveFormat(context.Background(), "missing")
-	if !errors.Is(err, ErrInvalidArtifactFormat) {
-		t.Fatalf("expected ErrInvalidArtifactFormat, got %v", err)
-	}
+	t.Run("option registration errors surface at resolve time", func(t *testing.T) {
+		kb := NewKB(
+			&LocalBlobStore{Root: t.TempDir()},
+			t.TempDir(),
+			WithArtifactFormat(nil),
+		)
+		_, err := kb.resolveFormat(context.Background(), "missing")
+		if !errors.Is(err, ErrInvalidArtifactFormat) {
+			t.Fatalf("expected ErrInvalidArtifactFormat, got %v", err)
+		}
+	})
 }
 
 type stubArtifactFormat struct {

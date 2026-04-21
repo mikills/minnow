@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	kb "github.com/mikills/kbcore/kb"
+	kb "github.com/mikills/minnow/kb"
 )
 
 func FormatVectorForSQL(vec []float32) string {
@@ -41,7 +41,7 @@ func QueryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int)
 
 	vecStr := FormatVectorForSQL(queryVec)
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance
+		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance, media_refs
 		FROM docs
 		ORDER BY distance
 		LIMIT %d
@@ -57,8 +57,12 @@ func QueryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int)
 	results := make([]kb.QueryResult, 0, k)
 	for rows.Next() {
 		var r kb.QueryResult
-		if err := rows.Scan(&r.ID, &r.Content, &r.Distance); err != nil {
+		var mediaRefsRaw sql.NullString
+		if err := rows.Scan(&r.ID, &r.Content, &r.Distance, &mediaRefsRaw); err != nil {
 			return nil, fmt.Errorf("failed to scan result: %w", err)
+		}
+		if refs, derr := decodeMediaRefs(mediaRefsRaw); derr == nil {
+			r.MediaRefs = refs
 		}
 		results = append(results, r)
 	}
@@ -70,8 +74,9 @@ func QueryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int)
 }
 
 type docMatch struct {
-	Content  string
-	Distance float64
+	Content   string
+	Distance  float64
+	MediaRefs []kb.ChunkMediaRef
 }
 
 func queryDocMatchesForIDs(ctx context.Context, db *sql.DB, queryVec []float32, ids []string) (map[string]docMatch, error) {
@@ -82,7 +87,7 @@ func queryDocMatchesForIDs(ctx context.Context, db *sql.DB, queryVec []float32, 
 	vecStr := FormatVectorForSQL(queryVec)
 	placeholders := kb.BuildInClausePlaceholders(len(ids))
 	query := fmt.Sprintf(`
-		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance
+		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance, media_refs
 		FROM docs
 		WHERE id IN (%s)
 	`, vecStr, len(queryVec), placeholders)
@@ -106,10 +111,12 @@ func queryDocMatchesForIDs(ctx context.Context, db *sql.DB, queryVec []float32, 
 		var id string
 		var content string
 		var distance float64
-		if err := rows.Scan(&id, &content, &distance); err != nil {
+		var mediaRefsRaw sql.NullString
+		if err := rows.Scan(&id, &content, &distance, &mediaRefsRaw); err != nil {
 			return nil, fmt.Errorf("failed to scan query result: %w", err)
 		}
-		results[id] = docMatch{Content: content, Distance: distance}
+		refs, _ := decodeMediaRefs(mediaRefsRaw)
+		results[id] = docMatch{Content: content, Distance: distance, MediaRefs: refs}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("query rows iteration error: %w", err)
@@ -170,6 +177,23 @@ func ensureDocTombstonesTable(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("create doc_tombstones index: %w", err)
 	}
 	return nil
+}
+
+// AssertSafeIdentifier panics if s contains anything outside [A-Za-z0-9_].
+// Used as defense in depth at every call site that interpolates SQL
+// identifiers via fmt.Sprintf. Callers today pass internal constants only;
+// this guard catches regressions where a future change routes user input
+// through the interpolation path.
+func AssertSafeIdentifier(s string) {
+	if s == "" {
+		panic(fmt.Sprintf("unsafe empty SQL identifier"))
+	}
+	for _, r := range s {
+		ok := (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_'
+		if !ok {
+			panic(fmt.Sprintf("unsafe SQL identifier: %q", s))
+		}
+	}
 }
 
 func CheckpointDB(ctx context.Context, db *sql.DB) error {

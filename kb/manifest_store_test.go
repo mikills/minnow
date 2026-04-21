@@ -17,11 +17,14 @@ import (
 )
 
 func TestBlobManifestStore(t *testing.T) {
-	runManifestStoreTests(t, func(t *testing.T) ManifestStore {
-		blobRoot := t.TempDir()
-		blobStore := &LocalBlobStore{Root: blobRoot}
-		return &BlobManifestStore{Store: blobStore}
+	t.Run("contract", func(t *testing.T) {
+		runManifestStoreTests(t, func(t *testing.T) ManifestStore {
+			blobRoot := t.TempDir()
+			blobStore := &LocalBlobStore{Root: blobRoot}
+			return &BlobManifestStore{Store: blobStore}
+		})
 	})
+	t.Run("get_retry", testBlobManifestStoreGetRetry)
 }
 
 // runManifestStoreTests exercises the full ManifestStore contract.
@@ -194,7 +197,7 @@ func runManifestStoreTests(t *testing.T, newStore func(t *testing.T) ManifestSto
 	}
 }
 
-func TestBlobManifestStoreGetRetry(t *testing.T) {
+func testBlobManifestStoreGetRetry(t *testing.T) {
 	t.Run("succeeds_after_transient_churn", func(t *testing.T) {
 		// Simulate a concurrent writer that changes the manifest between the
 		// first Head and the post-Download Head for 2 attempts, then stabilizes.
@@ -218,7 +221,7 @@ func TestBlobManifestStoreGetRetry(t *testing.T) {
 	})
 
 	t.Run("exhausts_retries_returns_error", func(t *testing.T) {
-		// Churn on every attempt — should exhaust all 4 retries.
+		// Churn on every attempt - should exhaust all 4 retries.
 		blobRoot := t.TempDir()
 		inner := &LocalBlobStore{Root: blobRoot}
 		churner := &churnOnHeadBlobStore{inner: inner, churnAttempts: 10}
@@ -262,9 +265,9 @@ type churnOnHeadBlobStore struct {
 	churnsTriggered atomic.Int32
 	onChurn         func()
 
-	mu          sync.Mutex
-	headCount   map[string]int // per-key head call count within an attempt
-	churnsDone  int
+	mu         sync.Mutex
+	headCount  map[string]int // per-key head call count within an attempt
+	churnsDone int
 }
 
 func (c *churnOnHeadBlobStore) Head(ctx context.Context, key string) (*BlobObjectInfo, error) {

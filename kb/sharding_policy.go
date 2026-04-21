@@ -263,33 +263,33 @@ func (l *KB) ShardingOpenMetricsText() string {
 	sort.Strings(kbIDs)
 
 	lines := []string{
-		"# TYPE kbcore_shard_count gauge",
-		"# TYPE kbcore_query_shard_fanout_used_total counter",
-		"# TYPE kbcore_query_shard_fanout_capped_total counter",
-		"# TYPE kbcore_query_shard_exec_total counter",
-		"# TYPE kbcore_query_shard_exec_failures_total counter",
-		"# TYPE kbcore_compaction_runs_total counter",
-		"# TYPE kbcore_compaction_failures_total counter",
-		"# TYPE kbcore_compaction_duration_seconds_sum counter",
-		"# TYPE kbcore_manifest_cas_conflicts_total counter",
-		"# TYPE kbcore_shard_cache_hits_total counter",
-		"# TYPE kbcore_shard_cache_misses_total counter",
+		"# TYPE minnow_shard_count gauge",
+		"# TYPE minnow_query_shard_fanout_used_total counter",
+		"# TYPE minnow_query_shard_fanout_capped_total counter",
+		"# TYPE minnow_query_shard_exec_total counter",
+		"# TYPE minnow_query_shard_exec_failures_total counter",
+		"# TYPE minnow_compaction_runs_total counter",
+		"# TYPE minnow_compaction_failures_total counter",
+		"# TYPE minnow_compaction_duration_seconds_sum counter",
+		"# TYPE minnow_manifest_cas_conflicts_total counter",
+		"# TYPE minnow_shard_cache_hits_total counter",
+		"# TYPE minnow_shard_cache_misses_total counter",
 	}
 
 	for _, kbID := range kbIDs {
 		m := snap[kbID]
 		labels := fmt.Sprintf("{kb_id=\"%s\"}", escapeMetricLabelValue(kbID))
-		lines = append(lines, fmt.Sprintf("kbcore_shard_count%s %d", labels, m.ShardCount))
-		lines = append(lines, fmt.Sprintf("kbcore_query_shard_fanout_used_total%s %d", labels, m.FanoutUsedTotal))
-		lines = append(lines, fmt.Sprintf("kbcore_query_shard_fanout_capped_total%s %d", labels, m.FanoutCappedTotal))
-		lines = append(lines, fmt.Sprintf("kbcore_query_shard_exec_total%s %d", labels, m.ShardExecTotal))
-		lines = append(lines, fmt.Sprintf("kbcore_query_shard_exec_failures_total%s %d", labels, m.ShardExecFailuresTotal))
-		lines = append(lines, fmt.Sprintf("kbcore_compaction_runs_total%s %d", labels, m.CompactionRunsTotal))
-		lines = append(lines, fmt.Sprintf("kbcore_compaction_failures_total%s %d", labels, m.CompactionFailuresTotal))
-		lines = append(lines, fmt.Sprintf("kbcore_compaction_duration_seconds_sum%s %.6f", labels, m.CompactionDurationTotal.Seconds()))
-		lines = append(lines, fmt.Sprintf("kbcore_manifest_cas_conflicts_total%s %d", labels, m.ManifestCASConflicts))
-		lines = append(lines, fmt.Sprintf("kbcore_shard_cache_hits_total%s %d", labels, m.ShardCacheHitsTotal))
-		lines = append(lines, fmt.Sprintf("kbcore_shard_cache_misses_total%s %d", labels, m.ShardCacheMissesTotal))
+		lines = append(lines, fmt.Sprintf("minnow_shard_count%s %d", labels, m.ShardCount))
+		lines = append(lines, fmt.Sprintf("minnow_query_shard_fanout_used_total%s %d", labels, m.FanoutUsedTotal))
+		lines = append(lines, fmt.Sprintf("minnow_query_shard_fanout_capped_total%s %d", labels, m.FanoutCappedTotal))
+		lines = append(lines, fmt.Sprintf("minnow_query_shard_exec_total%s %d", labels, m.ShardExecTotal))
+		lines = append(lines, fmt.Sprintf("minnow_query_shard_exec_failures_total%s %d", labels, m.ShardExecFailuresTotal))
+		lines = append(lines, fmt.Sprintf("minnow_compaction_runs_total%s %d", labels, m.CompactionRunsTotal))
+		lines = append(lines, fmt.Sprintf("minnow_compaction_failures_total%s %d", labels, m.CompactionFailuresTotal))
+		lines = append(lines, fmt.Sprintf("minnow_compaction_duration_seconds_sum%s %.6f", labels, m.CompactionDurationTotal.Seconds()))
+		lines = append(lines, fmt.Sprintf("minnow_manifest_cas_conflicts_total%s %d", labels, m.ManifestCASConflicts))
+		lines = append(lines, fmt.Sprintf("minnow_shard_cache_hits_total%s %d", labels, m.ShardCacheHitsTotal))
+		lines = append(lines, fmt.Sprintf("minnow_shard_cache_misses_total%s %d", labels, m.ShardCacheMissesTotal))
 	}
 
 	return strings.Join(lines, "\n") + "\n"

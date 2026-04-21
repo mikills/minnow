@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	kb "github.com/mikills/kbcore/kb"
+	kb "github.com/mikills/minnow/kb"
 )
 
 const maxCompactionCandidates = 4

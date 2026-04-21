@@ -1,38 +1,3 @@
-// Cache eviction manages local disk cache cleanup for downloaded KB snapshots.
-//
-// When KB snapshots are downloaded from blob storage for querying, they are
-// cached locally to avoid repeated downloads. Over time, the cache can grow
-// beyond acceptable limits or entries can become stale. This file implements
-// eviction policies to manage cache size and freshness.
-//
-// Eviction policies:
-//
-//   - TTL-based eviction: entries older than CacheEntryTTL are removed regardless
-//     of cache size. This ensures stale data is eventually cleaned up.
-//   - Size-based eviction: when total cache size exceeds MaxCacheBytes, the oldest
-//     entries (by last touch time) are removed until under budget.
-//
-// System fit:
-//
-//   - Cache eviction runs before loading a KB snapshot to ensure space is available.
-//   - Protected KBs (currently being used) are never evicted during that operation.
-//   - Eviction is LRU-ordered: oldest-touched entries are evicted first.
-//
-// Safety guarantees:
-//
-//   - Per-KB locks are held during removal to prevent concurrent access conflicts.
-//   - Protected KB IDs are excluded from eviction (e.g., the KB being loaded).
-//   - Retry loop with deadline handles transient filesystem issues.
-//
-// Failure modes:
-//
-//   - If cache cannot be brought under budget within the retry window, returns
-//     ErrCacheBudgetExceeded. The caller can proceed but may face disk pressure.
-//   - Individual entry removal failures are recorded as metrics but don't abort
-//     the sweep; eviction continues with remaining entries.
-//   - Filesystem scan errors for individual entries are skipped; only root
-//     directory read failure aborts collection.
-
 package kb
 
 import (
@@ -362,15 +327,15 @@ func (l *KB) CacheEvictionMetricsSnapshot() CacheEvictionMetricsSnapshot {
 func (l *KB) CacheEvictionOpenMetricsText() string {
 	m := l.CacheEvictionMetricsSnapshot()
 	lines := []string{
-		"# TYPE kbcore_cache_evictions_total counter",
-		fmt.Sprintf("kbcore_cache_evictions_total{reason=\"ttl\"} %d", m.CacheEvictionsTTLTotal),
-		fmt.Sprintf("kbcore_cache_evictions_total{reason=\"size\"} %d", m.CacheEvictionsSizeTotal),
-		"# TYPE kbcore_cache_eviction_errors_total counter",
-		fmt.Sprintf("kbcore_cache_eviction_errors_total %d", m.CacheEvictionErrorsTotal),
-		"# TYPE kbcore_cache_budget_exceeded_total counter",
-		fmt.Sprintf("kbcore_cache_budget_exceeded_total %d", m.CacheBudgetExceededTotal),
-		"# TYPE kbcore_cache_bytes_current gauge",
-		fmt.Sprintf("kbcore_cache_bytes_current %d", m.CacheBytesCurrent),
+		"# TYPE minnow_cache_evictions_total counter",
+		fmt.Sprintf("minnow_cache_evictions_total{reason=\"ttl\"} %d", m.CacheEvictionsTTLTotal),
+		fmt.Sprintf("minnow_cache_evictions_total{reason=\"size\"} %d", m.CacheEvictionsSizeTotal),
+		"# TYPE minnow_cache_eviction_errors_total counter",
+		fmt.Sprintf("minnow_cache_eviction_errors_total %d", m.CacheEvictionErrorsTotal),
+		"# TYPE minnow_cache_budget_exceeded_total counter",
+		fmt.Sprintf("minnow_cache_budget_exceeded_total %d", m.CacheBudgetExceededTotal),
+		"# TYPE minnow_cache_bytes_current gauge",
+		fmt.Sprintf("minnow_cache_bytes_current %d", m.CacheBytesCurrent),
 	}
 	metrics := strings.Join(lines, "\n") + "\n"
 	if shardMetrics := l.ShardingOpenMetricsText(); shardMetrics != "" {

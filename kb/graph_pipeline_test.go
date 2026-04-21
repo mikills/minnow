@@ -23,7 +23,8 @@ func (staticGrapher) Extract(_ context.Context, chunks []Chunk) (*GraphExtractio
 	return &GraphExtraction{Entities: entities}, nil
 }
 
-func TestGraphBuilderSinkIncludesEntityChunkMappings(t *testing.T) {
+func TestGraphBuilder(t *testing.T) {
+	t.Run("sink includes entity-chunk mappings", func(t *testing.T) {
 	b := &GraphBuilder{
 		Chunker:   staticChunker{},
 		Grapher:   staticGrapher{},
@@ -44,4 +45,5 @@ func TestGraphBuilderSinkIncludesEntityChunkMappings(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, sinkCalls)
 	require.Len(t, result.EntityChunkMappings, 2)
+	})
 }

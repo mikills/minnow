@@ -1,37 +1,3 @@
-// Shard GC handles garbage collection of replaced shard files after compaction
-// or other shard-replacing operations.
-//
-// When compaction merges multiple shards into one replacement shard, the old
-// shard files cannot be deleted immediately because in-flight readers may still
-// be accessing them. This file implements a delayed GC mechanism that safely
-// cleans up old shards after a configurable grace period.
-//
-// System fit:
-//
-//   - After compaction publishes a new manifest, replaced shards are enqueued
-//     for GC via enqueueReplacedShardsForGC rather than deleted immediately.
-//   - A background sweep (SweepDelayedShardGC) processes the queue, deleting
-//     shards only after the grace window has elapsed.
-//   - Before deletion, the sweep verifies the shard is no longer referenced in
-//     the current manifest, preventing accidental deletion of active shards.
-//
-// Safety guarantees:
-//
-//   - Grace window (DefaultShardGCGraceWindow) ensures in-flight readers have
-//     time to finish before shard files are removed.
-//   - Manifest check prevents deleting shards that are still active (e.g., if
-//     compaction was rolled back or a concurrent writer re-added the shard).
-//   - Idempotent: treats ErrNotExist/ErrBlobNotFound as success.
-//   - Retry mechanism handles transient delete failures with backoff.
-//
-// Failure modes:
-//
-//   - Manifest download failure: entry is re-queued with retry delay.
-//   - Delete failure: entry is re-queued with retry delay; first error is
-//     returned but sweep continues processing remaining entries.
-//   - Shard still referenced: entry is re-queued (may have been re-added by
-//     concurrent operation).
-
 package kb
 
 import (

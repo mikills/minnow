@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	kb "github.com/mikills/kbcore/kb"
+	kb "github.com/mikills/minnow/kb"
 )
 
 var tempTableCounter atomic.Int64

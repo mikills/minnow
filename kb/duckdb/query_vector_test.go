@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	kb "github.com/mikills/kbcore/kb"
+	kb "github.com/mikills/minnow/kb"
 )
 
 // registerFormatOnHarness creates and registers a DuckDBArtifactFormat on the
@@ -172,8 +172,8 @@ func uploadTestShardManifest(t *testing.T, loader *kb.KB, kbID string, shardCoun
 	require.NoError(t, err)
 }
 
-// requireDuckDBFormat extracts the *DuckDBArtifactFormat from a KB,
-// checking both the legacy field and the format registry.
+// requireDuckDBFormat extracts the *DuckDBArtifactFormat from a KB via the
+// default format registry.
 func requireDuckDBFormat(t *testing.T, loader *kb.KB) *DuckDBArtifactFormat {
 	t.Helper()
 	af := loader.DefaultFormat()
@@ -330,9 +330,9 @@ func testKBTopKShardExecutionModes(t *testing.T) {
 			if tc.checkMetrics {
 				metricsText := loader.ShardingOpenMetricsText()
 				if tc.expectExec {
-					assert.Contains(t, metricsText, fmt.Sprintf("kbcore_query_shard_exec_total{kb_id=\"%s\"}", kbID))
+					assert.Contains(t, metricsText, fmt.Sprintf("minnow_query_shard_exec_total{kb_id=\"%s\"}", kbID))
 				} else {
-					assert.NotContains(t, metricsText, fmt.Sprintf("kbcore_query_shard_exec_total{kb_id=\"%s\"}", kbID))
+					assert.NotContains(t, metricsText, fmt.Sprintf("minnow_query_shard_exec_total{kb_id=\"%s\"}", kbID))
 				}
 			}
 		})
