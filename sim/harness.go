@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -13,6 +14,11 @@ import (
 
 	kb "github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/kb/duckdb"
+)
+
+var (
+	osReadDir   = os.ReadDir
+	osRemoveAll = os.RemoveAll
 )
 
 // Harness is a seeded, deterministic test rig for minnow. It wires the KB and
@@ -252,6 +258,95 @@ func (h *Harness) Format() *duckdb.DuckDBArtifactFormat { return h.format }
 // Ctx returns the base context. Scenarios wanting a timeout should derive
 // their own via context.WithTimeout.
 func (h *Harness) Ctx() context.Context { return h.ctx }
+
+// Fatalf delegates to the underlying *testing.T so scenarios in other
+// packages can halt the run on unrecoverable state without reaching into t.
+func (h *Harness) Fatalf(format string, args ...any) {
+	h.t.Helper()
+	h.t.Fatalf(format, args...)
+}
+
+// Errorf delegates to the underlying *testing.T for non-fatal failures.
+func (h *Harness) Errorf(format string, args ...any) {
+	h.t.Helper()
+	h.t.Errorf(format, args...)
+}
+
+// Embed runs the KB's embedder on text. Provided so scenarios can build
+// probe vectors deterministically from known inputs.
+func (h *Harness) Embed(ctx context.Context, text string) ([]float32, error) {
+	return h.kb.Embed(ctx, text)
+}
+
+// RecordManifestVersion captures the current manifest version for kbID so
+// the ManifestMonotonic invariant can compare future writes against it.
+// Scenarios should call this after any successful ingest.
+func (h *Harness) RecordManifestVersion(kbID string) {
+	v, err := h.manifest.HeadVersion(h.Ctx(), kbID)
+	if err != nil {
+		return
+	}
+	h.mu.Lock()
+	h.lastManifestVers[kbID] = v
+	h.mu.Unlock()
+}
+
+// WipeCache removes every file under the cache directory, forcing the next
+// query to re-download shards from the blob store. Mimics a hostile eviction
+// or a pod-restart with an ephemeral cache volume.
+func (h *Harness) WipeCache() error {
+	entries, err := osReadDir(h.cacheDir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := osRemoveAll(filepath.Join(h.cacheDir, e.Name())); err != nil {
+			return err
+		}
+	}
+	// Close any pooled shard connections so the in-DuckDB cache is also
+	// dropped; otherwise the next query can hit a stale file handle.
+	h.format.Close()
+	return nil
+}
+
+// BlobKeys lists every blob key whose path starts with prefix. Used by
+// invariants that need to compare manifests against on-disk blobs.
+func (h *Harness) BlobKeys(prefix string) ([]string, error) {
+	infos, err := h.blobStore.List(h.ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(infos))
+	for _, info := range infos {
+		keys = append(keys, info.Key)
+	}
+	return keys, nil
+}
+
+// KBIDs returns the set of KB IDs the harness has ingested into so far.
+func (h *Harness) KBIDs() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ids := make([]string, 0, len(h.ingestedDocs))
+	for id := range h.ingestedDocs {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// ManifestShards returns the shard metadata for kbID from the current manifest,
+// or nil if the KB has no manifest.
+func (h *Harness) ManifestShards(kbID string) ([]kb.SnapshotShardMetadata, error) {
+	doc, err := h.manifest.Get(h.ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	if doc == nil {
+		return nil, nil
+	}
+	return doc.Manifest.Shards, nil
+}
 
 // AssertInvariants runs all registered invariants and reports failures via
 // t.Errorf (non-fatal so the full batch runs). Returns the number of

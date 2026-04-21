@@ -105,6 +105,37 @@ func (n noDocLoss) Check(h *Harness) error {
 	return nil
 }
 
+// ShardsInManifestExist asserts that every shard listed in every KB's
+// manifest has a corresponding blob object. Catches bugs where a manifest is
+// swapped before its shards finish uploading.
+type shardsInManifestExist struct{}
+
+// ShardsInManifestExist returns the shard-liveness invariant.
+func ShardsInManifestExist() Invariant { return shardsInManifestExist{} }
+
+func (shardsInManifestExist) Name() string { return "shards_in_manifest_exist" }
+
+func (shardsInManifestExist) Check(h *Harness) error {
+	for _, kbID := range h.KBIDs() {
+		shards, err := h.ManifestShards(kbID)
+		if err != nil {
+			return fmt.Errorf("read manifest for %s: %w", kbID, err)
+		}
+		for _, shard := range shards {
+			info, err := h.blobStore.Head(h.ctx, shard.Key)
+			if err != nil {
+				return fmt.Errorf("kb %s shard %s (%s) missing from blob store: %w",
+					kbID, shard.ShardID, shard.Key, err)
+			}
+			if info == nil {
+				return fmt.Errorf("kb %s shard %s (%s): Head returned nil info",
+					kbID, shard.ShardID, shard.Key)
+			}
+		}
+	}
+	return nil
+}
+
 func pickOne(set map[string]struct{}) string {
 	for k := range set {
 		return k
