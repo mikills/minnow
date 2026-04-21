@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mikills/kbcore/kb"
+	"github.com/mikills/minnow/kb"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -30,6 +30,7 @@ type AppConfig struct {
 	ReadHeaderTimeout     time.Duration
 	ShutdownTimeout       time.Duration
 	CacheEvictionInterval time.Duration
+	MaxMediaBytes         int64
 	Logger                *slog.Logger
 }
 
@@ -57,6 +58,14 @@ type App struct {
 
 	cacheEvictCancel context.CancelFunc
 	cacheEvictDone   chan struct{}
+}
+
+// Metrics returns the AppMetrics observer for this app.
+func (a *App) Metrics() kb.AppMetrics {
+	if a == nil {
+		return nil
+	}
+	return a.metrics
 }
 
 func NewApp(loader *kb.KB, cfg AppConfig) *App {
@@ -121,6 +130,9 @@ func mergeWithDefaultAppConfig(cfg AppConfig) AppConfig {
 	if cfg.Logger != nil {
 		d.Logger = cfg.Logger
 	}
+	if cfg.MaxMediaBytes > 0 {
+		d.MaxMediaBytes = cfg.MaxMediaBytes
+	}
 	return d
 }
 
@@ -182,12 +194,6 @@ func (a *App) registerRoutes() {
 		IsBudgetExceeded: func(err error) bool {
 			return errors.Is(err, kb.ErrCacheBudgetExceeded)
 		},
-		UpsertDocsAndUpload: func(ctx context.Context, kbID string, docs []kb.Document, opts kb.UpsertDocsOptions) error {
-			if a.kb == nil {
-				return fmt.Errorf("kb unavailable")
-			}
-			return a.kb.UpsertDocsAndUploadWithOptions(ctx, kbID, docs, opts)
-		},
 		Embed: func(ctx context.Context, input string) ([]float32, error) {
 			if a.kb == nil {
 				return nil, fmt.Errorf("kb unavailable")
@@ -200,8 +206,42 @@ func (a *App) registerRoutes() {
 			}
 			return a.kb.Search(ctx, kbID, queryVec, opts)
 		},
-		Logger:     a.logger,
-		AppMetrics: a.metrics,
+		MaxMediaBytes: a.config.MaxMediaBytes,
+		Logger:        a.logger,
+		AppMetrics:    a.metrics,
+	}
+	// Media route closures are only installed when a MediaStore is wired.
+	// When media is disabled in config, KB.MediaStore is nil and these
+	// closures stay nil, which makes cmd/actions.go return 503.
+	if a.kb != nil && a.kb.MediaStore != nil {
+		deps.GetMedia = func(ctx context.Context, id string) (*kb.MediaObject, error) {
+			return a.kb.MediaStore.Get(ctx, id)
+		}
+		deps.ListMedia = func(ctx context.Context, kbID, prefix, after string, limit int) (kb.MediaPage, error) {
+			return a.kb.MediaStore.List(ctx, kbID, prefix, after, limit)
+		}
+		if a.kb.EventStore != nil {
+			deps.AppendMediaUpload = func(ctx context.Context, in kb.MediaUploadInput, maxBytes int64, idem, corr string) (string, string, error) {
+				return a.kb.AppendMediaUploadDetailed(ctx, in, maxBytes, idem, corr)
+			}
+		}
+	}
+	if a.kb != nil && a.kb.EventStore != nil {
+		deps.AppendDocumentUpsert = func(ctx context.Context, p kb.DocumentUpsertPayload, idem, corr string) (string, string, error) {
+			return a.kb.AppendDocumentUpsertDetailed(ctx, p, idem, corr)
+		}
+		deps.AppendFileIngest = func(ctx context.Context, in kb.FileIngestInput, maxBytes int64, idem, corr string) (string, string, error) {
+			return a.kb.AppendFileIngestDetailed(ctx, in, maxBytes, idem, corr)
+		}
+		deps.GetEvent = func(ctx context.Context, id string) (*kb.KBEvent, error) {
+			return a.kb.EventStore.Get(ctx, id)
+		}
+		deps.FindOperationTerminal = func(ctx context.Context, source string) (*kb.KBEvent, error) {
+			return a.kb.FindOperationTerminal(ctx, source)
+		}
+		deps.OperationStages = func(ctx context.Context, source string) ([]kb.OperationStageSnapshot, error) {
+			return a.kb.OperationStages(ctx, source)
+		}
 	}
 	Register(a.echo, deps)
 	RegisterUI(a.echo)
