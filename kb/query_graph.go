@@ -26,6 +26,7 @@ type ExpandedResult struct {
 	Distance   float64
 	GraphScore float64
 	Score      float64
+	MediaRefs  []ChunkMediaRef
 }
 
 // SearchMode controls which retrieval strategy is used.
@@ -75,9 +76,9 @@ func (k *KB) Search(ctx context.Context, kbID string, queryVec []float32, opts *
 			KBID:     kbID,
 			QueryVec: queryVec,
 			Options: GraphQueryOptions{
-				TopK:       options.TopK,
+				TopK:        options.TopK,
 				MaxDistance: options.MaxDistance,
-				Expansion:  options.Expansion,
+				Expansion:   options.Expansion,
 			},
 		}
 		if err := ValidateGraphQueryRequest(graphReq); err != nil {
@@ -90,7 +91,7 @@ func (k *KB) Search(ctx context.Context, kbID string, queryVec []float32, opts *
 			KBID:     kbID,
 			QueryVec: queryVec,
 			Options: RagQueryOptions{
-				TopK:       options.TopK,
+				TopK:        options.TopK,
 				MaxDistance: options.MaxDistance,
 			},
 		}
@@ -112,9 +113,9 @@ func (k *KB) Search(ctx context.Context, kbID string, queryVec []float32, opts *
 			KBID:     kbID,
 			QueryVec: queryVec,
 			Options: GraphQueryOptions{
-				TopK:       options.TopK,
+				TopK:        options.TopK,
 				MaxDistance: options.MaxDistance,
-				Expansion:  options.Expansion,
+				Expansion:   options.Expansion,
 			},
 		}
 		if err := ValidateGraphQueryRequest(graphReq); err != nil {
@@ -127,7 +128,7 @@ func (k *KB) Search(ctx context.Context, kbID string, queryVec []float32, opts *
 			KBID:     kbID,
 			QueryVec: queryVec,
 			Options: RagQueryOptions{
-				TopK:       options.TopK,
+				TopK:        options.TopK,
 				MaxDistance: options.MaxDistance,
 			},
 		}

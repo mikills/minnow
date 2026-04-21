@@ -135,7 +135,7 @@ func testKBTopKCases(t *testing.T) {
 		{
 			name: "non_existent_kb",
 			setup: func(t *testing.T) (*KB, string, []float32, int) {
-				// No format registered — resolveFormat returns ErrArtifactFormatNotConfigured.
+				// No format registered: resolveFormat returns ErrArtifactFormatNotConfigured.
 				blobRoot := filepath.Join(t.TempDir(), "blobs")
 				require.NoError(t, os.MkdirAll(blobRoot, 0o755))
 				loader := NewKB(&LocalBlobStore{Root: blobRoot}, t.TempDir())
@@ -208,7 +208,7 @@ func testKBSearchByDistanceCases(t *testing.T) {
 		{
 			name: "non_existent_kb",
 			setup: func(t *testing.T) (*KB, string, []float32, float64) {
-				// No format registered — resolveFormat returns ErrArtifactFormatNotConfigured.
+				// No format registered: resolveFormat returns ErrArtifactFormatNotConfigured.
 				blobRoot := filepath.Join(t.TempDir(), "blobs")
 				require.NoError(t, os.MkdirAll(blobRoot, 0o755))
 				loader := NewKB(&LocalBlobStore{Root: blobRoot}, t.TempDir())

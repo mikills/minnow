@@ -2,7 +2,7 @@ package kb
 
 import "testing"
 
-func TestNormalizeShardingPolicyCompactionEnabled(t *testing.T) {
+func TestNormalizeShardingPolicy(t *testing.T) {
 	t.Run("defaults_to_enabled", func(t *testing.T) {
 		policy := NormalizeShardingPolicy(ShardingPolicy{})
 		if !policy.CompactionEnabled {

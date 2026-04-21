@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	kb "github.com/mikills/kbcore/kb"
+	kb "github.com/mikills/minnow/kb"
 )
 
 func expandEntityScoresDuckPGQ(ctx context.Context, db *sql.DB, scores map[string]float64, options kb.ExpansionOptions) (map[string]float64, error) {

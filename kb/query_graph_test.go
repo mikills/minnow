@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestSearchValidatesRequestBeforeBackend(t *testing.T) {
+func TestSearch(t *testing.T) {
 	calledErr := errors.New("backend should not be called")
 	mock := &mockArtifactFormat{
 		queryRagFn: func(context.Context, RagQueryRequest) ([]ExpandedResult, error) {

@@ -19,9 +19,11 @@ func TestCacheEviction(t *testing.T) {
 	t.Run("ttl_evicts_empty_dirs", testCacheTTLEvictsEmptyDirs)
 	t.Run("ttl_keeps_protected", testCacheTTLKeepsProtected)
 	t.Run("ttl_composes_with_size_budget", testCacheTTLComposesSizeBudget)
+	t.Run("budget_enforced_via_search", testCacheEvictionViaSearch)
+	t.Run("metrics", testCacheMetrics)
 }
 
-func TestCacheEvictionViaSearch(t *testing.T) {
+func testCacheEvictionViaSearch(t *testing.T) {
 	makeMock := func() *mockArtifactFormat {
 		upserted := map[string]string{}
 		return &mockArtifactFormat{
@@ -104,7 +106,7 @@ func TestCacheEvictionViaSearch(t *testing.T) {
 	})
 }
 
-func TestCacheMetrics(t *testing.T) {
+func testCacheMetrics(t *testing.T) {
 	t.Run("eviction_and_budget_metrics", testCacheMetricsEvictionAndBudget)
 	t.Run("openmetrics_handler", testCacheMetricsHandler)
 }
@@ -292,9 +294,9 @@ func testCacheMetricsEvictionAndBudget(t *testing.T) {
 	assert.GreaterOrEqual(t, m.CacheBudgetExceededTotal, uint64(1))
 
 	metricsText := kb.CacheEvictionOpenMetricsText()
-	assert.Contains(t, metricsText, "kbcore_cache_evictions_total{reason=\"ttl\"}")
-	assert.Contains(t, metricsText, "kbcore_cache_evictions_total{reason=\"size\"}")
-	assert.Contains(t, metricsText, "kbcore_cache_budget_exceeded_total")
+	assert.Contains(t, metricsText, "minnow_cache_evictions_total{reason=\"ttl\"}")
+	assert.Contains(t, metricsText, "minnow_cache_evictions_total{reason=\"size\"}")
+	assert.Contains(t, metricsText, "minnow_cache_budget_exceeded_total")
 }
 
 func testCacheMetricsHandler(t *testing.T) {
@@ -313,5 +315,5 @@ func testCacheMetricsHandler(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Contains(t, rr.Header().Get("Content-Type"), "application/openmetrics-text")
-	assert.Contains(t, rr.Body.String(), "kbcore_cache_bytes_current")
+	assert.Contains(t, rr.Body.String(), "minnow_cache_bytes_current")
 }

@@ -12,6 +12,8 @@ type AppMetrics interface {
 	RecordEmbed(kbID string, latencyMS int64, err error)
 	RecordQuery(kbID string, latencyMS int64, resultCount int, topDistance float32, err error)
 	RecordIngest(kbID string, latencyMS int64, docCount int, chunkCount int, err error)
+	RecordWorkerTick(kind, workerID, outcome string, latencyMS int64)
+	RecordMediaUpload(kbID, contentType string, sizeBytes int64, err error)
 	Snapshot() MetricsSnapshot
 }
 
@@ -48,6 +50,20 @@ type IngestStats struct {
 	TotalChunks  int64 `json:"total_chunks"`
 }
 
+// WorkerStats captures per-(kind, outcome) worker tick counts.
+type WorkerStats struct {
+	Count        int64 `json:"count"`
+	LatencySumMS int64 `json:"latency_sum_ms"`
+	LatencyMaxMS int64 `json:"latency_max_ms"`
+}
+
+// MediaUploadStats captures per-kb upload totals.
+type MediaUploadStats struct {
+	Count      int64 `json:"count"`
+	ErrorCount int64 `json:"error_count"`
+	TotalBytes int64 `json:"total_bytes"`
+}
+
 type RecentRequest struct {
 	Method    string    `json:"method"`
 	Path      string    `json:"path"`
@@ -64,14 +80,16 @@ type RuntimeStats struct {
 }
 
 type MetricsSnapshot struct {
-	RouteStats     map[string]RouteStats  `json:"route_stats"`
-	EmbedStats     map[string]EmbedStats  `json:"embed_stats"`
-	QueryStats     map[string]QueryStats  `json:"query_stats"`
-	IngestStats    map[string]IngestStats `json:"ingest_stats"`
-	RecentRequests []RecentRequest        `json:"recent_requests"`
-	Runtime        RuntimeStats           `json:"runtime"`
-	UptimeSeconds  int64                  `json:"uptime_seconds"`
-	StartTime      time.Time              `json:"start_time"`
+	RouteStats       map[string]RouteStats       `json:"route_stats"`
+	EmbedStats       map[string]EmbedStats       `json:"embed_stats"`
+	QueryStats       map[string]QueryStats       `json:"query_stats"`
+	IngestStats      map[string]IngestStats      `json:"ingest_stats"`
+	WorkerStats      map[string]WorkerStats      `json:"worker_stats"`
+	MediaUploadStats map[string]MediaUploadStats `json:"media_upload_stats"`
+	RecentRequests   []RecentRequest             `json:"recent_requests"`
+	Runtime          RuntimeStats                `json:"runtime"`
+	UptimeSeconds    int64                       `json:"uptime_seconds"`
+	StartTime        time.Time                   `json:"start_time"`
 }
 
 // noop implementation: used when metrics are disabled.
@@ -87,6 +105,10 @@ func (NoopAppMetrics) RecordQuery(kbID string, latencyMS int64, resultCount int,
 func (NoopAppMetrics) RecordIngest(kbID string, latencyMS int64, docCount int, chunkCount int, err error) {
 }
 
+func (NoopAppMetrics) RecordWorkerTick(kind, workerID, outcome string, latencyMS int64) {}
+
+func (NoopAppMetrics) RecordMediaUpload(kbID, contentType string, sizeBytes int64, err error) {}
+
 func (NoopAppMetrics) Snapshot() MetricsSnapshot {
 	return MetricsSnapshot{}
 }
@@ -97,10 +119,12 @@ const appMetricsRecentCapacity = 200
 type InMemAppMetrics struct {
 	mu sync.Mutex
 
-	routeStats  map[string]RouteStats
-	embedStats  map[string]EmbedStats
-	queryStats  map[string]QueryStats
-	ingestStats map[string]IngestStats
+	routeStats       map[string]RouteStats
+	embedStats       map[string]EmbedStats
+	queryStats       map[string]QueryStats
+	ingestStats      map[string]IngestStats
+	workerStats      map[string]WorkerStats
+	mediaUploadStats map[string]MediaUploadStats
 
 	recent      []RecentRequest
 	recentNext  int
@@ -111,12 +135,14 @@ type InMemAppMetrics struct {
 
 func NewInMemAppMetrics() *InMemAppMetrics {
 	return &InMemAppMetrics{
-		routeStats:  make(map[string]RouteStats),
-		embedStats:  make(map[string]EmbedStats),
-		queryStats:  make(map[string]QueryStats),
-		ingestStats: make(map[string]IngestStats),
-		recent:      make([]RecentRequest, appMetricsRecentCapacity),
-		startTime:   time.Now().UTC(),
+		routeStats:       make(map[string]RouteStats),
+		embedStats:       make(map[string]EmbedStats),
+		queryStats:       make(map[string]QueryStats),
+		ingestStats:      make(map[string]IngestStats),
+		workerStats:      make(map[string]WorkerStats),
+		mediaUploadStats: make(map[string]MediaUploadStats),
+		recent:           make([]RecentRequest, appMetricsRecentCapacity),
+		startTime:        time.Now().UTC(),
 	}
 }
 
@@ -247,6 +273,66 @@ func (m *InMemAppMetrics) RecordIngest(kbID string, latencyMS int64, docCount in
 	m.ingestStats[kbID] = v
 }
 
+func (m *InMemAppMetrics) RecordWorkerTick(kind, workerID, outcome string, latencyMS int64) {
+	if m == nil {
+		return
+	}
+	if latencyMS < 0 {
+		latencyMS = 0
+	}
+	key := kind + "|" + outcome
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v := m.workerStats[key]
+	v.Count++
+	v.LatencySumMS += latencyMS
+	if latencyMS > v.LatencyMaxMS {
+		v.LatencyMaxMS = latencyMS
+	}
+	m.workerStats[key] = v
+}
+
+func (m *InMemAppMetrics) RecordMediaUpload(kbID, contentType string, sizeBytes int64, err error) {
+	if m == nil {
+		return
+	}
+	kbID = normalizeMetricsKBID(kbID)
+	key := kbID + "|" + normalizeContentType(contentType)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v := m.mediaUploadStats[key]
+	v.Count++
+	if err != nil {
+		v.ErrorCount++
+	}
+	v.TotalBytes += sizeBytes
+	m.mediaUploadStats[key] = v
+}
+
+// normalizeContentType maps an arbitrary user-supplied Content-Type header
+// down to a fixed allowlist so metric keys cannot be used as a cardinality
+// attack vector. Charset / boundary parameters after ";" are stripped before
+// matching.
+func normalizeContentType(ct string) string {
+	ct = strings.SplitN(strings.TrimSpace(ct), ";", 2)[0]
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	switch ct {
+	case "image/png", "image/jpeg", "image/webp", "image/gif",
+		"application/pdf",
+		"text/plain", "text/html", "text/markdown", "text/csv",
+		"application/json",
+		"application/octet-stream":
+		return ct
+	}
+	if strings.HasPrefix(ct, "image/") {
+		return "image/other"
+	}
+	if strings.HasPrefix(ct, "text/") {
+		return "text/other"
+	}
+	return "other"
+}
+
 func (m *InMemAppMetrics) Snapshot() MetricsSnapshot {
 	if m == nil {
 		return MetricsSnapshot{}
@@ -254,13 +340,15 @@ func (m *InMemAppMetrics) Snapshot() MetricsSnapshot {
 
 	m.mu.Lock()
 	out := MetricsSnapshot{
-		RouteStats:     copyMap(m.routeStats),
-		EmbedStats:     copyMap(m.embedStats),
-		QueryStats:     copyMap(m.queryStats),
-		IngestStats:    copyMap(m.ingestStats),
-		RecentRequests: m.recentSnapshotLocked(),
-		StartTime:      m.startTime,
-		UptimeSeconds:  int64(time.Since(m.startTime).Seconds()),
+		RouteStats:       copyMap(m.routeStats),
+		EmbedStats:       copyMap(m.embedStats),
+		QueryStats:       copyMap(m.queryStats),
+		IngestStats:      copyMap(m.ingestStats),
+		WorkerStats:      copyMap(m.workerStats),
+		MediaUploadStats: copyMap(m.mediaUploadStats),
+		RecentRequests:   m.recentSnapshotLocked(),
+		StartTime:        m.startTime,
+		UptimeSeconds:    int64(time.Since(m.startTime).Seconds()),
 	}
 	m.mu.Unlock()
 

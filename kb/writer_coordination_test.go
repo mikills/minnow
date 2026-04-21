@@ -28,113 +28,105 @@ func (alwaysConflictLeaseManager) Release(ctx context.Context, lease *WriteLease
 	return nil
 }
 
-func TestWriteLeaseRedis(t *testing.T) {
-	type testCase struct {
-		name string
-		run  func(t *testing.T, ctx context.Context, mr *miniredis.Miniredis, mgr *RedisWriteLeaseManager)
-	}
+func TestWriteLease(t *testing.T) {
+	t.Run("redis renew before expiry", func(t *testing.T) {
+		ctx := context.Background()
+		mr := miniredis.RunT(t)
+		client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+		t.Cleanup(func() { _ = client.Close() })
+		mgr, err := NewRedisWriteLeaseManager(client, "test:lease:")
+		require.NoError(t, err)
 
-	tests := []testCase{
-		{
-			name: "renew_before_expiry",
-			run: func(t *testing.T, ctx context.Context, _ *miniredis.Miniredis, mgr *RedisWriteLeaseManager) {
-				lease, err := mgr.Acquire(ctx, "kb-1", 500*time.Millisecond)
-				require.NoError(t, err)
-				require.NotEmpty(t, lease.Token)
+		lease, err := mgr.Acquire(ctx, "kb-1", 500*time.Millisecond)
+		require.NoError(t, err)
+		require.NotEmpty(t, lease.Token)
 
-				_, err = mgr.Acquire(ctx, "kb-1", 500*time.Millisecond)
-				require.ErrorIs(t, err, ErrWriteLeaseConflict)
+		_, err = mgr.Acquire(ctx, "kb-1", 500*time.Millisecond)
+		require.ErrorIs(t, err, ErrWriteLeaseConflict)
 
-				renewed, err := mgr.Renew(ctx, lease, 1200*time.Millisecond)
-				require.NoError(t, err)
-				assert.Equal(t, lease.Token, renewed.Token)
-				assert.True(t, renewed.ExpiresAt.After(lease.ExpiresAt))
+		renewed, err := mgr.Renew(ctx, lease, 1200*time.Millisecond)
+		require.NoError(t, err)
+		assert.Equal(t, lease.Token, renewed.Token)
+		assert.True(t, renewed.ExpiresAt.After(lease.ExpiresAt))
 
-				require.NoError(t, mgr.Release(ctx, renewed))
-				_, err = mgr.Acquire(ctx, "kb-1", 500*time.Millisecond)
-				require.NoError(t, err)
-			},
-		},
-		{
-			name: "renew_after_expiry_conflicts",
-			run: func(t *testing.T, ctx context.Context, mr *miniredis.Miniredis, mgr *RedisWriteLeaseManager) {
-				lease, err := mgr.Acquire(ctx, "kb-1", 500*time.Millisecond)
-				require.NoError(t, err)
+		require.NoError(t, mgr.Release(ctx, renewed))
+		_, err = mgr.Acquire(ctx, "kb-1", 500*time.Millisecond)
+		require.NoError(t, err)
+	})
 
-				mr.FastForward(2 * time.Second)
+	t.Run("redis renew after expiry conflicts", func(t *testing.T) {
+		ctx := context.Background()
+		mr := miniredis.RunT(t)
+		client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+		t.Cleanup(func() { _ = client.Close() })
+		mgr, err := NewRedisWriteLeaseManager(client, "test:lease:")
+		require.NoError(t, err)
 
-				_, err = mgr.Renew(ctx, lease, time.Second)
-				require.ErrorIs(t, err, ErrWriteLeaseConflict)
-				_, err = mgr.Acquire(ctx, "kb-1", 500*time.Millisecond)
-				require.NoError(t, err)
-			},
-		},
-		{
-			name: "release_requires_matching_token",
-			run: func(t *testing.T, ctx context.Context, _ *miniredis.Miniredis, mgr *RedisWriteLeaseManager) {
-				lease, err := mgr.Acquire(ctx, "kb-1", time.Second)
-				require.NoError(t, err)
+		lease, err := mgr.Acquire(ctx, "kb-1", 500*time.Millisecond)
+		require.NoError(t, err)
 
-				wrong := &WriteLease{KBID: lease.KBID, Token: "not-the-token"}
-				require.NoError(t, mgr.Release(ctx, wrong))
+		mr.FastForward(2 * time.Second)
 
-				_, err = mgr.Acquire(ctx, "kb-1", time.Second)
-				require.ErrorIs(t, err, ErrWriteLeaseConflict)
+		_, err = mgr.Renew(ctx, lease, time.Second)
+		require.ErrorIs(t, err, ErrWriteLeaseConflict)
+		_, err = mgr.Acquire(ctx, "kb-1", 500*time.Millisecond)
+		require.NoError(t, err)
+	})
 
-				require.NoError(t, mgr.Release(ctx, lease))
-				_, err = mgr.Acquire(ctx, "kb-1", time.Second)
-				require.NoError(t, err)
-			},
-		},
-	}
+	t.Run("redis release requires matching token", func(t *testing.T) {
+		ctx := context.Background()
+		mr := miniredis.RunT(t)
+		client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+		t.Cleanup(func() { _ = client.Close() })
+		mgr, err := NewRedisWriteLeaseManager(client, "test:lease:")
+		require.NoError(t, err)
 
-	for _, tc := range tests {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			mr := miniredis.RunT(t)
+		lease, err := mgr.Acquire(ctx, "kb-1", time.Second)
+		require.NoError(t, err)
 
-			client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-			t.Cleanup(func() { _ = client.Close() })
+		wrong := &WriteLease{KBID: lease.KBID, Token: "not-the-token"}
+		require.NoError(t, mgr.Release(ctx, wrong))
 
-			mgr, err := NewRedisWriteLeaseManager(client, "test:lease:")
-			require.NoError(t, err)
-			tc.run(t, ctx, mr, mgr)
-		})
-	}
-}
+		_, err = mgr.Acquire(ctx, "kb-1", time.Second)
+		require.ErrorIs(t, err, ErrWriteLeaseConflict)
 
-func TestWriteLeaseInMemory(t *testing.T) {
-	ctx := context.Background()
-	mgr := NewInMemoryWriteLeaseManager()
+		require.NoError(t, mgr.Release(ctx, lease))
+		_, err = mgr.Acquire(ctx, "kb-1", time.Second)
+		require.NoError(t, err)
+	})
 
-	lease, err := mgr.Acquire(ctx, "kb-lease", 100*time.Millisecond)
-	require.NoError(t, err)
+	t.Run("in-memory acquire renew release cycle", func(t *testing.T) {
+		ctx := context.Background()
+		mgr := NewInMemoryWriteLeaseManager()
 
-	_, err = mgr.Acquire(ctx, "kb-lease", 100*time.Millisecond)
-	require.ErrorIs(t, err, ErrWriteLeaseConflict)
+		lease, err := mgr.Acquire(ctx, "kb-lease", 100*time.Millisecond)
+		require.NoError(t, err)
 
-	renewed, err := mgr.Renew(ctx, lease, 200*time.Millisecond)
-	require.NoError(t, err)
-	assert.True(t, renewed.ExpiresAt.After(lease.ExpiresAt))
+		_, err = mgr.Acquire(ctx, "kb-lease", 100*time.Millisecond)
+		require.ErrorIs(t, err, ErrWriteLeaseConflict)
 
-	require.NoError(t, mgr.Release(ctx, lease))
+		renewed, err := mgr.Renew(ctx, lease, 200*time.Millisecond)
+		require.NoError(t, err)
+		assert.True(t, renewed.ExpiresAt.After(lease.ExpiresAt))
 
-	_, err = mgr.Acquire(ctx, "kb-lease", 100*time.Millisecond)
-	require.NoError(t, err)
-}
+		require.NoError(t, mgr.Release(ctx, lease))
 
-func TestWriteLeaseInjectedManager(t *testing.T) {
-	ctx := context.Background()
-	harness := NewTestHarness(t, "kb-opt").
-		WithOptions(WithWriteLeaseManager(alwaysConflictLeaseManager{})).
-		Setup()
-	defer harness.Cleanup()
+		_, err = mgr.Acquire(ctx, "kb-lease", 100*time.Millisecond)
+		require.NoError(t, err)
+	})
 
-	localPath := filepath.Join(harness.CacheDir(), "local.duckdb")
-	require.NoError(t, os.WriteFile(localPath, []byte("v1"), 0o644))
+	t.Run("injected conflict manager blocks upload", func(t *testing.T) {
+		ctx := context.Background()
+		harness := NewTestHarness(t, "kb-opt").
+			WithOptions(WithWriteLeaseManager(alwaysConflictLeaseManager{})).
+			Setup()
+		defer harness.Cleanup()
 
-	_, err := harness.KB().UploadSnapshotShardedIfMatch(ctx, "kb-opt", localPath, "", DefaultSnapshotShardSize)
-	require.Error(t, err)
-	require.True(t, errors.Is(err, ErrWriteLeaseConflict))
+		localPath := filepath.Join(harness.CacheDir(), "local.duckdb")
+		require.NoError(t, os.WriteFile(localPath, []byte("v1"), 0o644))
+
+		_, err := harness.KB().UploadSnapshotShardedIfMatch(ctx, "kb-opt", localPath, "", DefaultSnapshotShardSize)
+		require.Error(t, err)
+		require.True(t, errors.Is(err, ErrWriteLeaseConflict))
+	})
 }

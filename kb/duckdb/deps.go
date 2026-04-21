@@ -3,7 +3,7 @@ package duckdb
 import (
 	"context"
 
-	kb "github.com/mikills/kbcore/kb"
+	kb "github.com/mikills/minnow/kb"
 )
 
 // DepOption configures DuckDB-specific fields on DuckDBArtifactDeps.

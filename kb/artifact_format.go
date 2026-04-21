@@ -52,6 +52,23 @@ type IngestResult struct {
 	MutatedCount int
 }
 
+type EmbeddedDocument struct {
+	ID        string          `json:"id"`
+	Text      string          `json:"text"`
+	MediaIDs  []string        `json:"media_ids,omitempty"`
+	MediaRefs []ChunkMediaRef `json:"media_refs,omitempty"`
+	Metadata  map[string]any  `json:"metadata,omitempty"`
+	Embedding []float32       `json:"embedding"`
+}
+
+type PreparedPublishRequest struct {
+	KBID        string
+	Docs        []EmbeddedDocument
+	GraphResult *GraphBuildResult
+	Upload      bool
+	Options     UpsertDocsOptions
+}
+
 type ArtifactFormat interface {
 	Kind() string
 	Version() int
@@ -61,6 +78,10 @@ type ArtifactFormat interface {
 	QueryGraph(ctx context.Context, req GraphQueryRequest) ([]ExpandedResult, error)
 	Ingest(ctx context.Context, req IngestUpsertRequest) (IngestResult, error)
 	Delete(ctx context.Context, req IngestDeleteRequest) (IngestResult, error)
+}
+
+type PreparedArtifactPublisher interface {
+	PublishPrepared(ctx context.Context, req PreparedPublishRequest) (IngestResult, error)
 }
 
 func ValidateRagQueryRequest(req RagQueryRequest) error {

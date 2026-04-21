@@ -1,22 +1,3 @@
-// store_lease.go defines the WriteLeaseManager interface and the KB's lease
-// acquisition helpers.
-//
-// System fit:
-//
-//   - Every KB write path (upsert, delete, compaction) calls acquireWriteLease
-//     before doing any work. The lease serialises writes per KB ID cluster-wide,
-//     reducing duplicate shard uploads and CAS conflicts on the manifest.
-//   - The lease is intentionally coarse: it does not guarantee exclusivity —
-//     the manifest CAS (UploadIfMatch) remains the hard correctness guard.
-//     The lease is an optimisation that makes conflicts rare rather than safe.
-//
-// Implementations:
-//
-//   - InMemoryWriteLeaseManager — in-process mutex, suitable for single-pod
-//     deployments and tests.
-//   - RedisWriteLeaseManager — Redis SET NX / Lua scripts, suitable for
-//     multi-pod Kubernetes deployments.
-
 package kb
 
 import (

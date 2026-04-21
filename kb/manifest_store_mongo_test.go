@@ -11,12 +11,13 @@ import (
 )
 
 func TestMongoManifestStore(t *testing.T) {
-	runManifestStoreTests(t, func(t *testing.T) ManifestStore {
-		return newTestMongoManifestStore(t)
+	t.Run("contract", func(t *testing.T) {
+		runManifestStoreTests(t, func(t *testing.T) ManifestStore {
+			return newTestMongoManifestStore(t)
+		})
 	})
-}
 
-func TestMongoManifestStoreNilCollection(t *testing.T) {
+	t.Run("nil collection returns ErrInvalidManifestStore", func(t *testing.T) {
 	store := NewMongoManifestStore(nil)
 	ctx := context.Background()
 
@@ -35,14 +36,15 @@ func TestMongoManifestStoreNilCollection(t *testing.T) {
 			require.ErrorIs(t, tt.fn(), ErrInvalidManifestStore)
 		})
 	}
+	})
 }
 
 func newTestMongoManifestStore(t *testing.T) *MongoManifestStore {
 	t.Helper()
 
-	uri := os.Getenv("KBCORE_TEST_MONGO_URI")
+	uri := os.Getenv("MINNOW_TEST_MONGO_URI")
 	if uri == "" {
-		t.Skip("KBCORE_TEST_MONGO_URI not set; skipping Mongo integration test")
+		t.Skip("MINNOW_TEST_MONGO_URI not set; skipping Mongo integration test")
 	}
 
 	client, err := mongo.Connect(options.Client().ApplyURI(uri))
@@ -51,7 +53,7 @@ func newTestMongoManifestStore(t *testing.T) *MongoManifestStore {
 	ctx := context.Background()
 	require.NoError(t, client.Ping(ctx, nil), "mongo ping")
 
-	dbName := "kbcore_test"
+	dbName := "minnow_test"
 	collName := "manifests_" + t.Name()
 	coll := client.Database(dbName).Collection(collName)
 

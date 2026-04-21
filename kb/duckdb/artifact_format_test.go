@@ -13,13 +13,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	kb "github.com/mikills/kbcore/kb"
+	kb "github.com/mikills/minnow/kb"
 )
 
 func TestDuckDBArtifactFormat(t *testing.T) {
 	t.Run("memory_limit_parse", testDuckDBMemoryLimitParse)
 	t.Run("extension_dir_parse", testDuckDBExtensionDirParse)
 	t.Run("graph_mode_availability", testGraphModeAvailability)
+	t.Run("validate_manifest_format_requires_exact_version", testValidateManifestFormatRequiresExactVersion)
+	t.Run("validate_manifest_rejects_unsupported_version", testValidateManifestFormatRejectsUnsupportedVersion)
+	t.Run("validate_manifest_shard_consistency", testValidateManifestFormatShardConsistency)
+	t.Run("assert_safe_identifier", testAssertSafeIdentifier)
+	t.Run("is_transient_blob_error", testIsTransientBlobError)
 }
 
 type stubManifestStore struct {
@@ -72,6 +77,75 @@ func testGraphModeAvailability(t *testing.T) {
 		require.Error(t, err)
 		require.True(t, errors.Is(err, kb.ErrGraphQueryUnavailable))
 	})
+}
+
+func testValidateManifestFormatRequiresExactVersion(t *testing.T) {
+	f := &DuckDBArtifactFormat{}
+	require.NoError(t, f.validateManifestFormat(&kb.SnapshotShardManifest{
+		FormatKind:    DuckDBFormatKind,
+		FormatVersion: DuckDBFormatVersion,
+	}))
+	err := f.validateManifestFormat(&kb.SnapshotShardManifest{
+		FormatKind:    DuckDBFormatKind,
+		FormatVersion: 1,
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, kb.ErrArtifactFormatNotConfigured)
+}
+
+func testValidateManifestFormatRejectsUnsupportedVersion(t *testing.T) {
+	f := &DuckDBArtifactFormat{}
+	err := f.validateManifestFormat(&kb.SnapshotShardManifest{
+		FormatKind:    DuckDBFormatKind,
+		FormatVersion: 99,
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, kb.ErrArtifactFormatNotConfigured)
+	require.Contains(t, err.Error(), "is not supported")
+}
+
+func testValidateManifestFormatShardConsistency(t *testing.T) {
+	f := &DuckDBArtifactFormat{}
+	// Valid: shards with shard_id set.
+	require.NoError(t, f.validateManifestFormat(&kb.SnapshotShardManifest{
+		FormatKind:    DuckDBFormatKind,
+		FormatVersion: DuckDBFormatVersion,
+		Shards: []kb.SnapshotShardMetadata{
+			{ShardID: "shard-00000", Key: "k1"},
+			{ShardID: "shard-00001", Key: "k2"},
+		},
+	}))
+	// Invalid: a shard with empty shard_id signals a malformed manifest.
+	err := f.validateManifestFormat(&kb.SnapshotShardManifest{
+		FormatKind:    DuckDBFormatKind,
+		FormatVersion: DuckDBFormatVersion,
+		Shards: []kb.SnapshotShardMetadata{
+			{ShardID: "shard-00000", Key: "k1"},
+			{ShardID: "", Key: "k2"},
+		},
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, kb.ErrArtifactFormatNotConfigured)
+}
+
+func testAssertSafeIdentifier(t *testing.T) {
+	// Valid identifiers.
+	for _, good := range []string{"alias", "s0", "tbl_name", "ABC123"} {
+		require.NotPanics(t, func() { AssertSafeIdentifier(good) }, "should not panic on %q", good)
+	}
+	// Invalid identifiers.
+	for _, bad := range []string{"", "has space", "tbl;--", "tbl`x", "'inj'", "dotted.name"} {
+		require.Panics(t, func() { AssertSafeIdentifier(bad) }, "should panic on %q", bad)
+	}
+}
+
+func testIsTransientBlobError(t *testing.T) {
+	require.False(t, isTransientBlobError(nil))
+	require.False(t, isTransientBlobError(context.DeadlineExceeded))
+	require.True(t, isTransientBlobError(errors.New("read tcp 127.0.0.1:1234: i/o timeout")))
+	require.True(t, isTransientBlobError(errors.New("write: connection reset by peer")))
+	require.True(t, isTransientBlobError(errors.New("temporary failure in name resolution")))
+	require.False(t, isTransientBlobError(errors.New("permission denied")))
 }
 
 func testDuckDBMemoryLimitParse(t *testing.T) {
