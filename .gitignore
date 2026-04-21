@@ -1,6 +1,14 @@
 testdata/fixtures/*.duckdb
 testdata/fixtures/*.json
-testdata/fixtures/*.duckdb
 testdata/reports/
 .temp/
 *.DS_Store
+
+# Compiled Go test binaries (created by `go test -c`)
+*.test
+
+# Author-only PRD notes
+docs/prd/
+
+# Generated corpus for benchmarks
+testdata/corpus/
