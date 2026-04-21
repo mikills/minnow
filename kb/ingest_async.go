@@ -1,0 +1,352 @@
+package kb
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"time"
+)
+
+// Recommended visibility timeouts per ingest stage. Exposed so operators can
+// tune them; the default WorkerPoolConfig value (kb/worker.go) is too short
+// for embedding / graph / publish work.
+const (
+	DocumentUpsertWorkerVisibilityTimeout  = 5 * time.Minute
+	EmbedWorkerVisibilityTimeout           = 10 * time.Minute
+	GraphExtractWorkerVisibilityTimeout    = 15 * time.Minute
+	DocumentPublishWorkerVisibilityTimeout = 5 * time.Minute
+)
+
+type FileIngestSource struct {
+	FileID        string         `json:"file_id"`
+	DocumentID    string         `json:"document_id"`
+	MediaID       string         `json:"media_id"`
+	Filename      string         `json:"filename"`
+	ContentType   string         `json:"content_type"`
+	StagedBlobKey string         `json:"staged_blob_key"`
+	SizeBytes     int64          `json:"size_bytes"`
+	Checksum      string         `json:"checksum"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+}
+
+type FileIngestResult struct {
+	FileID      string         `json:"file_id"`
+	DocumentID  string         `json:"document_id,omitempty"`
+	MediaID     string         `json:"media_id,omitempty"`
+	Filename    string         `json:"filename"`
+	ContentType string         `json:"content_type,omitempty"`
+	Status      string         `json:"status"`
+	Error       string         `json:"error,omitempty"`
+	PageCount   int            `json:"page_count,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+}
+
+// DocumentUpsertPayload is the payload carried by a document.upsert command.
+type DocumentUpsertPayload struct {
+	KBID        string             `json:"kb_id"`
+	Documents   []Document         `json:"documents"`
+	FileSources []FileIngestSource `json:"file_sources,omitempty"`
+	ChunkSize   int                `json:"chunk_size,omitempty"`
+	Options     UpsertDocsOptions  `json:"options"`
+}
+
+type DocumentChunkedPayload struct {
+	KBID          string             `json:"kb_id"`
+	DocumentCount int                `json:"document_count"`
+	Documents     []Document         `json:"documents"`
+	FileResults   []FileIngestResult `json:"file_results,omitempty"`
+	Options       UpsertDocsOptions  `json:"options"`
+	SourceEventID string             `json:"source_event_id"`
+}
+
+type DocumentEmbeddedPayload struct {
+	KBID          string             `json:"kb_id"`
+	DocumentCount int                `json:"document_count"`
+	Documents     []EmbeddedDocument `json:"documents"`
+	FileResults   []FileIngestResult `json:"file_results,omitempty"`
+	Options       UpsertDocsOptions  `json:"options"`
+	SourceEventID string             `json:"source_event_id"`
+}
+
+type DocumentGraphExtractedPayload struct {
+	KBID          string             `json:"kb_id"`
+	DocumentCount int                `json:"document_count"`
+	Documents     []EmbeddedDocument `json:"documents"`
+	FileResults   []FileIngestResult `json:"file_results,omitempty"`
+	GraphResult   *GraphBuildResult  `json:"graph_result,omitempty"`
+	Options       UpsertDocsOptions  `json:"options"`
+	SourceEventID string             `json:"source_event_id"`
+}
+
+// KBPublishedPayload is the payload carried by kb.published events.
+type KBPublishedPayload struct {
+	KBID          string             `json:"kb_id"`
+	DocumentCount int                `json:"document_count"`
+	ChunkCount    int                `json:"chunk_count"`
+	MediaIDs      []string           `json:"media_ids,omitempty"`
+	FileResults   []FileIngestResult `json:"file_results,omitempty"`
+	SourceEventID string             `json:"source_event_id,omitempty"`
+}
+
+// WorkerFailedPayload is the payload carried by worker.failed events.
+type WorkerFailedPayload struct {
+	Stage         string             `json:"stage"`
+	SourceEventID string             `json:"source_event_id"`
+	Attempt       int                `json:"attempt"`
+	Error         string             `json:"error"`
+	WillRetry     bool               `json:"will_retry"`
+	FileResults   []FileIngestResult `json:"file_results,omitempty"`
+}
+
+type FileIngestUpload struct {
+	FileID      string
+	DocumentID  string
+	Filename    string
+	ContentType string
+	Metadata    map[string]any
+	Body        io.Reader
+}
+
+type FileIngestInput struct {
+	KBID      string
+	Documents []Document
+	Files     []FileIngestUpload
+	ChunkSize int
+	Options   UpsertDocsOptions
+}
+
+// NewULIDLike returns a short sortable id usable for event/correlation ids.
+func NewULIDLike(prefix string) string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%s_%013d_%s", prefix, time.Now().UTC().UnixMilli(), hex.EncodeToString(b))
+}
+
+func newPendingEvent(kind EventKind, kbID, schema, correlationID, causationID, idempotencyKey string, payload []byte) KBEvent {
+	return KBEvent{
+		EventID:        NewULIDLike("evt"),
+		KBID:           kbID,
+		Kind:           kind,
+		Payload:        payload,
+		PayloadSchema:  schema,
+		CorrelationID:  correlationID,
+		CausationID:    causationID,
+		IdempotencyKey: idempotencyKey,
+		Status:         EventStatusPending,
+		CreatedAt:      time.Now().UTC(),
+	}
+}
+
+func newRootPendingEvent(kind EventKind, kbID, schema, correlationID, idempotencyKey string, payload []byte) KBEvent {
+	return newPendingEvent(kind, kbID, schema, correlationID, "", idempotencyKey, payload)
+}
+
+func newChildPendingEvent(parent *KBEvent, kind EventKind, schema, idempotencyKey string, payload []byte) KBEvent {
+	return newPendingEvent(kind, parent.KBID, schema, parent.CorrelationID, parent.EventID, idempotencyKey, payload)
+}
+
+// AppendDocumentUpsertDetailed appends a document.upsert command event.
+// The caller supplies an idempotency key (client-provided or API-generated)
+// so retried submissions collapse to a single event.
+//
+// Returns the new event's id and the effective idempotency key.
+func (l *KB) AppendDocumentUpsertDetailed(ctx context.Context, p DocumentUpsertPayload, idempotencyKey, correlationID string) (string, string, error) {
+	if l.EventStore == nil {
+		return "", "", errors.New("ingest: EventStore not configured")
+	}
+	payload, err := json.Marshal(p)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal payload: %w", err)
+	}
+	if idempotencyKey == "" {
+		idempotencyKey = NewULIDLike("idem")
+	}
+	if correlationID == "" {
+		correlationID = NewULIDLike("corr")
+	}
+	if p.Options.GraphEnabled != nil && *p.Options.GraphEnabled && l.GraphBuilder == nil {
+		return "", "", ErrGraphUnavailable
+	}
+	if err := l.ValidateDocumentReferences(ctx, p.KBID, p.Documents); err != nil {
+		return "", "", err
+	}
+	event := newRootPendingEvent(EventDocumentUpsert, p.KBID, "document.upsert/v1", correlationID, idempotencyKey, payload)
+	if err := l.EventStore.Append(ctx, event); err != nil {
+		if errors.Is(err, ErrEventDuplicateKey) {
+			existing, findErr := l.EventStore.FindByIdempotency(ctx, EventDocumentUpsert, p.KBID, idempotencyKey)
+			if findErr != nil {
+				return "", "", findErr
+			}
+			if existing != nil {
+				return existing.EventID, idempotencyKey, nil
+			}
+		}
+		return "", "", err
+	}
+	return event.EventID, idempotencyKey, nil
+}
+
+func (l *KB) AppendDocumentUpsert(ctx context.Context, p DocumentUpsertPayload, idempotencyKey, correlationID string) (string, error) {
+	eventID, _, err := l.AppendDocumentUpsertDetailed(ctx, p, idempotencyKey, correlationID)
+	return eventID, err
+}
+
+type OperationStageSnapshot struct {
+	Event   *KBEvent
+	Failure *KBEvent
+}
+
+func (l *KB) FindOperationTerminal(ctx context.Context, sourceEventID string) (*KBEvent, error) {
+	for _, kind := range []EventKind{EventKBPublished, EventMediaUploaded, EventWorkerFailed} {
+		ev, err := l.findOperationEvent(ctx, sourceEventID, kind)
+		if err != nil {
+			return nil, err
+		}
+		if ev != nil {
+			return ev, nil
+		}
+	}
+	return nil, nil
+}
+
+func (l *KB) OperationStages(ctx context.Context, sourceEventID string) ([]OperationStageSnapshot, error) {
+	if l.EventStore == nil {
+		return nil, errors.New("event: EventStore not configured")
+	}
+	current, err := l.EventStore.Get(ctx, sourceEventID)
+	if err != nil {
+		return nil, err
+	}
+	stages := make([]OperationStageSnapshot, 0, 4)
+	seen := map[string]struct{}{}
+	for current != nil {
+		if _, ok := seen[current.EventID]; ok {
+			break
+		}
+		seen[current.EventID] = struct{}{}
+		failure, err := l.EventStore.FindByCausation(ctx, EventWorkerFailed, current.EventID)
+		if err != nil {
+			return nil, err
+		}
+		stages = append(stages, OperationStageSnapshot{Event: current, Failure: failure})
+		next, err := l.nextOperationStage(ctx, current)
+		if err != nil {
+			return nil, err
+		}
+		current = next
+	}
+	return stages, nil
+}
+
+func (l *KB) nextOperationStage(ctx context.Context, current *KBEvent) (*KBEvent, error) {
+	if current == nil {
+		return nil, nil
+	}
+	for _, kind := range operationNextKinds(current.Kind) {
+		child, err := l.EventStore.FindByCausation(ctx, kind, current.EventID)
+		if err != nil {
+			return nil, err
+		}
+		if child != nil {
+			return child, nil
+		}
+	}
+	return nil, nil
+}
+
+func operationNextKinds(kind EventKind) []EventKind {
+	switch kind {
+	case EventDocumentUpsert:
+		return []EventKind{EventDocumentChunked}
+	case EventDocumentChunked:
+		return []EventKind{EventDocumentEmbedded, EventDocumentGraphExtracted}
+	case EventDocumentEmbedded, EventDocumentGraphExtracted:
+		return []EventKind{EventKBPublished}
+	case EventMediaUpload:
+		return []EventKind{EventMediaUploaded}
+	default:
+		return nil
+	}
+}
+
+func (l *KB) findOperationEvent(ctx context.Context, rootEventID string, targetKind EventKind) (*KBEvent, error) {
+	if l.EventStore == nil {
+		return nil, errors.New("event: EventStore not configured")
+	}
+	return l.findOperationEventFrom(ctx, rootEventID, targetKind, map[string]struct{}{})
+}
+
+func (l *KB) findOperationEventFrom(ctx context.Context, currentEventID string, targetKind EventKind, seen map[string]struct{}) (*KBEvent, error) {
+	if _, ok := seen[currentEventID]; ok {
+		return nil, nil
+	}
+	seen[currentEventID] = struct{}{}
+	if ev, err := l.EventStore.FindByCausation(ctx, targetKind, currentEventID); err != nil {
+		return nil, err
+	} else if ev != nil {
+		return ev, nil
+	}
+	for _, childKind := range []EventKind{EventDocumentChunked, EventDocumentEmbedded, EventDocumentGraphExtracted} {
+		child, err := l.EventStore.FindByCausation(ctx, childKind, currentEventID)
+		if err != nil {
+			return nil, err
+		}
+		if child == nil {
+			continue
+		}
+		resolved, err := l.findOperationEventFrom(ctx, child.EventID, targetKind, seen)
+		if err != nil {
+			return nil, err
+		}
+		if resolved != nil {
+			return resolved, nil
+		}
+	}
+	return nil, nil
+}
+
+func chunkDocuments(ctx context.Context, docs []Document, chunkSize int) ([]Document, error) {
+	if chunkSize <= 0 {
+		chunkSize = DefaultTextChunkSize
+	}
+	chunker := TextChunker{ChunkSize: chunkSize}
+	out := make([]Document, 0, len(docs))
+	for _, doc := range docs {
+		chunks, err := chunker.Chunk(ctx, doc.ID, doc.Text)
+		if err != nil {
+			return nil, err
+		}
+		for _, chunk := range chunks {
+			out = append(out, Document{ID: chunk.ChunkID, Text: chunk.Text, MediaIDs: doc.MediaIDs, MediaRefs: doc.MediaRefs, Metadata: doc.Metadata})
+		}
+	}
+	return out, nil
+}
+
+func collectMediaIDs(docs []Document) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	visit := func(id string) {
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, d := range docs {
+		for _, id := range d.MediaIDs {
+			visit(id)
+		}
+		for _, r := range d.MediaRefs {
+			visit(r.MediaID)
+		}
+	}
+	return out
+}
