@@ -1,0 +1,15 @@
+Minnow
+Copyright 2026 mikills
+
+This product includes software developed by third parties. Their copyrights
+and licenses are retained below.
+
+------------------------------------------------------------------------
+
+PocketBase cron tools
+Copyright (c) 2022 - present, PocketBase contributors.
+Licensed under the MIT License.
+Source: https://github.com/pocketbase/pocketbase/tree/master/tools/cron
+
+Redistributed under kb/internal/cron/. See the per-file MIT header for the
+full license text.
