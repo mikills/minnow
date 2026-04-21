@@ -17,24 +17,33 @@ type Embedder interface {
 
 // QueryResult represents a single vector search result.
 type QueryResult struct {
-	ID       string  `json:"id"`       // Document ID
-	Content  string  `json:"content"`  // Document text stored at ingestion time
-	Distance float64 `json:"distance"` // Euclidean distance from query vector
+	ID        string          `json:"id"`       // Document ID
+	Content   string          `json:"content"`  // Document text stored at ingestion time
+	Distance  float64         `json:"distance"` // Euclidean distance from query vector
+	MediaRefs []ChunkMediaRef `json:"media_refs,omitempty"`
 }
 
-// Document is a source document for ingestion pipelines.
+// Document is a source document for ingestion pipelines. MediaIDs carries
+// simple doc-level media references (synthesised into ChunkMediaRef rows
+// when persisted). MediaRefs carries rich chunk-level refs (role/label/
+// locator) when the ingest caller has them; when both are present MediaRefs
+// wins.
 type Document struct {
-	ID   string
-	Text string
+	ID        string
+	Text      string
+	MediaIDs  []string
+	MediaRefs []ChunkMediaRef
+	Metadata  map[string]any
 }
 
 // Chunk is a text segment with provenance.
 type Chunk struct {
-	DocID   string
-	ChunkID string
-	Text    string
-	Start   int
-	End     int
+	DocID     string
+	ChunkID   string
+	Text      string
+	Start     int
+	End       int
+	MediaRefs []ChunkMediaRef // optional; nil for text-only chunks
 }
 
 // Chunker produces chunks from raw text.
@@ -48,8 +57,8 @@ type KB struct {
 	BlobStore     BlobStore
 	ManifestStore ManifestStore
 	CacheDir      string
-	Embedder       Embedder
-	GraphBuilder   *GraphBuilder
+	Embedder      Embedder
+	GraphBuilder  *GraphBuilder
 
 	WriteLeaseManager WriteLeaseManager
 	WriteLeaseTTL     time.Duration
@@ -57,6 +66,24 @@ type KB struct {
 	ShardingPolicy    ShardingPolicy
 	MaxCacheBytes     int64
 	CacheEntryTTL     time.Duration
+
+	// EventStore and EventInbox back the event-driven ingest pipeline. Both
+	// are optional; when nil the scheduler skips the related reaper/cleanup
+	// jobs.
+	EventStore EventStore
+	EventInbox EventInbox
+
+	// MediaStore holds media metadata. Optional; when nil the media upload
+	// path and media-gc sweeps are no-ops.
+	MediaStore MediaStore
+
+	// MediaGC tunes media GC timings. Zero fields fall back to package
+	// defaults.
+	MediaGC MediaGCConfig
+
+	// MediaContentTypeAllowlist, if non-empty, restricts accepted upload
+	// content types. Entries may end with "*" for prefix matching.
+	MediaContentTypeAllowlist []string
 
 	cacheBytesCurrent        int64
 	cacheEvictionsTTLTotal   uint64
@@ -174,6 +201,33 @@ func WithCacheEntryTTL(ttl time.Duration) KBOption {
 	return func(kb *KB) {
 		kb.CacheEntryTTL = ttl
 	}
+}
+
+// WithEventStore wires an EventStore into the KB, enabling the event-driven
+// ingest pipeline.
+func WithEventStore(store EventStore) KBOption {
+	return func(kb *KB) { kb.EventStore = store }
+}
+
+// WithEventInbox wires an EventInbox into the KB, enabling worker dedup.
+func WithEventInbox(inbox EventInbox) KBOption {
+	return func(kb *KB) { kb.EventInbox = inbox }
+}
+
+// WithMediaStore wires a MediaStore into the KB, enabling media uploads.
+func WithMediaStore(store MediaStore) KBOption {
+	return func(kb *KB) { kb.MediaStore = store }
+}
+
+// WithMediaGCConfig overrides the pending/tombstone/upload-completion
+// timings for media GC.
+func WithMediaGCConfig(cfg MediaGCConfig) KBOption {
+	return func(kb *KB) { kb.MediaGC = cfg }
+}
+
+// WithMediaContentTypeAllowlist sets the upload content-type allowlist.
+func WithMediaContentTypeAllowlist(list []string) KBOption {
+	return func(kb *KB) { kb.MediaContentTypeAllowlist = list }
 }
 
 // NewKB creates a new KB instance with the given blob store and cache directory.
@@ -353,7 +407,7 @@ func (l *KB) resolveFormat(ctx context.Context, kbID string) (ArtifactFormat, er
 	doc, err := l.ManifestStore.Get(ctx, kbID)
 	if err != nil {
 		if errors.Is(err, ErrManifestNotFound) {
-			// New KB — use default format
+			// New KB: use default format
 			if format := l.DefaultFormat(); format != nil {
 				return format, nil
 			}

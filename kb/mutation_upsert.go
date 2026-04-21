@@ -17,6 +17,9 @@ type UpsertDocsOptions struct {
 
 // UpsertDocs inserts or updates documents in the KB.
 func (l *KB) UpsertDocs(ctx context.Context, kbID string, docs []Document) error {
+	if err := l.ValidateDocumentReferences(ctx, kbID, docs); err != nil {
+		return err
+	}
 	format, err := l.resolveFormat(ctx, kbID)
 	if err != nil {
 		return err
@@ -51,6 +54,25 @@ func (l *KB) UpsertDocsAndUploadWithRetryAndOptions(ctx context.Context, kbID st
 		_, err = format.Ingest(ctx, IngestUpsertRequest{KBID: kbID, Docs: docs, Upload: true, Options: opts})
 		return err
 	})
+}
+
+func (l *KB) PublishPreparedDocs(ctx context.Context, kbID string, docs []EmbeddedDocument, graphResult *GraphBuildResult, opts UpsertDocsOptions) error {
+	format, err := l.resolveFormat(ctx, kbID)
+	if err != nil {
+		return err
+	}
+	publisher, ok := format.(PreparedArtifactPublisher)
+	if !ok {
+		return ErrArtifactFormatNotConfigured
+	}
+	_, err = publisher.PublishPrepared(ctx, PreparedPublishRequest{
+		KBID:        kbID,
+		Docs:        docs,
+		GraphResult: graphResult,
+		Upload:      true,
+		Options:     opts,
+	})
+	return err
 }
 
 func shouldActivateSharding(policy ShardingPolicy, snapshotBytes int64, vectorRows int64) bool {
