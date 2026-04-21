@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/mikills/kbcore/kb"
-	kbduckdb "github.com/mikills/kbcore/kb/duckdb"
+	"github.com/mikills/minnow/kb"
+	kbduckdb "github.com/mikills/minnow/kb/duckdb"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
