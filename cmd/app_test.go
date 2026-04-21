@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mikills/kbcore/kb"
+	"github.com/mikills/minnow/kb"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -85,7 +85,7 @@ func testAppUIContentType(t *testing.T) {
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, string(body), "KBCore")
+	assert.Contains(t, string(body), "Minnow")
 }
 
 func testAppKBIDMiddleware(t *testing.T) {

@@ -3,7 +3,7 @@
     <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>KBCore</title>
+        <title>Minnow</title>
         <style>
             * {
                 box-sizing: border-box;
@@ -163,6 +163,9 @@
             .status-msg.error {
                 color: #dc2626;
             }
+            .status-msg.pending {
+                color: #2563eb;
+            }
 
             #results {
                 margin-top: 12px;
@@ -257,7 +260,7 @@
     </head>
     <body>
         <main class="container">
-            <h1>KBCore</h1>
+            <h1>Minnow</h1>
 
             <div class="kb-bar">
                 <label for="kb-select">Knowledge Base:</label>
@@ -275,6 +278,12 @@
                         rows="8"
                         placeholder="paste document text here..."
                     ></textarea>
+
+                    <label for="ingest-files">Files</label>
+                    <input id="ingest-files" type="file" multiple />
+                    <div style="font-size: 12px; color: #6b7280; margin-top: 6px">
+                        PDF and plain text files are supported. You can submit files and pasted text together.
+                    </div>
                     <div class="checkbox-row">
                         <input id="ingest-graph-enabled" type="checkbox" />
                         <label for="ingest-graph-enabled"
@@ -362,6 +371,7 @@
             var kbSelect = document.getElementById("kb-select");
             var kbNewBtn = document.getElementById("kb-new-btn");
             var ingestText = document.getElementById("ingest-text");
+            var ingestFiles = document.getElementById("ingest-files");
             var ingestGraphEnabled = document.getElementById(
                 "ingest-graph-enabled",
             );
@@ -447,6 +457,136 @@
                             return data;
                         });
                 });
+            }
+
+            function multipartFetch(url, formData) {
+                return fetch(url, {
+                    method: "POST",
+                    body: formData,
+                }).then(function (resp) {
+                    return resp
+                        .json()
+                        .catch(function () {
+                            return {};
+                        })
+                        .then(function (data) {
+                            if (!resp.ok) {
+                                throw new Error(
+                                    data && data.error
+                                        ? data.error
+                                        : "request failed (" +
+                                              resp.status +
+                                              ")",
+                                );
+                            }
+                            return data;
+                        });
+                });
+            }
+
+            function sleep(ms) {
+                return new Promise(function (resolve) {
+                    setTimeout(resolve, ms);
+                });
+            }
+
+            function fetchJSON(url) {
+                return fetch(url).then(function (resp) {
+                    return resp
+                        .json()
+                        .catch(function () {
+                            return {};
+                        })
+                        .then(function (data) {
+                            if (!resp.ok) {
+                                throw new Error(
+                                    data && data.error
+                                        ? data.error
+                                        : "request failed (" +
+                                              resp.status +
+                                              ")",
+                                );
+                            }
+                            return data;
+                        });
+                });
+            }
+
+            function pollOperation(eventID, onUpdate) {
+                var deadline = Date.now() + 30000;
+                var minDelay = 300;
+                var maxDelay = 5000;
+                var delay = minDelay;
+                var lastStatus = "";
+
+                function pollOnce() {
+                    return fetch("/rag/operations/" + eventID).then(function (resp) {
+                        if (resp.status === 429) {
+                            var retryAfter = Number(resp.headers.get("Retry-After"));
+                            var wait = Number.isFinite(retryAfter) && retryAfter > 0
+                                ? retryAfter * 1000
+                                : delay;
+                            return sleep(wait).then(pollOnce);
+                        }
+                        return resp
+                            .json()
+                            .catch(function () {
+                                return {};
+                            })
+                            .then(function (data) {
+                                if (!resp.ok) {
+                                    throw new Error(
+                                        data && data.error
+                                            ? data.error
+                                            : "request failed (" + resp.status + ")",
+                                    );
+                                }
+                                return data;
+                            });
+                    });
+                }
+
+                function step() {
+                    return pollOnce().then(function (data) {
+                        if (onUpdate) {
+                            onUpdate(data);
+                        }
+
+                        var terminal = data && data.terminal;
+                        if (terminal && terminal.kind === "kb.published") {
+                            return data;
+                        }
+                        if (
+                            data &&
+                            (data.status === "dead" ||
+                                (terminal && terminal.kind === "worker.failed"))
+                        ) {
+                            throw new Error(
+                                (terminal && terminal.last_error) ||
+                                    data.last_error ||
+                                    "ingest failed",
+                            );
+                        }
+                        if (Date.now() >= deadline) {
+                            throw new Error(
+                                "timed out waiting for ingest to finish",
+                            );
+                        }
+
+                        var currentStatus = (data && data.status) || "";
+                        var currentTerminalKind = (terminal && terminal.kind) || "";
+                        var currentSignature = currentStatus + "|" + currentTerminalKind;
+                        if (currentSignature !== lastStatus) {
+                            lastStatus = currentSignature;
+                            delay = minDelay;
+                        } else {
+                            delay = Math.min(delay * 2, maxDelay);
+                        }
+                        return sleep(delay).then(step);
+                    });
+                }
+
+                return step();
             }
 
             function parseOpenMetrics(text) {
@@ -732,7 +872,7 @@
                                 metricsCache,
                                 parseOpenMetrics(results[1].value),
                                 {
-                                    stripPrefixes: ["kbcore_cache_", "cache_"],
+                                    stripPrefixes: ["minnow_cache_", "cache_"],
                                     priorityTerms: [
                                         "evict",
                                         "expire",
@@ -769,26 +909,101 @@
             // -- ingest --
             ingestBtn.addEventListener("click", function () {
                 var text = ingestText.value.trim();
-                if (!text) {
+                var files = ingestFiles.files
+                    ? Array.prototype.slice.call(ingestFiles.files)
+                    : [];
+                if (!text && files.length === 0) {
                     setStatus(
                         ingestStatus,
                         "error",
-                        "document text is required",
+                        "document text or files are required",
                     );
                     return;
                 }
 
                 var kbID = selectedKB();
                 ingestBtn.disabled = true;
-                ingestBtn.textContent = "Ingesting...";
+                ingestBtn.textContent = "Submitting...";
                 setStatus(ingestStatus, "", "");
 
-                jsonFetch("/rag/ingest", {
-                    kb_id: kbID,
-                    graph_enabled: ingestGraphEnabled.checked,
-                    documents: [{ id: "", text: text }],
-                })
+                var ingestRequest;
+                if (files.length > 0) {
+                    var form = new FormData();
+                    form.append("kb_id", kbID);
+                    form.append(
+                        "graph_enabled",
+                        ingestGraphEnabled.checked ? "true" : "false",
+                    );
+                    if (text) {
+                        form.append(
+                            "documents",
+                            JSON.stringify([{ id: "", text: text }]),
+                        );
+                    }
+                    var metadataByFileID = {};
+                    for (var i = 0; i < files.length; i++) {
+                        var fileID =
+                            "file-" + i + "-" + Date.now().toString(36);
+                        form.append("file_ids", fileID);
+                        form.append("files", files[i], files[i].name);
+                        metadataByFileID[fileID] = {};
+                    }
+                    form.append(
+                        "file_metadata",
+                        JSON.stringify(metadataByFileID),
+                    );
+                    ingestRequest = multipartFetch("/rag/ingest", form);
+                } else {
+                    ingestRequest = jsonFetch("/rag/ingest", {
+                        kb_id: kbID,
+                        graph_enabled: ingestGraphEnabled.checked,
+                        documents: [{ id: "", text: text }],
+                    });
+                }
+
+                ingestRequest
                     .then(function (data) {
+                        var eventID = data && data.event_id;
+                        if (!eventID) {
+                            throw new Error("missing ingest event id");
+                        }
+                        setStatus(
+                            ingestStatus,
+                            "pending",
+                            'Queued ingest for "' +
+                                kbID +
+                                '". Waiting for publish... (' +
+                                eventID +
+                                ")",
+                        );
+                        ingestBtn.textContent = "Publishing...";
+                        return pollOperation(eventID, function (op) {
+                            var terminal = op && op.terminal;
+                            if (terminal && terminal.kind === "kb.published") {
+                                setStatus(
+                                    ingestStatus,
+                                    "pending",
+                                    'Publishing complete for "' +
+                                        kbID +
+                                        '". Finalizing UI... (' +
+                                        eventID +
+                                        ")",
+                                );
+                            }
+                        }).then(function (op) {
+                            return {
+                                accepted: data,
+                                operation: op,
+                            };
+                        });
+                    })
+                    .then(function (result) {
+                        var data = result.accepted || {};
+                        var operation = result.operation || {};
+                        var terminal = operation.terminal || {};
+                        var fileResults = Array.isArray(terminal.file_results)
+                            ? terminal.file_results
+                            : [];
                         var docIDs = Array.isArray(data.doc_ids)
                             ? data.doc_ids.filter(function (id) {
                                   return (
@@ -796,6 +1011,25 @@
                                   );
                               })
                             : [];
+                        var chunkCount = Number(terminal.chunk_count || 0);
+                        var fileSummary = "";
+                        if (fileResults.length > 0) {
+                            var succeeded = 0;
+                            var failed = 0;
+                            for (var i = 0; i < fileResults.length; i++) {
+                                if (fileResults[i] && fileResults[i].status === "succeeded") {
+                                    succeeded++;
+                                } else {
+                                    failed++;
+                                }
+                            }
+                            fileSummary =
+                                " Files: " +
+                                succeeded +
+                                " succeeded" +
+                                (failed ? ", " + failed + " failed" : "") +
+                                ".";
+                        }
                         var idText =
                             docIDs.length > 0
                                 ? " IDs: " + docIDs.join(", ") + "."
@@ -803,16 +1037,20 @@
                         setStatus(
                             ingestStatus,
                             "success",
-                            "Ingested " +
-                                (data.ingested_docs || 0) +
-                                " docs, " +
-                                (data.ingested_chunks || 0) +
-                                ' chunks into "' +
+                            "Ingest queued and published for " +
+                                (data.document_count || docIDs.length || 0) +
+                                " docs" +
+                                (chunkCount > 0
+                                    ? ", " + chunkCount + " chunks"
+                                    : "") +
+                                ' into "' +
                                 kbID +
                                 '".' +
+                                fileSummary +
                                 idText,
                         );
                         ingestText.value = "";
+                        ingestFiles.value = "";
                     })
                     .catch(function (err) {
                         setStatus(
