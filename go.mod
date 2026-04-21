@@ -1,4 +1,4 @@
-module github.com/mikills/kbcore
+module github.com/mikills/minnow
 
 go 1.24.0
 
@@ -16,7 +16,9 @@ require (
 	github.com/redis/go-redis/v9 v9.17.3
 	github.com/stretchr/testify v1.11.1
 	go.mongodb.org/mongo-driver/v2 v2.5.0
-	golang.org/x/exp v0.0.0-20260112195511-716be5621a96
+	golang.org/x/net v0.49.0
+	gopkg.in/yaml.v3 v3.0.1
+	rsc.io/pdf v0.1.1
 )
 
 require (
@@ -67,8 +69,8 @@ require (
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.shabbyrobe.org/gocovmerge v0.0.0-20230507111327-fa4f82cfbf4d // indirect
 	golang.org/x/crypto v0.47.0 // indirect
+	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/mod v0.32.0 // indirect
-	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260116145544-c6413dc483f5 // indirect
@@ -77,5 +79,4 @@ require (
 	golang.org/x/tools v0.41.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

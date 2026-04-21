@@ -1,0 +1,9 @@
+# Default minnow config. Sufficient for `go run .` from the repo root.
+# Every other knob (HTTP port, blob/cache paths, DuckDB memory, sharding
+# thresholds, scheduler cadence, worker sizing, media timings) falls back
+# to the schema default.
+
+embedder:
+  provider: local
+  local:
+    dim: 384
