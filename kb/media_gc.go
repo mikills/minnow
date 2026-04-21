@@ -81,7 +81,7 @@ func (l *KB) SweepMediaGCMark(ctx context.Context, now time.Time) (MediaGCResult
 		return MediaGCResult{}, nil
 	}
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = l.Clock.Now()
 	}
 	cfg := l.MediaGCConfigOrDefault()
 	ttlCutoff := now.Add(-cfg.PendingTTL).UnixMilli()
@@ -131,7 +131,7 @@ func (l *KB) SweepMediaGCDelete(ctx context.Context, now time.Time) (MediaGCResu
 		return MediaGCResult{}, nil
 	}
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = l.Clock.Now()
 	}
 	cfg := l.MediaGCConfigOrDefault()
 	cutoff := now.Add(-cfg.TombstoneGrace).UnixMilli()

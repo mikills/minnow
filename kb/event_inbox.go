@@ -72,11 +72,12 @@ type inboxRecord struct {
 type InMemoryEventInbox struct {
 	mu      sync.Mutex
 	records map[string]inboxRecord // workerID|idempotencyKey
+	Clock   Clock
 }
 
 // NewInMemoryEventInbox constructs an empty inbox.
 func NewInMemoryEventInbox() *InMemoryEventInbox {
-	return &InMemoryEventInbox{records: make(map[string]inboxRecord)}
+	return &InMemoryEventInbox{records: make(map[string]inboxRecord), Clock: RealClock}
 }
 
 func inboxRecordKey(workerID, idemKey string) string {
@@ -109,7 +110,7 @@ func (b *InMemoryEventInbox) MarkProcessed(_ context.Context, workerID, idempote
 		workerID:       workerID,
 		idempotencyKey: idempotencyKey,
 		eventID:        eventID,
-		processedAt:    time.Now().UTC(),
+		processedAt:    nowFrom(b.Clock),
 	}
 	return nil
 }

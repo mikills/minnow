@@ -18,14 +18,18 @@ type InMemoryWriteLeaseManager struct {
 	mu       sync.Mutex
 	leases   map[string]inMemoryLeaseRecord
 	tokenSeq atomic.Uint64
+	Clock    Clock
 }
 
 // NewInMemoryWriteLeaseManager creates a new in-memory lease manager.
 func NewInMemoryWriteLeaseManager() *InMemoryWriteLeaseManager {
 	return &InMemoryWriteLeaseManager{
 		leases: make(map[string]inMemoryLeaseRecord),
+		Clock:  RealClock,
 	}
 }
+
+func (m *InMemoryWriteLeaseManager) now() time.Time { return nowFrom(m.Clock) }
 
 // Acquire obtains a write lease for the given kbID.
 func (m *InMemoryWriteLeaseManager) Acquire(ctx context.Context, kbID string, ttl time.Duration) (*WriteLease, error) {
@@ -39,7 +43,7 @@ func (m *InMemoryWriteLeaseManager) Acquire(ctx context.Context, kbID string, tt
 		ttl = defaultWriteLeaseTTL
 	}
 
-	now := time.Now().UTC()
+	now := m.now()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -67,7 +71,7 @@ func (m *InMemoryWriteLeaseManager) Renew(ctx context.Context, lease *WriteLease
 		ttl = defaultWriteLeaseTTL
 	}
 
-	now := time.Now().UTC()
+	now := m.now()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()

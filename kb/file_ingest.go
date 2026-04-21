@@ -212,7 +212,7 @@ func (w *DocumentUpsertWorker) extractFileSource(ctx context.Context, kbID strin
 	if w.KB.BlobStore == nil || w.KB.MediaStore == nil {
 		return nil, errors.New("ingest worker: media subsystem not configured")
 	}
-	mediaRec := MediaObject{ID: src.MediaID, KBID: kbID, Filename: src.Filename, ContentType: src.ContentType, SizeBytes: src.SizeBytes, Checksum: src.Checksum, CreatedAtUnixMs: time.Now().UTC().UnixMilli(), Metadata: cloneMap(src.Metadata), State: MediaStatePending}
+	mediaRec := MediaObject{ID: src.MediaID, KBID: kbID, Filename: src.Filename, ContentType: src.ContentType, SizeBytes: src.SizeBytes, Checksum: src.Checksum, CreatedAtUnixMs: w.KB.Clock.Now().UnixMilli(), Metadata: cloneMap(src.Metadata), State: MediaStatePending}
 	if err := w.KB.persistStagedMediaObject(ctx, src.StagedBlobKey, mediaRec); err != nil {
 		return nil, err
 	}
@@ -250,7 +250,7 @@ func (l *KB) persistStagedMediaObject(ctx context.Context, stagedBlobKey string,
 	}
 	rec.BlobKey = finalBlobKey
 	if rec.CreatedAtUnixMs == 0 {
-		rec.CreatedAtUnixMs = time.Now().UTC().UnixMilli()
+		rec.CreatedAtUnixMs = l.Clock.Now().UnixMilli()
 	}
 	if err := l.MediaStore.Put(ctx, rec); err != nil && !errors.Is(err, ErrMediaDuplicateKey) {
 		return err

@@ -67,6 +67,11 @@ type KB struct {
 	MaxCacheBytes     int64
 	CacheEntryTTL     time.Duration
 
+	// Clock drives all time-based behaviour inside the KB (event timestamps,
+	// GC cutoffs, TTL comparisons). Defaults to RealClock; substitute a
+	// FakeClock for tests and the simulation harness.
+	Clock Clock
+
 	// EventStore and EventInbox back the event-driven ingest pipeline. Both
 	// are optional; when nil the scheduler skips the related reaper/cleanup
 	// jobs.
@@ -241,6 +246,7 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 		WriteLeaseManager: NewInMemoryWriteLeaseManager(),
 		WriteLeaseTTL:     defaultWriteLeaseTTL,
 		ShardingPolicy:    NormalizeShardingPolicy(ShardingPolicy{}),
+		Clock:             RealClock,
 		formatRegistry:    make(map[string]ArtifactFormat),
 		locks:             make(map[string]*sync.Mutex),
 		shardMetricsByKB:  make(map[string]shardMetrics),
@@ -255,8 +261,16 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 	if kb.ManifestStore == nil {
 		kb.ManifestStore = &BlobManifestStore{Store: kb.BlobStore}
 	}
+	if kb.Clock == nil {
+		kb.Clock = RealClock
+	}
 
 	return kb
+}
+
+// WithClock overrides the KB's Clock. Use FakeClock in tests and simulation.
+func WithClock(c Clock) KBOption {
+	return func(kb *KB) { kb.Clock = c }
 }
 
 func (l *KB) SetWriteLeaseManager(mgr WriteLeaseManager) {
