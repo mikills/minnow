@@ -67,6 +67,11 @@ type KB struct {
 	MaxCacheBytes     int64
 	CacheEntryTTL     time.Duration
 
+	// Clock drives all time-based behaviour inside the KB (event timestamps,
+	// GC cutoffs, TTL comparisons). Defaults to RealClock; substitute a
+	// FakeClock for tests and the simulation harness.
+	Clock Clock
+
 	// EventStore and EventInbox back the event-driven ingest pipeline. Both
 	// are optional; when nil the scheduler skips the related reaper/cleanup
 	// jobs.
@@ -241,6 +246,7 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 		WriteLeaseManager: NewInMemoryWriteLeaseManager(),
 		WriteLeaseTTL:     defaultWriteLeaseTTL,
 		ShardingPolicy:    NormalizeShardingPolicy(ShardingPolicy{}),
+		Clock:             RealClock,
 		formatRegistry:    make(map[string]ArtifactFormat),
 		locks:             make(map[string]*sync.Mutex),
 		shardMetricsByKB:  make(map[string]shardMetrics),
@@ -255,8 +261,49 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 	if kb.ManifestStore == nil {
 		kb.ManifestStore = &BlobManifestStore{Store: kb.BlobStore}
 	}
+	if kb.Clock == nil {
+		kb.Clock = RealClock
+	}
+	kb.propagateClockToDefaults()
 
 	return kb
+}
+
+// clockAware is implemented by any store that can accept a Clock. All
+// in-repo store implementations satisfy it (in-memory, Mongo, Redis, S3).
+// External stores can participate by exposing the same method.
+type clockAware interface {
+	SetClock(Clock)
+}
+
+// propagateClockToDefaults threads the KB's Clock onto every attached store
+// that implements clockAware, so WithClock is honoured end-to-end regardless
+// of whether the caller kept the default in-memory stores or injected their
+// own (Mongo, Redis, S3, etc.).
+func (l *KB) propagateClockToDefaults() {
+	if l.Clock == nil {
+		return
+	}
+	for _, s := range []any{
+		l.WriteLeaseManager,
+		l.EventStore,
+		l.EventInbox,
+		l.MediaStore,
+		l.ManifestStore,
+		l.BlobStore,
+	} {
+		if s == nil {
+			continue
+		}
+		if ca, ok := s.(clockAware); ok {
+			ca.SetClock(l.Clock)
+		}
+	}
+}
+
+// WithClock overrides the KB's Clock. Use FakeClock in tests and simulation.
+func WithClock(c Clock) KBOption {
+	return func(kb *KB) { kb.Clock = c }
 }
 
 func (l *KB) SetWriteLeaseManager(mgr WriteLeaseManager) {

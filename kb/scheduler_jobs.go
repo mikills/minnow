@@ -48,13 +48,13 @@ func (l *KB) RegisterDefaultJobs(s *Scheduler) error {
 
 	if l.EventStore != nil {
 		if err := s.Register(EventReaperJobID, EventReaperJobExpr, func(ctx context.Context) error {
-			_, err := l.EventStore.Requeue(ctx, time.Now().UTC())
+			_, err := l.EventStore.Requeue(ctx, l.Clock.Now())
 			return err
 		}); err != nil {
 			return err
 		}
 		if err := s.Register(EventCleanupJobID, EventCleanupJobExpr, func(ctx context.Context) error {
-			_, err := l.EventStore.Cleanup(ctx, time.Now().UTC().Add(-EventRetention))
+			_, err := l.EventStore.Cleanup(ctx, l.Clock.Now().Add(-EventRetention))
 			return err
 		}); err != nil {
 			return err
@@ -63,7 +63,7 @@ func (l *KB) RegisterDefaultJobs(s *Scheduler) error {
 
 	if l.EventInbox != nil {
 		if err := s.Register(InboxCleanupJobID, InboxCleanupJobExpr, func(ctx context.Context) error {
-			_, err := l.EventInbox.Cleanup(ctx, time.Now().UTC().Add(-InboxRetention))
+			_, err := l.EventInbox.Cleanup(ctx, l.Clock.Now().Add(-InboxRetention))
 			return err
 		}); err != nil {
 			return err

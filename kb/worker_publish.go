@@ -67,7 +67,7 @@ func (w *DocumentPublishWorker) Handle(ctx context.Context, event *KBEvent) (Wor
 	}
 	mediaIDs := collectMediaIDs(plainDocs)
 	pubPayload, _ := json.Marshal(KBPublishedPayload{KBID: kbID, DocumentCount: documentCount, ChunkCount: len(plainDocs), MediaIDs: mediaIDs, FileResults: fileResults, SourceEventID: sourceEventID})
-	pub := newChildPendingEvent(event, EventKBPublished, "kb.published/v1", sourceEventID+"|kb.published", pubPayload)
+	pub := w.KB.newChildPendingEvent(event, EventKBPublished, "kb.published/v1", sourceEventID+"|kb.published", pubPayload)
 	return WorkerResult{FollowUps: []KBEvent{pub}, Commit: func(ctx context.Context) error {
 		if err := w.KB.PromoteReferencedMedia(ctx, kbID, mediaIDs); err != nil {
 			return fmt.Errorf("promote media: %w", err)

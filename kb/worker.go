@@ -31,10 +31,17 @@ type WorkerPoolConfig struct {
 	PollInterval      time.Duration
 	VisibilityTimeout time.Duration
 	MaxAttempts       int
+	// Clock drives timestamps on synthetic worker.failed events and is also
+	// used for elapsed-time measurements where deterministic sim matters.
+	// Defaults to RealClock when nil.
+	Clock Clock
 }
 
 func (c WorkerPoolConfig) withDefaults() WorkerPoolConfig {
 	out := c
+	if out.Clock == nil {
+		out.Clock = RealClock
+	}
 	if out.Concurrency <= 0 {
 		out.Concurrency = 4
 	}
@@ -280,8 +287,9 @@ func (p *WorkerPool) recordFailure(ctx context.Context, event *KBEvent, handlerE
 		WillRetry:     willRetry,
 		FileResults:   fileResults,
 	})
+	now := p.cfg.Clock.Now()
 	failEvent := KBEvent{
-		EventID:        NewULIDLike("evt"),
+		EventID:        newULIDLikeAt("evt", now),
 		KBID:           event.KBID,
 		Kind:           EventWorkerFailed,
 		Payload:        failPayload,
@@ -290,7 +298,7 @@ func (p *WorkerPool) recordFailure(ctx context.Context, event *KBEvent, handlerE
 		CausationID:    event.EventID,
 		IdempotencyKey: fmt.Sprintf("%s|worker.failed|%d", event.EventID, event.Attempt),
 		Status:         EventStatusPending,
-		CreatedAt:      time.Now().UTC(),
+		CreatedAt:      now,
 	}
 	if err := p.store.Append(ctx, failEvent); err != nil && !errors.Is(err, ErrEventDuplicateKey) {
 		slog.Default().Warn("worker.failed append failed; leaving source pending for retry",

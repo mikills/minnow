@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -37,6 +38,9 @@ const defaultRedisLeasePrefix = "minnow:lease:"
 type RedisWriteLeaseManager struct {
 	Client redis.UniversalClient
 	Prefix string
+
+	clockMu sync.RWMutex
+	clock   Clock
 }
 
 // NewRedisWriteLeaseManager creates a Redis-backed lease manager.
@@ -50,7 +54,24 @@ func NewRedisWriteLeaseManager(client redis.UniversalClient, prefix string) (*Re
 	if strings.TrimSpace(prefix) == "" {
 		prefix = defaultRedisLeasePrefix
 	}
-	return &RedisWriteLeaseManager{Client: client, Prefix: prefix}, nil
+	return &RedisWriteLeaseManager{Client: client, Prefix: prefix, clock: RealClock}, nil
+}
+
+// SetClock replaces the manager's Clock. Safe for concurrent use.
+func (m *RedisWriteLeaseManager) SetClock(c Clock) {
+	m.clockMu.Lock()
+	defer m.clockMu.Unlock()
+	if c == nil {
+		m.clock = RealClock
+		return
+	}
+	m.clock = c
+}
+
+func (m *RedisWriteLeaseManager) now() time.Time {
+	m.clockMu.RLock()
+	defer m.clockMu.RUnlock()
+	return nowFrom(m.clock)
 }
 
 // Acquire attempts to acquire a lease for kbID for the given ttl.
@@ -73,7 +94,7 @@ func (m *RedisWriteLeaseManager) Acquire(ctx context.Context, kbID string, ttl t
 		return nil, err
 	}
 
-	now := time.Now().UTC()
+	now := m.now()
 	ok, err := m.Client.SetNX(ctx, m.key(kbID), token, ttl).Result()
 	if err != nil {
 		return nil, err
@@ -100,7 +121,7 @@ func (m *RedisWriteLeaseManager) Renew(ctx context.Context, lease *WriteLease, t
 		ttl = defaultWriteLeaseTTL
 	}
 
-	now := time.Now().UTC()
+	now := m.now()
 	res, err := renewLeaseScript.Run(ctx, m.Client, []string{m.key(lease.KBID)}, lease.Token, ttl.Milliseconds()).Int()
 	if err != nil {
 		return nil, err

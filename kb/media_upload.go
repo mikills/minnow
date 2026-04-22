@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 )
 
 // UploadMedia stores media bytes in BlobStore and persists metadata in
@@ -38,7 +37,7 @@ func (l *KB) UploadMedia(ctx context.Context, input MediaUploadInput, maxBytes i
 	}
 	defer tmp.cleanup()
 
-	mediaID := newMediaID()
+	mediaID := l.newMediaID()
 	blobKey := MediaBlobKey(input.KBID, mediaID, cleanName)
 	return persistUploadedMedia(ctx, l, input, cleanName, ct, mediaID, blobKey, tmp)
 }
@@ -117,7 +116,7 @@ func persistUploadedMedia(ctx context.Context, l *KB, input MediaUploadInput, cl
 		return nil, fmt.Errorf("media: blob upload: %w", err)
 	}
 
-	now := time.Now().UTC()
+	now := l.Clock.Now()
 	rec := MediaObject{
 		ID:              mediaID,
 		KBID:            input.KBID,

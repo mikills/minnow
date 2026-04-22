@@ -47,12 +47,15 @@ func isEmbeddingDimensionMismatchErr(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	hasFloatArray := strings.Contains(msg, "float[")
-	if !hasFloatArray {
-		return false
-	}
-	if strings.Contains(msg, "array_distance") && (strings.Contains(msg, "cast") || strings.Contains(msg, "size")) {
+	// Direct DuckDB Binder errors do not always mention the FLOAT[N] type;
+	// the Function call ("array_distance: Array arguments must be of the
+	// same size") is sufficient signal.
+	if strings.Contains(msg, "array_distance") &&
+		(strings.Contains(msg, "size") || strings.Contains(msg, "cast") || strings.Contains(msg, "argument")) {
 		return true
+	}
+	if !strings.Contains(msg, "float[") {
+		return false
 	}
 	if strings.Contains(msg, "cannot cast") {
 		return true
