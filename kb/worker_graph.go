@@ -27,5 +27,5 @@ func (w *DocumentChunkedWorker) handleGraphExtract(ctx context.Context, event *K
 		Options:       payload.Options,
 		SourceEventID: payload.SourceEventID,
 	})
-	return WorkerResult{FollowUps: []KBEvent{newChildPendingEvent(event, EventDocumentGraphExtracted, "document.graph_extracted/v1", event.EventID+"|document.graph_extracted", nextPayload)}}, nil
+	return WorkerResult{FollowUps: []KBEvent{w.KB.newChildPendingEvent(event, EventDocumentGraphExtracted, "document.graph_extracted/v1", event.EventID+"|document.graph_extracted", nextPayload)}}, nil
 }

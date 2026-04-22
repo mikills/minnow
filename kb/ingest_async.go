@@ -119,16 +119,30 @@ type FileIngestInput struct {
 	Options   UpsertDocsOptions
 }
 
-// NewULIDLike returns a short sortable id usable for event/correlation ids.
+// NewULIDLike returns a short sortable id usable for event/correlation ids,
+// using real wall-clock time. Call NewULIDLikeAt from a KB method when a
+// FakeClock is in play so IDs remain deterministic under simulation.
 func NewULIDLike(prefix string) string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%s_%013d_%s", prefix, time.Now().UTC().UnixMilli(), hex.EncodeToString(b))
+	return newULIDLikeAt(prefix, RealClock.Now())
 }
 
-func newPendingEvent(kind EventKind, kbID, schema, correlationID, causationID, idempotencyKey string, payload []byte) KBEvent {
+// NewULIDLikeAt returns an id using the supplied Clock for the timestamp
+// component. Intended for internal callers that already hold a Clock (e.g.
+// KB methods). External users can stick with NewULIDLike.
+func NewULIDLikeAt(prefix string, c Clock) string {
+	return newULIDLikeAt(prefix, nowFrom(c))
+}
+
+func newULIDLikeAt(prefix string, now time.Time) string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%s_%013d_%s", prefix, now.UnixMilli(), hex.EncodeToString(b))
+}
+
+func (l *KB) newPendingEvent(kind EventKind, kbID, schema, correlationID, causationID, idempotencyKey string, payload []byte) KBEvent {
+	now := l.Clock.Now()
 	return KBEvent{
-		EventID:        NewULIDLike("evt"),
+		EventID:        newULIDLikeAt("evt", now),
 		KBID:           kbID,
 		Kind:           kind,
 		Payload:        payload,
@@ -137,16 +151,22 @@ func newPendingEvent(kind EventKind, kbID, schema, correlationID, causationID, i
 		CausationID:    causationID,
 		IdempotencyKey: idempotencyKey,
 		Status:         EventStatusPending,
-		CreatedAt:      time.Now().UTC(),
+		CreatedAt:      now,
 	}
 }
 
-func newRootPendingEvent(kind EventKind, kbID, schema, correlationID, idempotencyKey string, payload []byte) KBEvent {
-	return newPendingEvent(kind, kbID, schema, correlationID, "", idempotencyKey, payload)
+func (l *KB) newRootPendingEvent(kind EventKind, kbID, schema, correlationID, idempotencyKey string, payload []byte) KBEvent {
+	return l.newPendingEvent(kind, kbID, schema, correlationID, "", idempotencyKey, payload)
 }
 
-func newChildPendingEvent(parent *KBEvent, kind EventKind, schema, idempotencyKey string, payload []byte) KBEvent {
-	return newPendingEvent(kind, parent.KBID, schema, parent.CorrelationID, parent.EventID, idempotencyKey, payload)
+func (l *KB) newChildPendingEvent(parent *KBEvent, kind EventKind, schema, idempotencyKey string, payload []byte) KBEvent {
+	return l.newPendingEvent(kind, parent.KBID, schema, parent.CorrelationID, parent.EventID, idempotencyKey, payload)
+}
+
+// NewULIDLike on *KB uses the KB's Clock. Prefer this over the package-level
+// NewULIDLike inside any code that already has a *KB in scope.
+func (l *KB) NewULIDLike(prefix string) string {
+	return newULIDLikeAt(prefix, l.Clock.Now())
 }
 
 // AppendDocumentUpsertDetailed appends a document.upsert command event.
@@ -163,10 +183,10 @@ func (l *KB) AppendDocumentUpsertDetailed(ctx context.Context, p DocumentUpsertP
 		return "", "", fmt.Errorf("marshal payload: %w", err)
 	}
 	if idempotencyKey == "" {
-		idempotencyKey = NewULIDLike("idem")
+		idempotencyKey = l.NewULIDLike("idem")
 	}
 	if correlationID == "" {
-		correlationID = NewULIDLike("corr")
+		correlationID = l.NewULIDLike("corr")
 	}
 	if p.Options.GraphEnabled != nil && *p.Options.GraphEnabled && l.GraphBuilder == nil {
 		return "", "", ErrGraphUnavailable
@@ -174,7 +194,7 @@ func (l *KB) AppendDocumentUpsertDetailed(ctx context.Context, p DocumentUpsertP
 	if err := l.ValidateDocumentReferences(ctx, p.KBID, p.Documents); err != nil {
 		return "", "", err
 	}
-	event := newRootPendingEvent(EventDocumentUpsert, p.KBID, "document.upsert/v1", correlationID, idempotencyKey, payload)
+	event := l.newRootPendingEvent(EventDocumentUpsert, p.KBID, "document.upsert/v1", correlationID, idempotencyKey, payload)
 	if err := l.EventStore.Append(ctx, event); err != nil {
 		if errors.Is(err, ErrEventDuplicateKey) {
 			existing, findErr := l.EventStore.FindByIdempotency(ctx, EventDocumentUpsert, p.KBID, idempotencyKey)

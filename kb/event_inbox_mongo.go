@@ -6,6 +6,7 @@ package kb
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -24,6 +25,9 @@ type mongoInboxDoc struct {
 // MongoEventInbox is the Mongo-backed EventInbox.
 type MongoEventInbox struct {
 	Collection *mongo.Collection
+
+	clockMu sync.RWMutex
+	clock   Clock
 }
 
 // NewMongoEventInbox constructs the inbox and ensures the dedup + cleanup
@@ -34,7 +38,7 @@ func NewMongoEventInbox(ctx context.Context, coll *mongo.Collection) (*MongoEven
 	if coll == nil {
 		return nil, errors.New("mongo event inbox: nil collection")
 	}
-	s := &MongoEventInbox{Collection: coll}
+	s := &MongoEventInbox{Collection: coll, clock: RealClock}
 	_, err := s.Collection.Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{
 			Keys: bson.D{
@@ -52,6 +56,23 @@ func NewMongoEventInbox(ctx context.Context, coll *mongo.Collection) (*MongoEven
 		return nil, err
 	}
 	return s, nil
+}
+
+// SetClock replaces the inbox's Clock. Safe for concurrent use.
+func (s *MongoEventInbox) SetClock(c Clock) {
+	s.clockMu.Lock()
+	defer s.clockMu.Unlock()
+	if c == nil {
+		s.clock = RealClock
+		return
+	}
+	s.clock = c
+}
+
+func (s *MongoEventInbox) now() time.Time {
+	s.clockMu.RLock()
+	defer s.clockMu.RUnlock()
+	return nowFrom(s.clock)
 }
 
 // Processed reports whether a row already exists for this worker/key.
@@ -80,7 +101,7 @@ func (s *MongoEventInbox) MarkProcessed(ctx context.Context, workerID, idempoten
 		WorkerID:       workerID,
 		IdempotencyKey: idempotencyKey,
 		EventID:        eventID,
-		ProcessedAt:    time.Now().UTC(),
+		ProcessedAt:    s.now(),
 	})
 	if err != nil {
 		if mongo.IsDuplicateKeyError(err) {

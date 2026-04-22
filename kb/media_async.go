@@ -78,10 +78,10 @@ func (l *KB) AppendMediaUploadDetailed(ctx context.Context, input MediaUploadInp
 		return "", "", fmt.Errorf("media: content type %q not allowed", ct)
 	}
 	if idempotencyKey == "" {
-		idempotencyKey = NewULIDLike("idem")
+		idempotencyKey = l.NewULIDLike("idem")
 	}
 	if correlationID == "" {
-		correlationID = NewULIDLike("corr")
+		correlationID = l.NewULIDLike("corr")
 	}
 	tmp, err := writeTempCapped(input.Body, maxBytes)
 	if err != nil {
@@ -91,8 +91,8 @@ func (l *KB) AppendMediaUploadDetailed(ctx context.Context, input MediaUploadInp
 	if tmp.size == 0 {
 		return "", "", errors.New("media: empty upload rejected")
 	}
-	eventID := NewULIDLike("evt")
-	mediaID := newMediaID()
+	eventID := l.NewULIDLike("evt")
+	mediaID := l.newMediaID()
 	stagedBlobKey := mediaStagingBlobKey(input.KBID, eventID, cleanName)
 	if _, err := l.BlobStore.UploadIfMatch(ctx, stagedBlobKey, tmp.path, ""); err != nil {
 		return "", "", fmt.Errorf("media: stage upload: %w", err)
@@ -118,7 +118,7 @@ func (l *KB) AppendMediaUploadDetailed(ctx context.Context, input MediaUploadInp
 		bestEffortDeleteStagedBlob(ctx, l.BlobStore, stagedBlobKey, "marshal payload failed")
 		return "", "", fmt.Errorf("media: marshal payload: %w", err)
 	}
-	event := newRootPendingEvent(EventMediaUpload, input.KBID, "media.upload/v1", correlationID, idempotencyKey, payloadBytes)
+	event := l.newRootPendingEvent(EventMediaUpload, input.KBID, "media.upload/v1", correlationID, idempotencyKey, payloadBytes)
 	if err := l.EventStore.Append(ctx, event); err != nil {
 		if errors.Is(err, ErrEventDuplicateKey) {
 			existing, findErr := l.EventStore.FindByIdempotency(ctx, EventMediaUpload, input.KBID, idempotencyKey)
@@ -181,7 +181,7 @@ func (w *MediaUploadWorker) Handle(ctx context.Context, event *KBEvent) (WorkerR
 	if err != nil {
 		return WorkerResult{}, fmt.Errorf("marshal media.uploaded: %w", err)
 	}
-	child := newChildPendingEvent(event, EventMediaUploaded, "media.uploaded/v1", event.EventID+"|media.uploaded", mediaUploadedPayload)
+	child := w.KB.newChildPendingEvent(event, EventMediaUploaded, "media.uploaded/v1", event.EventID+"|media.uploaded", mediaUploadedPayload)
 	return WorkerResult{FollowUps: []KBEvent{child}, Commit: func(ctx context.Context) error {
 		if err := w.KB.BlobStore.Delete(ctx, payload.StagedBlobKey); err != nil && !errors.Is(err, ErrBlobNotFound) && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("media: delete staged blob %q: %w", payload.StagedBlobKey, err)
@@ -199,7 +199,7 @@ func (l *KB) SweepAbortedMediaUploads(ctx context.Context, now time.Time) (int, 
 		return 0, nil
 	}
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = l.Clock.Now()
 	}
 	cutoff := now.Add(-l.MediaGCConfigOrDefault().UploadCompletion)
 	count := 0

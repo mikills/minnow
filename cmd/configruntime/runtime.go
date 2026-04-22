@@ -384,6 +384,7 @@ func buildWorkerPools(k *kb.KB, cfg *config.Config, app *appcmd.App) ([]*kb.Work
 	pools := make([]*kb.WorkerPool, 0, len(entries))
 	for _, e := range entries {
 		poolCfg := cfg.PoolConfigFor(e.pool)
+		poolCfg.Clock = k.Clock
 		pool, err := kb.NewWorkerPool(e.worker, k.EventStore, k.EventInbox, poolCfg)
 		if err != nil {
 			return nil, fmt.Errorf("build worker pool for %T: %w", e.worker, err)

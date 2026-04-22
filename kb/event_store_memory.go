@@ -18,6 +18,7 @@ type InMemoryEventStore struct {
 	txMu      sync.Mutex
 	events    map[string]*KBEvent // event_id → event
 	idempKeys map[string]string   // idempotency_key|kind|kbid → event_id
+	clock     Clock
 }
 
 // NewInMemoryEventStore constructs an empty in-memory event store.
@@ -25,8 +26,23 @@ func NewInMemoryEventStore() *InMemoryEventStore {
 	return &InMemoryEventStore{
 		events:    make(map[string]*KBEvent),
 		idempKeys: make(map[string]string),
+		clock:     RealClock,
 	}
 }
+
+// SetClock replaces the event store's Clock. Safe to call at any point; the
+// swap is serialised against other store operations via the primary mutex.
+func (s *InMemoryEventStore) SetClock(c Clock) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c == nil {
+		s.clock = RealClock
+		return
+	}
+	s.clock = c
+}
+
+func (s *InMemoryEventStore) now() time.Time { return nowFrom(s.clock) }
 
 func idempKey(e KBEvent) string {
 	return e.IdempotencyKey + "|" + string(e.Kind) + "|" + e.KBID
@@ -53,7 +69,7 @@ func (s *InMemoryEventStore) Append(_ context.Context, event KBEvent) error {
 		event.Status = EventStatusPending
 	}
 	if event.CreatedAt.IsZero() {
-		event.CreatedAt = time.Now().UTC()
+		event.CreatedAt = s.now()
 	}
 	if event.MaxAttempts <= 0 {
 		event.MaxAttempts = DefaultEventMaxAttempts
@@ -69,7 +85,7 @@ func (s *InMemoryEventStore) Claim(_ context.Context, kind EventKind, workerID s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := time.Now().UTC()
+	now := s.now()
 
 	// Iterate in deterministic created_at order so older events go first.
 	candidates := make([]*KBEvent, 0)
@@ -149,7 +165,7 @@ func (s *InMemoryEventStore) Requeue(_ context.Context, now time.Time) (int, err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = s.now()
 	}
 	skewCutoff := now.Add(MaxReasonableVisibilityFuture)
 	count := 0

@@ -109,7 +109,7 @@ func (l *KB) UploadSnapshotShardedIfMatch(ctx context.Context, kbID, localDBPath
 		FormatKind:     format.Kind(),
 		FormatVersion:  format.Version(),
 		KBID:           kbID,
-		CreatedAt:      time.Now().UTC(),
+		CreatedAt:      l.Clock.Now(),
 		TotalSizeBytes: totalSize,
 		Shards:         artifacts,
 	}

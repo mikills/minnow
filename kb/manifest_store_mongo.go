@@ -3,6 +3,7 @@ package kb
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,11 +24,31 @@ type mongoManifestDoc struct {
 // The caller owns the mongo.Client lifecycle.
 type MongoManifestStore struct {
 	Collection *mongo.Collection
+
+	clockMu sync.RWMutex
+	clock   Clock
 }
 
 // NewMongoManifestStore creates a MongoManifestStore from a *mongo.Collection.
 func NewMongoManifestStore(collection *mongo.Collection) *MongoManifestStore {
-	return &MongoManifestStore{Collection: collection}
+	return &MongoManifestStore{Collection: collection, clock: RealClock}
+}
+
+// SetClock replaces the store's Clock. Safe for concurrent use.
+func (s *MongoManifestStore) SetClock(c Clock) {
+	s.clockMu.Lock()
+	defer s.clockMu.Unlock()
+	if c == nil {
+		s.clock = RealClock
+		return
+	}
+	s.clock = c
+}
+
+func (s *MongoManifestStore) now() time.Time {
+	s.clockMu.RLock()
+	defer s.clockMu.RUnlock()
+	return nowFrom(s.clock)
 }
 
 func (s *MongoManifestStore) collection() (*mongo.Collection, error) {
@@ -94,7 +115,7 @@ func (s *MongoManifestStore) UpsertIfMatch(ctx context.Context, kbID string, man
 		ID:        kbID,
 		Version:   newVersion,
 		Manifest:  manifest,
-		UpdatedAt: time.Now().UTC(),
+		UpdatedAt: s.now(),
 	}
 
 	if expectedVersion == "" {

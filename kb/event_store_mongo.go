@@ -3,6 +3,7 @@ package kb
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -74,6 +75,9 @@ func fromMongoEvent(d mongoEventDoc) KBEvent {
 type MongoEventStore struct {
 	Collection *mongo.Collection
 	Client     *mongo.Client
+
+	clockMu sync.RWMutex
+	clock   Clock
 }
 
 // NewMongoEventStore constructs the store and ensures the unique
@@ -84,11 +88,28 @@ func NewMongoEventStore(ctx context.Context, coll *mongo.Collection, client *mon
 	if coll == nil {
 		return nil, errors.New("mongo event store: nil collection")
 	}
-	s := &MongoEventStore{Collection: coll, Client: client}
+	s := &MongoEventStore{Collection: coll, Client: client, clock: RealClock}
 	if err := s.ensureIndexes(ctx); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+// SetClock replaces the store's Clock. Safe for concurrent use.
+func (s *MongoEventStore) SetClock(c Clock) {
+	s.clockMu.Lock()
+	defer s.clockMu.Unlock()
+	if c == nil {
+		s.clock = RealClock
+		return
+	}
+	s.clock = c
+}
+
+func (s *MongoEventStore) now() time.Time {
+	s.clockMu.RLock()
+	defer s.clockMu.RUnlock()
+	return nowFrom(s.clock)
 }
 
 // InTransaction runs fn inside a Mongo multi-document transaction. Returns
@@ -145,7 +166,7 @@ func (s *MongoEventStore) Append(ctx context.Context, event KBEvent) error {
 		event.Status = EventStatusPending
 	}
 	if event.CreatedAt.IsZero() {
-		event.CreatedAt = time.Now().UTC()
+		event.CreatedAt = s.now()
 	}
 	if event.MaxAttempts <= 0 {
 		event.MaxAttempts = DefaultEventMaxAttempts
@@ -162,7 +183,7 @@ func (s *MongoEventStore) Append(ctx context.Context, event KBEvent) error {
 
 // Claim atomically moves a pending event of the given kind to claimed.
 func (s *MongoEventStore) Claim(ctx context.Context, kind EventKind, workerID string, visibility time.Duration) (*KBEvent, error) {
-	now := time.Now().UTC()
+	now := s.now()
 	filter := bson.M{"status": string(EventStatusPending), "kind": string(kind)}
 	update := bson.M{
 		"$set": bson.M{
@@ -271,7 +292,7 @@ func (s *MongoEventStore) Fail(ctx context.Context, eventID string, observedAtte
 // back to pending.
 func (s *MongoEventStore) Requeue(ctx context.Context, now time.Time) (int, error) {
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = s.now()
 	}
 	skewCutoff := now.Add(MaxReasonableVisibilityFuture)
 	filter := bson.M{
