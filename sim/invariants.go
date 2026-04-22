@@ -26,8 +26,13 @@ func (manifestMonotonic) Name() string { return "manifest_monotonic" }
 
 func (manifestMonotonic) Check(h *Harness) error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	for kbID, last := range h.lastManifestVers {
+	snapshot := make(map[string]string, len(h.lastManifestVers))
+	for kbID, v := range h.lastManifestVers {
+		snapshot[kbID] = v
+	}
+	h.mu.Unlock()
+
+	for kbID, last := range snapshot {
 		current, err := h.manifest.HeadVersion(h.ctx, kbID)
 		if err != nil {
 			return fmt.Errorf("head version for %s: %w", kbID, err)

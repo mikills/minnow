@@ -35,7 +35,7 @@ func (w *DocumentUpsertWorker) Handle(ctx context.Context, event *KBEvent) (Work
 		Options:       payload.Options,
 		SourceEventID: event.EventID,
 	})
-	next := newChildPendingEvent(event, EventDocumentChunked, "document.chunked/v1", event.EventID+"|document.chunked", nextPayload)
+	next := w.KB.newChildPendingEvent(event, EventDocumentChunked, "document.chunked/v1", event.EventID+"|document.chunked", nextPayload)
 	return WorkerResult{FollowUps: []KBEvent{next}, Commit: func(ctx context.Context) error {
 		var firstErr error
 		for _, key := range stagedBlobKeys {

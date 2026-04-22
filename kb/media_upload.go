@@ -37,7 +37,7 @@ func (l *KB) UploadMedia(ctx context.Context, input MediaUploadInput, maxBytes i
 	}
 	defer tmp.cleanup()
 
-	mediaID := newMediaID()
+	mediaID := l.newMediaID()
 	blobKey := MediaBlobKey(input.KBID, mediaID, cleanName)
 	return persistUploadedMedia(ctx, l, input, cleanName, ct, mediaID, blobKey, tmp)
 }

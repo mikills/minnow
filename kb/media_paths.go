@@ -52,9 +52,18 @@ func SanitizeMediaFilename(name string) (string, error) {
 }
 
 // newMediaID returns a sortable, URL-safe id built from unix-millis plus a
-// short random suffix.
+// short random suffix, using wall-clock time. Inside the KB package, prefer
+// l.newMediaID() so a FakeClock substituted into the KB propagates into id
+// generation and keeps sim runs deterministic.
 func newMediaID() string {
-	now := time.Now().UTC()
+	return newMediaIDAt(RealClock.Now())
+}
+
+func (l *KB) newMediaID() string {
+	return newMediaIDAt(l.Clock.Now())
+}
+
+func newMediaIDAt(now time.Time) string {
 	r := sha256.Sum256([]byte(fmt.Sprintf("%d-%d", now.UnixNano(), mediaIDCounter.next())))
 	return fmt.Sprintf("med_%013d_%s", now.UnixMilli(), hex.EncodeToString(r[:6]))
 }
