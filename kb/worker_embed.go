@@ -13,5 +13,5 @@ func (w *DocumentChunkedWorker) handleEmbed(event *KBEvent, payload DocumentChun
 		Options:       payload.Options,
 		SourceEventID: payload.SourceEventID,
 	})
-	return WorkerResult{FollowUps: []KBEvent{newChildPendingEvent(event, EventDocumentEmbedded, "document.embedded/v1", event.EventID+"|document.embedded", nextPayload)}}
+	return WorkerResult{FollowUps: []KBEvent{w.KB.newChildPendingEvent(event, EventDocumentEmbedded, "document.embedded/v1", event.EventID+"|document.embedded", nextPayload)}}
 }

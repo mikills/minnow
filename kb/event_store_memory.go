@@ -18,7 +18,7 @@ type InMemoryEventStore struct {
 	txMu      sync.Mutex
 	events    map[string]*KBEvent // event_id → event
 	idempKeys map[string]string   // idempotency_key|kind|kbid → event_id
-	Clock     Clock
+	clock     Clock
 }
 
 // NewInMemoryEventStore constructs an empty in-memory event store.
@@ -26,11 +26,23 @@ func NewInMemoryEventStore() *InMemoryEventStore {
 	return &InMemoryEventStore{
 		events:    make(map[string]*KBEvent),
 		idempKeys: make(map[string]string),
-		Clock:     RealClock,
+		clock:     RealClock,
 	}
 }
 
-func (s *InMemoryEventStore) now() time.Time { return nowFrom(s.Clock) }
+// SetClock replaces the event store's Clock. Safe to call at any point; the
+// swap is serialised against other store operations via the primary mutex.
+func (s *InMemoryEventStore) SetClock(c Clock) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c == nil {
+		s.clock = RealClock
+		return
+	}
+	s.clock = c
+}
+
+func (s *InMemoryEventStore) now() time.Time { return nowFrom(s.clock) }
 
 func idempKey(e KBEvent) string {
 	return e.IdempotencyKey + "|" + string(e.Kind) + "|" + e.KBID

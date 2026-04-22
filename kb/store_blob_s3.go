@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,6 +23,9 @@ type S3BlobStore struct {
 	Client *s3.Client
 	Bucket string
 	Prefix string
+
+	clockMu sync.RWMutex
+	clock   Clock
 }
 
 // NewS3BlobStore creates a new S3-backed blob store.
@@ -31,7 +35,25 @@ func NewS3BlobStore(client *s3.Client, bucket, prefix string) *S3BlobStore {
 		Client: client,
 		Bucket: bucket,
 		Prefix: prefix,
+		clock:  RealClock,
 	}
+}
+
+// SetClock replaces the store's Clock. Safe for concurrent use.
+func (s *S3BlobStore) SetClock(c Clock) {
+	s.clockMu.Lock()
+	defer s.clockMu.Unlock()
+	if c == nil {
+		s.clock = RealClock
+		return
+	}
+	s.clock = c
+}
+
+func (s *S3BlobStore) now() time.Time {
+	s.clockMu.RLock()
+	defer s.clockMu.RUnlock()
+	return nowFrom(s.clock)
 }
 
 // fullKey returns the full S3 key including prefix
@@ -69,7 +91,7 @@ func (s *S3BlobStore) Head(ctx context.Context, key string) (*BlobObjectInfo, er
 		version = *result.ETag
 	}
 
-	updatedAt := time.Now().UTC()
+	updatedAt := s.now()
 	if result.LastModified != nil {
 		updatedAt = *result.LastModified
 	}
@@ -178,7 +200,7 @@ func (s *S3BlobStore) UploadIfMatch(ctx context.Context, key string, src string,
 	return &BlobObjectInfo{
 		Key:       key,
 		Version:   version,
-		UpdatedAt: time.Now().UTC(),
+		UpdatedAt: s.now(),
 		Size:      info.Size(),
 	}, nil
 }

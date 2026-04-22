@@ -127,7 +127,7 @@ func (l *KB) stageFileIngestUpload(ctx context.Context, kbID string, file FileIn
 	} else if !fileIDPattern.MatchString(fileID) {
 		return stagedFileUpload{}, fmt.Errorf("ingest: file_id %q must match [A-Za-z0-9_.-]+", fileID)
 	}
-	mediaID := newMediaID()
+	mediaID := l.newMediaID()
 	documentID := strings.TrimSpace(file.DocumentID)
 	if documentID == "" {
 		documentID = generateSourceDocumentID(cleanName)

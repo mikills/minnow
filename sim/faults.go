@@ -48,45 +48,49 @@ func (s *FaultableBlobStore) SetFaults(f BlobFaults) {
 	s.faults = f
 }
 
-func (s *FaultableBlobStore) shouldFail(rate float64) bool {
+// rollFault atomically reads the named rate and rolls the RNG under the
+// lock. Keeps the rate read and the roll in the same critical section so
+// SetFaults cannot race with an in-flight op.
+func (s *FaultableBlobStore) rollFault(pick func(BlobFaults) float64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rate := pick(s.faults)
 	if rate <= 0 {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	return s.rng.Float64() < rate
 }
 
 func (s *FaultableBlobStore) Head(ctx context.Context, key string) (*kb.BlobObjectInfo, error) {
-	if s.shouldFail(s.faults.HeadFailRate) {
+	if s.rollFault(func(f BlobFaults) float64 { return f.HeadFailRate }) {
 		return nil, ErrInjected
 	}
 	return s.inner.Head(ctx, key)
 }
 
 func (s *FaultableBlobStore) Download(ctx context.Context, key string, dest string) error {
-	if s.shouldFail(s.faults.DownloadFailRate) {
+	if s.rollFault(func(f BlobFaults) float64 { return f.DownloadFailRate }) {
 		return ErrInjected
 	}
 	return s.inner.Download(ctx, key, dest)
 }
 
 func (s *FaultableBlobStore) UploadIfMatch(ctx context.Context, key string, src string, expectedVersion string) (*kb.BlobObjectInfo, error) {
-	if s.shouldFail(s.faults.UploadFailRate) {
+	if s.rollFault(func(f BlobFaults) float64 { return f.UploadFailRate }) {
 		return nil, ErrInjected
 	}
 	return s.inner.UploadIfMatch(ctx, key, src, expectedVersion)
 }
 
 func (s *FaultableBlobStore) Delete(ctx context.Context, key string) error {
-	if s.shouldFail(s.faults.DeleteFailRate) {
+	if s.rollFault(func(f BlobFaults) float64 { return f.DeleteFailRate }) {
 		return ErrInjected
 	}
 	return s.inner.Delete(ctx, key)
 }
 
 func (s *FaultableBlobStore) List(ctx context.Context, prefix string) ([]kb.BlobObjectInfo, error) {
-	if s.shouldFail(s.faults.ListFailRate) {
+	if s.rollFault(func(f BlobFaults) float64 { return f.ListFailRate }) {
 		return nil, ErrInjected
 	}
 	return s.inner.List(ctx, prefix)

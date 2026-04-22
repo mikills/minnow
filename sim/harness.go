@@ -95,11 +95,11 @@ func New(t *testing.T, opts ...Option) *Harness {
 	require.NoError(t, err)
 
 	eventStore := kb.NewInMemoryEventStore()
-	eventStore.Clock = clock
+	eventStore.SetClock(clock)
 	eventInbox := kb.NewInMemoryEventInbox()
-	eventInbox.Clock = clock
+	eventInbox.SetClock(clock)
 	lease := kb.NewInMemoryWriteLeaseManager()
-	lease.Clock = clock
+	lease.SetClock(clock)
 
 	loader := kb.NewKB(blobs, cacheDir,
 		kb.WithEmbedder(embedder),
@@ -178,11 +178,14 @@ func (h *Harness) GenerateDocs(kbID string, n int) []kb.Document {
 }
 
 // RandomVec returns a pseudo-random unit-length vector of the requested dim.
+// Safe to call from multiple goroutines; rng access is serialised.
 func (h *Harness) RandomVec(dim int) []float32 {
 	vec := make([]float32, dim)
+	h.mu.Lock()
 	for i := range vec {
 		vec[i] = float32(h.rng.NormFloat64())
 	}
+	h.mu.Unlock()
 	return normalize(vec)
 }
 
@@ -201,7 +204,11 @@ func normalize(vec []float32) []float32 {
 	return vec
 }
 
-// Ingest upserts docs into kbID and tracks them for no-doc-loss invariants.
+// Ingest upserts docs into kbID. On success the harness records the
+// ingested doc IDs (for the no-doc-loss invariant) and the resulting
+// manifest version (for the monotonic-manifest invariant). Scenarios no
+// longer need to call RecordManifestVersion manually after a successful
+// Ingest; doing so is still safe and idempotent.
 func (h *Harness) Ingest(kbID string, docs []kb.Document) error {
 	if err := h.kb.UpsertDocsAndUpload(h.ctx, kbID, docs); err != nil {
 		return err
@@ -216,6 +223,7 @@ func (h *Harness) Ingest(kbID string, docs []kb.Document) error {
 		m[d.ID] = d
 	}
 	h.mu.Unlock()
+	h.RecordManifestVersion(kbID)
 	return nil
 }
 

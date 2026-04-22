@@ -17,11 +17,16 @@ func TestSim(t *testing.T) {
 	seeds := []int64{1, 2, 3, 7, 42, 100}
 
 	cases := map[string]func(*sim.Harness){
-		"warm_vs_cold":            scenarios.WarmVsCold,
-		"flaky_blob_ingest":       scenarios.FlakyBlobIngest,
-		"concurrent_writers":      scenarios.ConcurrentWriters,
-		"cache_evicted_mid_query": scenarios.CacheEvictedMidQuery,
-		"high_download_failure":   scenarios.HighDownloadFailure,
+		"warm_vs_cold":              scenarios.WarmVsCold,
+		"flaky_blob_ingest":         scenarios.FlakyBlobIngest,
+		"concurrent_writers":        scenarios.ConcurrentWriters,
+		"cache_evicted_mid_query":   scenarios.CacheEvictedMidQuery,
+		"high_download_failure":     scenarios.HighDownloadFailure,
+		"clock_jumps_backward":      scenarios.ClockJumpsBackward,
+		"dim_mismatch_query":        scenarios.DimMismatchQuery,
+		"repeated_small_ingests":    scenarios.RepeatedSmallIngests,
+		"concurrent_ingest_query":   scenarios.ConcurrentIngestAndQuery,
+		"random_ops_fuzz":           scenarios.RandomOpsFuzz,
 	}
 
 	invariants := []sim.Invariant{

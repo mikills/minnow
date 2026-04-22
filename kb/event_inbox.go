@@ -72,12 +72,23 @@ type inboxRecord struct {
 type InMemoryEventInbox struct {
 	mu      sync.Mutex
 	records map[string]inboxRecord // workerID|idempotencyKey
-	Clock   Clock
+	clock   Clock
 }
 
 // NewInMemoryEventInbox constructs an empty inbox.
 func NewInMemoryEventInbox() *InMemoryEventInbox {
-	return &InMemoryEventInbox{records: make(map[string]inboxRecord), Clock: RealClock}
+	return &InMemoryEventInbox{records: make(map[string]inboxRecord), clock: RealClock}
+}
+
+// SetClock replaces the inbox's Clock under the primary mutex.
+func (b *InMemoryEventInbox) SetClock(c Clock) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if c == nil {
+		b.clock = RealClock
+		return
+	}
+	b.clock = c
 }
 
 func inboxRecordKey(workerID, idemKey string) string {
@@ -110,7 +121,7 @@ func (b *InMemoryEventInbox) MarkProcessed(_ context.Context, workerID, idempote
 		workerID:       workerID,
 		idempotencyKey: idempotencyKey,
 		eventID:        eventID,
-		processedAt:    nowFrom(b.Clock),
+		processedAt:    nowFrom(b.clock),
 	}
 	return nil
 }

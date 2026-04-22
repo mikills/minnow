@@ -264,8 +264,41 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 	if kb.Clock == nil {
 		kb.Clock = RealClock
 	}
+	kb.propagateClockToDefaults()
 
 	return kb
+}
+
+// clockAware is implemented by any store that can accept a Clock. All
+// in-repo store implementations satisfy it (in-memory, Mongo, Redis, S3).
+// External stores can participate by exposing the same method.
+type clockAware interface {
+	SetClock(Clock)
+}
+
+// propagateClockToDefaults threads the KB's Clock onto every attached store
+// that implements clockAware, so WithClock is honoured end-to-end regardless
+// of whether the caller kept the default in-memory stores or injected their
+// own (Mongo, Redis, S3, etc.).
+func (l *KB) propagateClockToDefaults() {
+	if l.Clock == nil {
+		return
+	}
+	for _, s := range []any{
+		l.WriteLeaseManager,
+		l.EventStore,
+		l.EventInbox,
+		l.MediaStore,
+		l.ManifestStore,
+		l.BlobStore,
+	} {
+		if s == nil {
+			continue
+		}
+		if ca, ok := s.(clockAware); ok {
+			ca.SetClock(l.Clock)
+		}
+	}
 }
 
 // WithClock overrides the KB's Clock. Use FakeClock in tests and simulation.

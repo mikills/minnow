@@ -185,7 +185,14 @@ func (s *Scheduler) Register(id, cronExpr string, fn SchedulerJob) error {
 	return nil
 }
 
-// Start begins the cron loop. Idempotent. Starts the observer dispatcher.
+// Start begins the cron loop. Idempotent; also starts the observer
+// dispatcher.
+//
+// Start uses real wall-clock time for the tick loop; it does NOT honour a
+// FakeClock that has been substituted into the KB. Simulation code should
+// drive jobs directly via Scheduler.RunOnce (or the underlying cron's
+// RunDue) with a timestamp derived from the KB's Clock, rather than calling
+// Start.
 func (s *Scheduler) Start() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
