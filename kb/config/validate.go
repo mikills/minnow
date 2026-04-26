@@ -29,11 +29,54 @@ func (c *Config) Validate() error {
 	errs = appendIf(errs, c.validateWorkers())
 	errs = appendIf(errs, c.validateMedia())
 	errs = appendIf(errs, c.validateSharding())
+	errs = appendIf(errs, c.validateMCP())
 
 	if len(errs) == 0 {
 		return nil
 	}
 	return errors.New(strings.Join(errs, "; "))
+}
+
+func (c *Config) validateMCP() error {
+	if !c.MCP.Enabled {
+		return nil
+	}
+	if len(c.MCP.Transports) == 0 {
+		return errors.New("mcp.transports must include at least one transport when mcp.enabled is true")
+	}
+	seen := map[string]bool{}
+	for _, transport := range c.MCP.Transports {
+		switch strings.ToLower(strings.TrimSpace(transport)) {
+		case "http", "stdio":
+			seen[strings.ToLower(strings.TrimSpace(transport))] = true
+		default:
+			return fmt.Errorf("mcp.transports contains unsupported transport %q (allowed: http, stdio)", transport)
+		}
+	}
+	if seen["http"] {
+		if !strings.HasPrefix(c.MCP.HTTPPath, "/") {
+			return fmt.Errorf("mcp.http_path must start with / when http transport is enabled")
+		}
+		if strings.ContainsAny(c.MCP.HTTPPath, " \t\n\r") {
+			return fmt.Errorf("mcp.http_path must not contain whitespace")
+		}
+	}
+	if c.MCP.ReadOnly && (c.MCP.AllowIndexing || c.MCP.AllowSyncIndexing || c.MCP.AllowDestructive || c.MCP.AllowAdmin) {
+		return errors.New("mcp.read_only cannot be combined with indexing, destructive, or admin tools")
+	}
+	if c.MCP.AllowSyncIndexing && !c.MCP.AllowIndexing {
+		return errors.New("mcp.allow_sync_indexing requires mcp.allow_indexing")
+	}
+	if c.MCP.DefaultSyncTimeout <= 0 {
+		return errors.New("mcp.default_sync_timeout must be > 0 when mcp.enabled is true")
+	}
+	if c.MCP.MaxSyncTimeout <= 0 {
+		return errors.New("mcp.max_sync_timeout must be > 0 when mcp.enabled is true")
+	}
+	if c.MCP.DefaultSyncTimeout > c.MCP.MaxSyncTimeout {
+		return errors.New("mcp.default_sync_timeout must be <= mcp.max_sync_timeout")
+	}
+	return nil
 }
 
 func appendIf(errs []string, err error) []string {
@@ -153,8 +196,31 @@ func (c *Config) validateEmbedder() error {
 		if err := requirePositiveInt("embedder.local.dim", c.Embedder.Local.Dim); err != nil {
 			return err
 		}
+	case "openai_compatible":
+		if c.Embedder.OpenAICompatible == nil {
+			return errors.New("embedder.openai_compatible block is required when embedder.provider is \"openai_compatible\"")
+		}
+		if err := requireNonEmptyString("embedder.openai_compatible.base_url", c.Embedder.OpenAICompatible.BaseURL); err != nil {
+			return err
+		}
+		parsed, err := url.Parse(c.Embedder.OpenAICompatible.BaseURL)
+		if err != nil {
+			return fmt.Errorf("embedder.openai_compatible.base_url must be a valid URL: %w", err)
+		}
+		if parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("embedder.openai_compatible.base_url must include a scheme and host (got %q)", c.Embedder.OpenAICompatible.BaseURL)
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return fmt.Errorf("embedder.openai_compatible.base_url scheme must be http or https (got %q)", parsed.Scheme)
+		}
+		if err := requireNonEmptyString("embedder.openai_compatible.model", c.Embedder.OpenAICompatible.Model); err != nil {
+			return err
+		}
+		if c.Embedder.OpenAICompatible.Dimensions < 0 {
+			return fmt.Errorf("embedder.openai_compatible.dimensions must be >= 0 when set, got %d", c.Embedder.OpenAICompatible.Dimensions)
+		}
 	default:
-		return fmt.Errorf("embedder.provider %q is not supported (expected \"ollama\" or \"local\")", c.Embedder.Provider)
+		return fmt.Errorf("embedder.provider %q is not supported (expected \"ollama\", \"local\", or \"openai_compatible\")", c.Embedder.Provider)
 	}
 	return nil
 }

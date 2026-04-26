@@ -30,9 +30,11 @@ format:
     extension_dir: ./extensions
     offline: false
 
-# Default embedder is `local` (deterministic, zero-dependency). To use
-# Ollama instead, set `provider: ollama` and uncomment the `ollama` block
-# below. When `provider: local` the `local` block is required.
+# Default embedder is `local` (deterministic, zero-dependency). To use native
+# Ollama, set `provider: ollama` and uncomment the `ollama` block below. To use
+# OpenAI-compatible APIs (including Ollama /v1), set `provider:
+# openai_compatible` and uncomment the `openai_compatible` block. The selected
+# provider's block is required.
 embedder:
   provider: local
   local:
@@ -40,6 +42,11 @@ embedder:
   # ollama:
   #   url: http://localhost:11434
   #   model: all-minilm
+  # openai_compatible:
+  #   base_url: http://localhost:11434/v1
+  #   model: nomic-embed-text
+  #   token: ollama
+  #   dimensions: 0
 
 graph:
   enabled: false
@@ -96,3 +103,17 @@ sharding:
   compaction_enabled: true
   compaction_min_shard_count: 8
   compaction_tombstone_ratio: 0.20       # (0, 1]
+
+mcp:
+  enabled: true
+  transports: [http, stdio]
+  http_path: /mcp
+  read_only: false
+  allow_indexing: true
+  allow_sync_indexing: true
+  allow_destructive: false
+  allow_admin: false
+  default_sync_timeout: 30s
+  max_sync_timeout: 2m
+  http_json_response: false
+  http_stateless: false

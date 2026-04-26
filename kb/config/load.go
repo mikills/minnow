@@ -14,7 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// DefaultPath is the filename searched when Load is called with an empty path.
+// DefaultPath is the working-directory config searched when Load is called
+// with an empty path.
 const DefaultPath = "./minnow.yaml"
 
 // envVarRE matches ${VAR} style references. ${VAR:-default} is intentionally
@@ -22,14 +23,19 @@ const DefaultPath = "./minnow.yaml"
 var envVarRE = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 // Load reads, interpolates, strictly decodes, defaults, path-resolves and
-// validates the YAML config at path. An empty path resolves to DefaultPath.
+// validates the YAML config at path. An empty path resolves first to
+// DefaultPath, then to the per-user config path.
 //
 // Relative paths inside the config (storage.blob.root, storage.cache.dir,
 // format.duckdb.extension_dir) are resolved against the YAML file's
 // directory, not the process CWD.
 func Load(path string) (*Config, error) {
 	if path == "" {
-		path = DefaultPath
+		resolved, err := ResolveDefaultPath()
+		if err != nil {
+			return nil, err
+		}
+		path = resolved
 	}
 
 	data, err := os.ReadFile(path)
@@ -62,6 +68,39 @@ func Load(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// UserConfigPath returns the per-user fallback config path used by globally
+// installed binaries when no ./minnow.yaml is present.
+func UserConfigPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user config dir: %w", err)
+	}
+	return filepath.Join(dir, "minnow", "minnow.yaml"), nil
+}
+
+// ResolveDefaultPath returns the config path used when the caller does not pass
+// an explicit path. The local working-directory file wins so repo/dev runs keep
+// their existing behavior; the user config makes `go install` usable globally.
+func ResolveDefaultPath() (string, error) {
+	if _, err := os.Stat(DefaultPath); err == nil {
+		return DefaultPath, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("stat config %q: %w", DefaultPath, err)
+	}
+
+	userPath, err := UserConfigPath()
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(userPath); err == nil {
+		return userPath, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("stat config %q: %w", userPath, err)
+	}
+
+	return "", fmt.Errorf("read config: neither %q nor %q exists; set MINNOW_CONFIG or run `minnow config init dev-openai`", DefaultPath, userPath)
 }
 
 // decodeStrict decodes YAML bytes into a Config, rejecting any unknown keys.

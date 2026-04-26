@@ -10,3 +10,10 @@ embedder:
   provider: local
   local:
     dim: 384
+
+mcp:
+  enabled: true
+  transports: [http, stdio]
+  http_path: /mcp
+  allow_indexing: true
+  allow_sync_indexing: true
