@@ -11,7 +11,9 @@
 minnow is configured from a single YAML file, discovered at:
 
 1. `$MINNOW_CONFIG` if set, or
-2. `./minnow.yaml` in the process working directory.
+2. `./minnow.yaml` in the process working directory, or
+3. the per-user config path (`~/Library/Application Support/minnow/minnow.yaml`
+   on macOS, `~/.config/minnow/minnow.yaml` on Linux).
 
 See [configuration.md](configuration.md) for the full schema and
 [`examples/minnow.min.yaml`](../examples/minnow.min.yaml) /
@@ -23,7 +25,7 @@ deployment knob lives in the YAML.
 
 | Env var             | Purpose                                                  |
 | ------------------- | -------------------------------------------------------- |
-| `MINNOW_CONFIG`     | Path to the YAML config. Defaults to `./minnow.yaml`.    |
+| `MINNOW_CONFIG`     | Path to the YAML config. Overrides default discovery.     |
 | `MINNOW_LOG_FORMAT` | Logger format (`text` / `json`). Read before the config. |
 
 Secret values (Mongo URI, tokens) are referenced from YAML via `${VAR}`
@@ -36,7 +38,73 @@ cp examples/minnow.min.yaml minnow.yaml
 go run .
 ```
 
+## Install for MCP
+
+Install the binary globally:
+
+```bash
+go install github.com/mikills/minnow@latest
+```
+
+Create an OpenAI-backed developer config in the per-user config path:
+
+```bash
+minnow config init dev-openai
+export OPENAI_API_KEY=sk-...
+minnow config validate
+```
+
+That config enables both HTTP and stdio MCP, uses `text-embedding-3-small`, and
+stores local blobs/cache under the same user config directory. The first ingest
+fixes each KB's embedding dimension to the model output dimension.
+
 The default bind address is `127.0.0.1:8080` (override `http.address` in the YAML).
+
+The minimal config enables MCP for local coding-agent workflows:
+
+- Streamable HTTP MCP endpoint: `http://127.0.0.1:8080/mcp`
+- Stdio MCP command: `go run . mcp stdio`
+
+For editors that register MCP servers as a command, use the stdio mode. If your
+config is not at `./minnow.yaml`, pass it through `MINNOW_CONFIG` in the editor's
+MCP server environment.
+
+Example MCP registration shape:
+
+```json
+{
+  "mcpServers": {
+    "minnow": {
+      "command": "go",
+      "args": ["run", ".", "mcp", "stdio"],
+      "env": {
+        "MINNOW_CONFIG": "./minnow.yaml"
+      }
+    }
+  }
+}
+```
+
+If you install Minnow as a binary, replace the command and args with the binary:
+
+```json
+{
+  "mcpServers": {
+    "minnow": {
+      "command": "minnow",
+      "args": ["mcp", "stdio"],
+      "env": {
+        "OPENAI_API_KEY": "sk-..."
+      }
+    }
+  }
+}
+```
+
+If you keep the config outside the default user config path, add `MINNOW_CONFIG`
+to the `env` block as well. GUI editors may not inherit shell environment
+variables on macOS, so pass `OPENAI_API_KEY` explicitly unless your editor has a
+known environment loading mechanism.
 
 ## Validate a config
 

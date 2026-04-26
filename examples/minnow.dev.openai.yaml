@@ -1,0 +1,28 @@
+# OpenAI-backed local developer config. Intended for globally installed MCP use.
+# Set OPENAI_API_KEY in your shell or MCP client environment before starting.
+
+storage:
+  blob:
+    root: ./.temp/dev-openai/blobs
+  cache:
+    dir: ./.temp/dev-openai/cache
+
+format:
+  duckdb:
+    extension_dir: ./extensions
+    offline: false
+
+embedder:
+  provider: openai_compatible
+  openai_compatible:
+    base_url: https://api.openai.com/v1
+    model: text-embedding-3-small
+    token: ${OPENAI_API_KEY}
+    dimensions: 0
+
+mcp:
+  enabled: true
+  transports: [http, stdio]
+  http_path: /mcp
+  allow_indexing: true
+  allow_sync_indexing: true

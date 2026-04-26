@@ -169,6 +169,9 @@ func (f *DuckDBArtifactFormat) QueryGraph(ctx context.Context, req kb.GraphQuery
 	if err != nil {
 		return nil, fmt.Errorf("select vector query path: %w", err)
 	}
+	if err := validateQueryVectorDimensionForShards(req.QueryVec, selection.Plan.Shards); err != nil {
+		return nil, err
+	}
 
 	merged, err := f.runGraphExpansionAcrossShards(ctx, req, selection, options)
 	if err != nil {

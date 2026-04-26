@@ -93,6 +93,45 @@ func TestLoad(t *testing.T) {
 		require.Contains(t, err.Error(), "gpt4all")
 	})
 
+	t.Run("loads openai compatible embedder", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "minnow.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(`
+embedder:
+  provider: openai_compatible
+  openai_compatible:
+    base_url: http://localhost:11434/v1
+    model: nomic-embed-text
+    token: ollama
+    dimensions: 1024
+`), 0o644))
+
+		cfg, err := Load(path)
+		require.NoError(t, err)
+		require.Equal(t, "openai_compatible", cfg.Embedder.Provider)
+		require.NotNil(t, cfg.Embedder.OpenAICompatible)
+		require.Equal(t, "http://localhost:11434/v1", cfg.Embedder.OpenAICompatible.BaseURL)
+		require.Equal(t, "nomic-embed-text", cfg.Embedder.OpenAICompatible.Model)
+		require.Equal(t, "ollama", cfg.Embedder.OpenAICompatible.Token)
+		require.Equal(t, 1024, cfg.Embedder.OpenAICompatible.Dimensions)
+	})
+
+	t.Run("rejects invalid openai compatible config", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "minnow.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(`
+embedder:
+  provider: openai_compatible
+  openai_compatible:
+    base_url: ftp://example.com/v1
+    model: model
+`), 0o644))
+
+		_, err := Load(path)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "base_url scheme")
+	})
+
 	t.Run("rejects mongo block without uri", func(t *testing.T) {
 		_, err := Load("testdata/invalid_mongo_uri.yaml")
 		require.Error(t, err)
@@ -195,6 +234,47 @@ embedder:
 		_, err := Load(path)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "additional YAML document")
+	})
+}
+
+func TestDefaultPathResolution(t *testing.T) {
+	t.Run("uses_local_config_first", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "minnow.yaml"), []byte(`
+embedder:
+  provider: local
+  local:
+    dim: 64
+`), 0o644))
+
+		path, err := ResolveDefaultPath()
+		require.NoError(t, err)
+		require.Equal(t, DefaultPath, path)
+	})
+
+	t.Run("falls_back_to_user_config", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Chdir(dir)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		userPath, err := UserConfigPath()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(filepath.Dir(userPath), 0o755))
+		require.NoError(t, os.WriteFile(userPath, []byte(`
+embedder:
+  provider: local
+  local:
+    dim: 32
+`), 0o644))
+
+		path, err := ResolveDefaultPath()
+		require.NoError(t, err)
+		require.Equal(t, userPath, path)
+
+		cfg, err := Load("")
+		require.NoError(t, err)
+		require.Equal(t, 32, cfg.Embedder.Local.Dim)
 	})
 }
 
@@ -547,4 +627,3 @@ graph:
 		})
 	}
 }
-
