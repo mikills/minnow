@@ -38,6 +38,13 @@ func QueryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int)
 	if len(queryVec) == 0 {
 		return nil, fmt.Errorf("query vector cannot be empty")
 	}
+	expectedDim, err := duckDBEmbeddingDimension(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateVectorDimension(queryVec, expectedDim, "query vector dimension is incompatible with stored vectors"); err != nil {
+		return nil, err
+	}
 
 	vecStr := FormatVectorForSQL(queryVec)
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
@@ -82,6 +89,13 @@ type docMatch struct {
 func queryDocMatchesForIDs(ctx context.Context, db *sql.DB, queryVec []float32, ids []string) (map[string]docMatch, error) {
 	if len(ids) == 0 {
 		return map[string]docMatch{}, nil
+	}
+	expectedDim, err := duckDBEmbeddingDimension(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateVectorDimension(queryVec, expectedDim, "distance query vector dimension is incompatible with stored vectors"); err != nil {
+		return nil, err
 	}
 
 	vecStr := FormatVectorForSQL(queryVec)
