@@ -23,6 +23,7 @@ func TestDuckDBArtifactFormat(t *testing.T) {
 	t.Run("validate_manifest_format_requires_exact_version", testValidateManifestFormatRequiresExactVersion)
 	t.Run("validate_manifest_rejects_unsupported_version", testValidateManifestFormatRejectsUnsupportedVersion)
 	t.Run("validate_manifest_shard_consistency", testValidateManifestFormatShardConsistency)
+	t.Run("embedding_dimension_validation", testEmbeddingDimensionValidation)
 	t.Run("assert_safe_identifier", testAssertSafeIdentifier)
 	t.Run("is_transient_blob_error", testIsTransientBlobError)
 }
@@ -126,6 +127,40 @@ func testValidateManifestFormatShardConsistency(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.ErrorIs(t, err, kb.ErrArtifactFormatNotConfigured)
+}
+
+func testEmbeddingDimensionValidation(t *testing.T) {
+	ctx := context.Background()
+	kbID := "kb-dimension-validation"
+	harness := kb.NewTestHarness(t, kbID).
+		WithEmbedder(newFixtureEmbedder(4)).
+		Setup()
+	t.Cleanup(harness.Cleanup)
+	registerFormatOnHarness(t, harness)
+	loader := harness.KB()
+
+	require.NoError(t, loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{{ID: "seed", Text: "seed document"}}))
+
+	loader.Embedder = newFixtureEmbedder(3)
+	err := loader.UpsertDocsAndUpload(ctx, kbID, []kb.Document{{ID: "changed", Text: "changed dimension"}})
+	require.Error(t, err)
+	require.ErrorIs(t, err, kb.ErrEmbeddingDimensionMismatch)
+	require.Contains(t, err.Error(), "got 3 dimensions, expected 4")
+
+	af := requireDuckDBFormat(t, loader)
+	_, err = af.PublishPrepared(ctx, kb.PreparedPublishRequest{
+		KBID:   kbID,
+		Docs:   []kb.EmbeddedDocument{{ID: "prepared", Text: "prepared dimension", Embedding: []float32{1, 2, 3}}},
+		Upload: true,
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, kb.ErrEmbeddingDimensionMismatch)
+	require.Contains(t, err.Error(), "got 3 dimensions, expected 4")
+
+	_, err = loader.Search(ctx, kbID, []float32{1, 2, 3}, &kb.SearchOptions{TopK: 1})
+	require.Error(t, err)
+	require.ErrorIs(t, err, kb.ErrEmbeddingDimensionMismatch)
+	require.Contains(t, err.Error(), "got 3 dimensions, expected 4")
 }
 
 func testAssertSafeIdentifier(t *testing.T) {

@@ -59,6 +59,13 @@ func (f *DuckDBArtifactFormat) Ingest(ctx context.Context, req kb.IngestUpsertRe
 		return kb.IngestResult{}, err
 	}
 	defer db.Close()
+	expectedDim, err := duckDBEmbeddingDimension(ctx, db)
+	if err != nil {
+		return kb.IngestResult{}, err
+	}
+	if err := validatePreparedDocDimensions(preparedDocs, expectedDim, "upsert embedding dimension is incompatible with stored vectors"); err != nil {
+		return kb.IngestResult{}, err
+	}
 
 	if err := f.applyUpsert(ctx, db, preparedDocs, graphBuilder); err != nil {
 		return kb.IngestResult{}, err
@@ -154,6 +161,13 @@ func (f *DuckDBArtifactFormat) PublishPrepared(ctx context.Context, req kb.Prepa
 		return kb.IngestResult{}, err
 	}
 	defer db.Close()
+	expectedDim, err := duckDBEmbeddingDimension(ctx, db)
+	if err != nil {
+		return kb.IngestResult{}, err
+	}
+	if err := validatePreparedDocDimensions(preparedDocs, expectedDim, "prepared embedding dimension is incompatible with stored vectors"); err != nil {
+		return kb.IngestResult{}, err
+	}
 
 	if err := f.applyPreparedUpsert(ctx, db, preparedDocs, req.GraphResult); err != nil {
 		return kb.IngestResult{}, err
@@ -595,7 +609,7 @@ func applyPreparedDocsTx(ctx context.Context, tx *sql.Tx, docs []preparedUpsertD
 		upsertSQL := fmt.Sprintf(`INSERT INTO docs (id, content, embedding, media_refs) VALUES (?, ?, %s::FLOAT[%d], ?)`, vecStr, len(vec))
 		if _, err := tx.ExecContext(ctx, upsertSQL, doc.ID, doc.Text, mediaRefsJSON); err != nil {
 			tx.Rollback()
-			return fmt.Errorf("upsert doc %q: %w", doc.ID, err)
+			return kb.WrapEmbeddingDimensionMismatch(fmt.Errorf("upsert doc %q: %w", doc.ID, err), "upsert embedding dimension is incompatible with stored vectors")
 		}
 		if _, err := stmtUndelete.ExecContext(ctx, doc.ID); err != nil {
 			tx.Rollback()
