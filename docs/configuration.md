@@ -3,12 +3,21 @@
 minnow is configured from a single YAML file, discovered at:
 
 1. `$MINNOW_CONFIG` if set, or
-2. `./minnow.yaml` in the process working directory.
+2. `./minnow.yaml` in the process working directory, or
+3. the per-user config path (`~/Library/Application Support/minnow/minnow.yaml`
+   on macOS, `~/.config/minnow/minnow.yaml` on Linux).
 
-If neither is present the process exits with a clear error. See
+If none are present the process exits with a clear error. See
 [`examples/minnow.min.yaml`](../examples/minnow.min.yaml) for the smallest valid
-file and [`examples/minnow.yaml`](../examples/minnow.yaml) for a full-field
-reference.
+file, [`examples/minnow.dev.openai.yaml`](../examples/minnow.dev.openai.yaml)
+for OpenAI-backed MCP development, and [`examples/minnow.yaml`](../examples/minnow.yaml)
+for a full-field reference.
+
+For globally installed MCP use, generate a starter OpenAI-backed config with:
+
+```bash
+minnow config init dev-openai
+```
 
 ## Rules
 
@@ -33,7 +42,7 @@ These two env vars are read before the config file:
 
 | Env var             | Purpose                                                                    |
 | ------------------- | -------------------------------------------------------------------------- |
-| `MINNOW_CONFIG`     | Path to the YAML config file. Defaults to `./minnow.yaml`.                 |
+| `MINNOW_CONFIG`     | Path to the YAML config file. Overrides default discovery.                 |
 | `MINNOW_LOG_FORMAT` | Logger format (`text` / `json`). Read before the YAML so parse errors log.|
 
 All other deployment knobs are YAML fields.
@@ -75,15 +84,21 @@ All other deployment knobs are YAML fields.
 
 ### `embedder`
 
-| Field            | Type   | Default                    | Notes                                          |
-| ---------------- | ------ | -------------------------- | ---------------------------------------------- |
-| `provider`       | enum   | `ollama`                   | `ollama` \| `local`.                           |
-| `ollama.url`     | string | `http://localhost:11434`   | Required when `provider = ollama`.             |
-| `ollama.model`   | string | `all-minilm`               |                                                |
-| `local.dim`      | int    | `384`                      | Required (> 0) when `provider = local`.        |
+| Field                            | Type   | Default                    | Notes                                                   |
+| -------------------------------- | ------ | -------------------------- | ------------------------------------------------------- |
+| `provider`                       | enum   | `ollama`                   | `ollama` \| `local` \| `openai_compatible`.             |
+| `ollama.url`                     | string | `http://localhost:11434`   | Required when `provider = ollama`; uses `/api/embed`.   |
+| `ollama.model`                   | string | `all-minilm`               |                                                         |
+| `local.dim`                      | int    | `384`                      | Required (> 0) when `provider = local`.                 |
+| `openai_compatible.base_url`     | string | `https://api.openai.com/v1` | Required when `provider = openai_compatible`.           |
+| `openai_compatible.model`        | string | none                       | Required.                                               |
+| `openai_compatible.token`        | string | none                       | Optional bearer token; omit for unauthenticated locals. |
+| `openai_compatible.dimensions`   | int    | `0`                        | Optional; `0` omits the request field.                  |
 
-The `ollama` / `local` block must be present when its provider is selected; the
-loader does not auto-create an empty block.
+The provider-specific block must be present when its provider is selected; the
+loader does not auto-create an empty block. `openai_compatible` calls
+`POST {base_url}/embeddings`, so use `base_url: http://localhost:11434/v1` for
+Ollama's OpenAI-compatible API.
 
 ### `graph` (optional, RAG graph extraction)
 
@@ -190,6 +205,82 @@ Presence of a key means "explicit"; omit a key to accept the default.
 | `compaction_enabled`                | bool    | `true`     |                                                        |
 | `compaction_min_shard_count`        | int     | `8`        | > 0 when set.                                          |
 | `compaction_tombstone_ratio`        | float   | `0.20`     | `(0, 1]`.                                              |
+
+### `mcp`
+
+MCP exposes Minnow for LLM agents. The schema default is disabled, 
+but the repository's local developer configs
+(`minnow.yaml`, `examples/minnow.min.yaml`, `examples/minnow.dev.openai.yaml`)
+ship with MCP enabled and retrieval + indexing tools allowed. Destructive and
+admin tools remain opt-in.
+
+**Schema vs shipped defaults**: the table below documents schema defaults that
+apply when `mcp.enabled` is `true` but a field is omitted. The shipped local
+configs override `enabled` to `true` and `allow_indexing`/`allow_sync_indexing`
+to `true` for developer ergonomics; production configs should set every field
+explicitly.
+
+The MCP `tools/list` reflects only the tools the gates allow: tools whose
+required gate (e.g. `allow_destructive`, `allow_admin`) is off are not
+registered. Agents therefore see exactly the surface they may call instead of
+discovering tools that always error.
+
+| Field                  | Type         | Default             | Notes |
+| ---------------------- | ------------ | ------------------- | ----- |
+| `enabled`              | bool         | `false`             | Enables MCP config and validation. Local examples set this to `true`. |
+| `transports`           | list[string] | `[stdio, http]`     | Allowed values: `stdio`, `http`. Applies when enabled. |
+| `http_path`            | string       | `/mcp`              | Streamable HTTP endpoint path. Must start with `/`. |
+| `read_only`            | bool         | `false`             | Blocks indexing, destructive, and admin tools. |
+| `allow_indexing`       | bool         | `false`             | Enables async document indexing tools. |
+| `allow_sync_indexing`  | bool         | `false`             | Enables bounded wait indexing. Requires `allow_indexing`. |
+| `allow_destructive`    | bool         | `false`             | Enables delete/tombstone tools. Keep off unless explicitly needed. |
+| `allow_admin`          | bool         | `false`             | Enables maintenance tools such as cache sweep and compaction. |
+| `default_sync_timeout` | duration     | `30s`               | Default wait for sync indexing. |
+| `max_sync_timeout`     | duration     | `2m`                | Upper bound for caller-requested sync indexing waits. |
+| `http_json_response`   | bool         | `false`             | Prefer JSON responses over SSE where the SDK supports it. |
+| `http_stateless`       | bool         | `false`             | Runs HTTP MCP requests without retained sessions. |
+
+Stdio mode is launched with:
+
+```bash
+go run . mcp stdio
+```
+
+In stdio mode, Minnow writes logs to stderr so stdout is reserved for MCP
+messages.
+
+Example local agent config:
+
+```yaml
+mcp:
+  enabled: true
+  transports: [stdio, http]
+  http_path: /mcp
+  allow_indexing: true
+  allow_sync_indexing: true
+  allow_admin: true
+  allow_destructive: false
+```
+
+Destructive tools (`minnow_delete_knowledge_base`, `minnow_delete_media`,
+`minnow_clear_cache`) require `allow_destructive: true`; admin maintenance tools
+require `allow_admin: true`.
+
+For editor MCP registration, prefer stdio:
+
+```json
+{
+  "mcpServers": {
+    "minnow": {
+      "command": "minnow",
+      "args": ["mcp", "stdio"],
+      "env": {
+        "MINNOW_CONFIG": "/path/to/minnow.yaml"
+      }
+    }
+  }
+}
+```
 
 ## Secret policy
 

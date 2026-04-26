@@ -193,6 +193,9 @@ func (f *DuckDBArtifactFormat) searchTopK(ctx context.Context, kbID string, quer
 	if err != nil {
 		return nil, fmt.Errorf("select vector query path: %w", err)
 	}
+	if err := validateQueryVectorDimensionForShards(queryVec, selection.Plan.Shards); err != nil {
+		return nil, err
+	}
 	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
 	localTopK := shardLocalTopK(k, policy)
 	results, shardErr := f.queryTopKFromShards(ctx, kbID, queryVec, k, localTopK, selection.Plan)

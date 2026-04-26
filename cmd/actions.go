@@ -16,14 +16,18 @@ type Dependencies struct {
 	CacheMetricsHandler http.Handler
 	AppMetrics          kb.AppMetrics
 	SweepCache          func(context.Context) error
+	ClearCache          func(context.Context) error
 	IsBudgetExceeded    func(error) bool
 	Embed               func(context.Context, string) ([]float32, error)
 	Search              func(context.Context, string, []float32, *kb.SearchOptions) ([]kb.ExpandedResult, error)
+	ForceCompaction     func(context.Context, string) (*kb.CompactionPublishResult, error)
+	DeleteKnowledgeBase func(context.Context, string) error
 
 	// Media subsystem (optional; when nil the media endpoints 503).
 	AppendMediaUpload func(context.Context, kb.MediaUploadInput, int64, string, string) (string, string, error)
 	GetMedia          func(context.Context, string) (*kb.MediaObject, error)
 	ListMedia         func(ctx context.Context, kbID, prefix, after string, limit int) (kb.MediaPage, error)
+	DeleteMedia       func(context.Context, string) error
 	MaxMediaBytes     int64
 
 	// Event-driven ingest.

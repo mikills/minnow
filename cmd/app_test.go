@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/mcpserver"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,6 +39,7 @@ func TestAppHTTP(t *testing.T) {
 	t.Run("ui_content_type", testAppUIContentType)
 	t.Run("kb_id_middleware", testAppKBIDMiddleware)
 	t.Run("background_cache_eviction", testAppBackgroundCacheEviction)
+	t.Run("mcp http mount", testAppMCPHTTPMount)
 }
 
 func testAppEndpoints(t *testing.T) {
@@ -68,6 +70,22 @@ func testAppEndpoints(t *testing.T) {
 			assert.Equal(t, tc.status, resp.StatusCode)
 		})
 	}
+}
+
+func testAppMCPHTTPMount(t *testing.T) {
+	tmp := t.TempDir()
+	loader := kb.NewKB(&kb.LocalBlobStore{Root: filepath.Join(tmp, "blobs")}, filepath.Join(tmp, "cache"))
+	app := NewApp(loader, AppConfig{Address: "127.0.0.1:0", MCP: mcpserver.Config{Enabled: true, HTTPEnabled: true, HTTPPath: "/mcp", HTTPJSONResponse: true}})
+	require.NoError(t, app.Start())
+	t.Cleanup(func() {
+		_ = app.Stop(context.Background())
+		_ = app.Wait()
+	})
+
+	resp, err := http.Get("http://" + app.Address() + "/mcp")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.NotEqual(t, http.StatusNotFound, resp.StatusCode)
 }
 
 func testAppUIContentType(t *testing.T) {

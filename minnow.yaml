@@ -7,3 +7,13 @@ embedder:
   provider: local
   local:
     dim: 384
+
+# Local developer default: expose MCP for coding agents at /mcp and via
+# `go run . mcp stdio`. Indexing is enabled so agents can build/update a KB.
+# Destructive/admin tools stay opt-in.
+mcp:
+  enabled: true
+  transports: [http, stdio]
+  http_path: /mcp
+  allow_indexing: true
+  allow_sync_indexing: true

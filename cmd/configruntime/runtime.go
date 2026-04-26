@@ -11,12 +11,14 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	appcmd "github.com/mikills/minnow/cmd"
 	"github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/kb/config"
 	kbduckdb "github.com/mikills/minnow/kb/duckdb"
+	"github.com/mikills/minnow/mcpserver"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	mongoopts "go.mongodb.org/mongo-driver/v2/mongo/options"
 )
@@ -54,6 +56,8 @@ func (r *Runtime) Scheduler() *kb.Scheduler { return r.scheduler }
 
 // WorkerPools returns the configured event worker pools.
 func (r *Runtime) WorkerPools() []*kb.WorkerPool { return r.workerPools }
+
+func (r *Runtime) MCPConfig() mcpserver.Config { return mcpConfigFromConfig(r.cfg) }
 
 // Build constructs the deployment. It does not open the HTTP listener, mutate
 // the filesystem, connect to Mongo in dry-run mode, or start any goroutine.
@@ -148,6 +152,7 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 		ShutdownTimeout:       cfg.HTTPShutdownTimeout(),
 		CacheEvictionInterval: cfg.CacheEvictInterval(),
 		MaxMediaBytes:         cfg.Media.MaxBytes,
+		MCP:                   mcpConfigFromConfig(cfg),
 		Logger:                logger,
 	}
 	rt.app = appcmd.NewApp(k, appCfg)
@@ -178,6 +183,22 @@ func (r *Runtime) Start(ctx context.Context) error {
 	if r.dryRun {
 		return nil
 	}
+	if err := r.StartBackground(ctx); err != nil {
+		return err
+	}
+	if err := r.app.Start(); err != nil {
+		return fmt.Errorf("start app: %w", err)
+	}
+	r.logger.Info("minnow listening", "address", r.app.Address())
+	return nil
+}
+
+// StartBackground starts filesystem state, scheduler, and worker pools without
+// binding the HTTP app. It is used by stdio MCP mode.
+func (r *Runtime) StartBackground(ctx context.Context) error {
+	if r.dryRun {
+		return nil
+	}
 	if err := os.MkdirAll(r.cfg.Storage.Blob.Root, 0o755); err != nil {
 		return fmt.Errorf("create blob root %q: %w", r.cfg.Storage.Blob.Root, err)
 	}
@@ -191,11 +212,29 @@ func (r *Runtime) Start(ctx context.Context) error {
 	for _, pool := range r.workerPools {
 		pool.Start(ctx)
 	}
-	if err := r.app.Start(); err != nil {
-		return fmt.Errorf("start app: %w", err)
-	}
-	r.logger.Info("minnow listening", "address", r.app.Address())
 	return nil
+}
+
+func mcpConfigFromConfig(cfg *config.Config) mcpserver.Config {
+	transports := map[string]bool{}
+	for _, t := range cfg.MCP.Transports {
+		transports[strings.ToLower(strings.TrimSpace(t))] = true
+	}
+	return mcpserver.Config{
+		Enabled:            cfg.MCP.Enabled,
+		HTTPEnabled:        transports["http"],
+		StdioEnabled:       transports["stdio"],
+		HTTPPath:           cfg.MCP.HTTPPath,
+		ReadOnly:           cfg.MCP.ReadOnly,
+		AllowIndexing:      cfg.MCP.AllowIndexing,
+		AllowSyncIndexing:  cfg.MCP.AllowSyncIndexing,
+		AllowDestructive:   cfg.MCP.AllowDestructive,
+		AllowAdmin:         cfg.MCP.AllowAdmin,
+		DefaultSyncTimeout: cfg.MCP.DefaultSyncTimeout.AsDuration(),
+		MaxSyncTimeout:     cfg.MCP.MaxSyncTimeout.AsDuration(),
+		HTTPJSONResponse:   cfg.MCP.HTTPJSONResponse,
+		HTTPStateless:      cfg.MCP.HTTPStateless,
+	}
 }
 
 // Wait blocks until the HTTP app exits (on ctx cancellation or error).
@@ -250,6 +289,19 @@ func buildEmbedder(cfg *config.Config, logger *slog.Logger) (kb.Embedder, error)
 			return nil, fmt.Errorf("build local embedder: %w", err)
 		}
 		logger.Info("configured local embedder", "dim", cfg.Embedder.Local.Dim)
+		return e, nil
+	case "openai_compatible":
+		oc := cfg.Embedder.OpenAICompatible
+		e, err := kb.NewOpenAICompatibleEmbedder(kb.OpenAICompatibleEmbedderConfig{
+			BaseURL:    oc.BaseURL,
+			Model:      oc.Model,
+			Token:      oc.Token,
+			Dimensions: oc.Dimensions,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("build openai compatible embedder: %w", err)
+		}
+		logger.Info("configured openai compatible embedder", "base_url", oc.BaseURL, "model", oc.Model, "dimensions", oc.Dimensions)
 		return e, nil
 	default:
 		return nil, fmt.Errorf("configruntime: embedder provider %q not supported", cfg.Embedder.Provider)
