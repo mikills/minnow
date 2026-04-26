@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/mcpserver"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -31,6 +33,7 @@ type AppConfig struct {
 	ShutdownTimeout       time.Duration
 	CacheEvictionInterval time.Duration
 	MaxMediaBytes         int64
+	MCP                   mcpserver.Config
 	Logger                *slog.Logger
 }
 
@@ -133,6 +136,7 @@ func mergeWithDefaultAppConfig(cfg AppConfig) AppConfig {
 	if cfg.MaxMediaBytes > 0 {
 		d.MaxMediaBytes = cfg.MaxMediaBytes
 	}
+	d.MCP = cfg.MCP
 	return d
 }
 
@@ -183,68 +187,136 @@ func requestLoggerMiddleware(logger *slog.Logger, metrics kb.AppMetrics) echo.Mi
 }
 
 func (a *App) registerRoutes() {
-	deps := Dependencies{
-		CacheMetricsHandler: kb.NewCacheOpenMetricsHandler(a.kb),
-		SweepCache: func(ctx context.Context) error {
-			if a.kb == nil {
-				return fmt.Errorf("kb unavailable")
-			}
-			return a.kb.SweepCache(ctx)
-		},
-		IsBudgetExceeded: func(err error) bool {
-			return errors.Is(err, kb.ErrCacheBudgetExceeded)
-		},
-		Embed: func(ctx context.Context, input string) ([]float32, error) {
-			if a.kb == nil {
-				return nil, fmt.Errorf("kb unavailable")
-			}
-			return a.kb.Embed(ctx, input)
-		},
-		Search: func(ctx context.Context, kbID string, queryVec []float32, opts *kb.SearchOptions) ([]kb.ExpandedResult, error) {
-			if a.kb == nil {
-				return nil, fmt.Errorf("kb unavailable")
-			}
-			return a.kb.Search(ctx, kbID, queryVec, opts)
-		},
-		MaxMediaBytes: a.config.MaxMediaBytes,
-		Logger:        a.logger,
-		AppMetrics:    a.metrics,
+	deps := buildKBDeps(a.kb, a.logger)
+	deps.CacheMetricsHandler = kb.NewCacheOpenMetricsHandler(a.kb)
+	deps.IsBudgetExceeded = func(err error) bool {
+		return errors.Is(err, kb.ErrCacheBudgetExceeded)
 	}
-	// Media route closures are only installed when a MediaStore is wired.
-	// When media is disabled in config, KB.MediaStore is nil and these
-	// closures stay nil, which makes cmd/actions.go return 503.
-	if a.kb != nil && a.kb.MediaStore != nil {
-		deps.GetMedia = func(ctx context.Context, id string) (*kb.MediaObject, error) {
-			return a.kb.MediaStore.Get(ctx, id)
-		}
-		deps.ListMedia = func(ctx context.Context, kbID, prefix, after string, limit int) (kb.MediaPage, error) {
-			return a.kb.MediaStore.List(ctx, kbID, prefix, after, limit)
-		}
-		if a.kb.EventStore != nil {
-			deps.AppendMediaUpload = func(ctx context.Context, in kb.MediaUploadInput, maxBytes int64, idem, corr string) (string, string, error) {
-				return a.kb.AppendMediaUploadDetailed(ctx, in, maxBytes, idem, corr)
-			}
+	deps.MaxMediaBytes = a.config.MaxMediaBytes
+	deps.AppMetrics = a.metrics
+
+	// HTTP-only closures: media upload and file ingest are exposed on the
+	// REST surface but not via MCP.
+	if a.kb != nil && a.kb.MediaStore != nil && a.kb.EventStore != nil {
+		deps.AppendMediaUpload = func(ctx context.Context, in kb.MediaUploadInput, maxBytes int64, idem, corr string) (string, string, error) {
+			return a.kb.AppendMediaUploadDetailed(ctx, in, maxBytes, idem, corr)
 		}
 	}
 	if a.kb != nil && a.kb.EventStore != nil {
-		deps.AppendDocumentUpsert = func(ctx context.Context, p kb.DocumentUpsertPayload, idem, corr string) (string, string, error) {
-			return a.kb.AppendDocumentUpsertDetailed(ctx, p, idem, corr)
-		}
 		deps.AppendFileIngest = func(ctx context.Context, in kb.FileIngestInput, maxBytes int64, idem, corr string) (string, string, error) {
 			return a.kb.AppendFileIngestDetailed(ctx, in, maxBytes, idem, corr)
 		}
-		deps.GetEvent = func(ctx context.Context, id string) (*kb.KBEvent, error) {
-			return a.kb.EventStore.Get(ctx, id)
+	}
+
+	Register(a.echo, deps)
+	a.registerMCPRoutes(deps)
+	RegisterUI(a.echo)
+}
+
+func (a *App) registerMCPRoutes(deps Dependencies) {
+	cfg := a.config.MCP
+	if !cfg.Enabled || !cfg.HTTPEnabled {
+		return
+	}
+	server := mcpserver.New(mcpServiceFromDeps(cfg, deps))
+	a.echo.Any(cfg.HTTPPath, echo.WrapHandler(mcpserver.NewHTTPHandler(server, cfg)))
+}
+
+func NewMCPServerFromKB(loader *kb.KB, cfg mcpserver.Config, logger *slog.Logger) *mcp.Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return mcpserver.New(mcpServiceFromDeps(cfg, buildKBDeps(loader, logger)))
+}
+
+// buildKBDeps returns the Dependencies subset that closes over the KB and is
+// needed by both the HTTP route registration and the MCP service. Keeping this
+// in one place ensures that adding a KB-backed handler shows up in HTTP and
+// MCP at the same time
+func buildKBDeps(loader *kb.KB, logger *slog.Logger) Dependencies {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	deps := Dependencies{
+		Logger: logger,
+		Embed: func(ctx context.Context, input string) ([]float32, error) {
+			if loader == nil {
+				return nil, fmt.Errorf("kb unavailable")
+			}
+			return loader.Embed(ctx, input)
+		},
+		Search: func(ctx context.Context, kbID string, queryVec []float32, opts *kb.SearchOptions) ([]kb.ExpandedResult, error) {
+			if loader == nil {
+				return nil, fmt.Errorf("kb unavailable")
+			}
+			return loader.Search(ctx, kbID, queryVec, opts)
+		},
+		SweepCache: func(ctx context.Context) error {
+			if loader == nil {
+				return fmt.Errorf("kb unavailable")
+			}
+			return loader.SweepCache(ctx)
+		},
+	}
+	if loader == nil {
+		return deps
+	}
+	deps.ClearCache = func(context.Context) error { return loader.ClearCache() }
+	deps.ForceCompaction = func(ctx context.Context, kbID string) (*kb.CompactionPublishResult, error) {
+		return loader.CompactIfNeeded(ctx, kbID)
+	}
+	deps.DeleteKnowledgeBase = func(ctx context.Context, kbID string) error {
+		return loader.DeleteKnowledgeBase(ctx, kbID)
+	}
+	// Media route closures are only installed when a MediaStore is wired.
+	// When media is disabled, MediaStore is nil and these closures stay nil,
+	// which makes cmd/actions.go return 503.
+	if loader.MediaStore != nil {
+		deps.GetMedia = func(ctx context.Context, id string) (*kb.MediaObject, error) {
+			return loader.MediaStore.Get(ctx, id)
 		}
-		deps.FindOperationTerminal = func(ctx context.Context, source string) (*kb.KBEvent, error) {
-			return a.kb.FindOperationTerminal(ctx, source)
+		deps.ListMedia = func(ctx context.Context, kbID, prefix, after string, limit int) (kb.MediaPage, error) {
+			return loader.MediaStore.List(ctx, kbID, prefix, after, limit)
 		}
-		deps.OperationStages = func(ctx context.Context, source string) ([]kb.OperationStageSnapshot, error) {
-			return a.kb.OperationStages(ctx, source)
+		deps.DeleteMedia = func(ctx context.Context, id string) error {
+			return loader.TombstoneMedia(ctx, id)
 		}
 	}
-	Register(a.echo, deps)
-	RegisterUI(a.echo)
+	if loader.EventStore != nil {
+		deps.AppendDocumentUpsert = func(ctx context.Context, p kb.DocumentUpsertPayload, idem, corr string) (string, string, error) {
+			return loader.AppendDocumentUpsertDetailed(ctx, p, idem, corr)
+		}
+		deps.GetEvent = func(ctx context.Context, id string) (*kb.KBEvent, error) {
+			return loader.EventStore.Get(ctx, id)
+		}
+		deps.FindOperationTerminal = func(ctx context.Context, source string) (*kb.KBEvent, error) {
+			return loader.FindOperationTerminal(ctx, source)
+		}
+		deps.OperationStages = func(ctx context.Context, source string) ([]kb.OperationStageSnapshot, error) {
+			return loader.OperationStages(ctx, source)
+		}
+	}
+	return deps
+}
+
+func mcpServiceFromDeps(cfg mcpserver.Config, deps Dependencies) mcpserver.Service {
+	return mcpserver.Service{
+		Config:                cfg,
+		Logger:                deps.Logger,
+		Embed:                 deps.Embed,
+		Search:                deps.Search,
+		AppendDocumentUpsert:  deps.AppendDocumentUpsert,
+		GetEvent:              deps.GetEvent,
+		FindOperationTerminal: deps.FindOperationTerminal,
+		OperationStages:       deps.OperationStages,
+		ListMedia:             deps.ListMedia,
+		GetMedia:              deps.GetMedia,
+		DeleteMedia:           deps.DeleteMedia,
+		SweepCache:            deps.SweepCache,
+		ClearCache:            deps.ClearCache,
+		ForceCompaction:       deps.ForceCompaction,
+		DeleteKnowledgeBase:   deps.DeleteKnowledgeBase,
+	}
 }
 
 func (a *App) Start() error {

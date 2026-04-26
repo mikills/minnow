@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/kb/config"
 	"github.com/stretchr/testify/require"
 )
@@ -74,6 +75,36 @@ sharding:
 		policy := rt.KB().ShardingPolicy
 		require.Equal(t, 8, policy.QueryShardFanout, "config sharding policy must reach KB")
 		require.Equal(t, 16, policy.QueryShardFanoutAdaptiveMax)
+	})
+
+	t.Run("builds openai compatible embedder", func(t *testing.T) {
+		path := writeTempConfig(t, `
+embedder:
+  provider: openai_compatible
+  openai_compatible:
+    base_url: http://localhost:11434/v1
+    model: nomic-embed-text
+    token: ollama
+    dimensions: 768
+
+scheduler:
+  enabled: false
+
+media:
+  enabled: false
+`)
+
+		cfg, err := config.Load(path)
+		require.NoError(t, err)
+		rt, err := Build(context.Background(), cfg, BuildOptions{DryRun: true, Logger: quietLogger()})
+		require.NoError(t, err)
+
+		embedder, ok := rt.KB().Embedder.(*kb.OpenAICompatibleEmbedder)
+		require.True(t, ok, "expected OpenAI-compatible embedder, got %T", rt.KB().Embedder)
+		require.Equal(t, "http://localhost:11434/v1", embedder.BaseURL)
+		require.Equal(t, "nomic-embed-text", embedder.Model)
+		require.Equal(t, "ollama", embedder.Token)
+		require.Equal(t, 768, embedder.Dimensions)
 	})
 }
 

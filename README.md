@@ -12,6 +12,19 @@ go run .
 curl -s http://127.0.0.1:8080/healthz
 ```
 
+For globally installed MCP use with OpenAI embeddings:
+
+```bash
+go install github.com/mikills/minnow@latest
+minnow config init dev-openai
+OPENAI_API_KEY=sk-... minnow mcp stdio
+```
+
+The default `minnow.yaml` also exposes MCP for coding agents:
+
+- Streamable HTTP: `http://127.0.0.1:8080/mcp`
+- Stdio: `go run . mcp stdio`
+
 The default config at `./minnow.yaml` is sufficient for local development (embedder-only, no external services). See [`docs/getting-started.md`](docs/getting-started.md) for a deployment-grade setup.
 
 ## What it does

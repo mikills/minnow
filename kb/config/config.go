@@ -25,6 +25,7 @@ type Config struct {
 	Workers   WorkersConfig   `yaml:"workers" json:"workers"`
 	Media     MediaConfig     `yaml:"media" json:"media"`
 	Sharding  ShardingConfig  `yaml:"sharding" json:"sharding"`
+	MCP       MCPConfig       `yaml:"mcp" json:"mcp"`
 }
 
 // HTTPConfig describes the public HTTP server.
@@ -75,9 +76,10 @@ type DuckDBFormatConfig struct {
 
 // EmbedderConfig selects an embedder implementation.
 type EmbedderConfig struct {
-	Provider string                `yaml:"provider" json:"provider"`
-	Ollama   *OllamaEmbedderConfig `yaml:"ollama,omitempty" json:"ollama,omitempty"`
-	Local    *LocalEmbedderConfig  `yaml:"local,omitempty" json:"local,omitempty"`
+	Provider         string                          `yaml:"provider" json:"provider"`
+	Ollama           *OllamaEmbedderConfig           `yaml:"ollama,omitempty" json:"ollama,omitempty"`
+	Local            *LocalEmbedderConfig            `yaml:"local,omitempty" json:"local,omitempty"`
+	OpenAICompatible *OpenAICompatibleEmbedderConfig `yaml:"openai_compatible,omitempty" json:"openai_compatible,omitempty"`
 }
 
 // OllamaEmbedderConfig configures the Ollama provider.
@@ -89,6 +91,14 @@ type OllamaEmbedderConfig struct {
 // LocalEmbedderConfig configures the deterministic local embedder.
 type LocalEmbedderConfig struct {
 	Dim int `yaml:"dim" json:"dim"`
+}
+
+// OpenAICompatibleEmbedderConfig configures an OpenAI-compatible embeddings API.
+type OpenAICompatibleEmbedderConfig struct {
+	BaseURL    string `yaml:"base_url" json:"base_url"`
+	Model      string `yaml:"model" json:"model"`
+	Token      string `yaml:"token" json:"token"`
+	Dimensions int    `yaml:"dimensions,omitempty" json:"dimensions,omitempty"`
 }
 
 // GraphConfig configures optional graph extraction.
@@ -175,6 +185,22 @@ type ShardingConfig struct {
 	CompactionTombstoneRatio    *float64 `yaml:"compaction_tombstone_ratio,omitempty" json:"compaction_tombstone_ratio,omitempty"`
 }
 
+// MCPConfig controls the Model Context Protocol surface for coding agents.
+type MCPConfig struct {
+	Enabled            bool     `yaml:"enabled" json:"enabled"`
+	Transports         []string `yaml:"transports" json:"transports"`
+	HTTPPath           string   `yaml:"http_path" json:"http_path"`
+	ReadOnly           bool     `yaml:"read_only" json:"read_only"`
+	AllowIndexing      bool     `yaml:"allow_indexing" json:"allow_indexing"`
+	AllowSyncIndexing  bool     `yaml:"allow_sync_indexing" json:"allow_sync_indexing"`
+	AllowDestructive   bool     `yaml:"allow_destructive" json:"allow_destructive"`
+	AllowAdmin         bool     `yaml:"allow_admin" json:"allow_admin"`
+	DefaultSyncTimeout Duration `yaml:"default_sync_timeout" json:"default_sync_timeout"`
+	MaxSyncTimeout     Duration `yaml:"max_sync_timeout" json:"max_sync_timeout"`
+	HTTPJSONResponse   bool     `yaml:"http_json_response" json:"http_json_response"`
+	HTTPStateless      bool     `yaml:"http_stateless" json:"http_stateless"`
+}
+
 // Duration is a time.Duration that unmarshals from a YAML string like "5s"
 // or "1m30s", preserving line-number context on parse failure.
 type Duration time.Duration
@@ -253,6 +279,11 @@ func (c *Config) applyDefaults() {
 	if c.Embedder.Local != nil && c.Embedder.Local.Dim == 0 {
 		c.Embedder.Local.Dim = 384
 	}
+	if c.Embedder.OpenAICompatible != nil {
+		if c.Embedder.OpenAICompatible.BaseURL == "" {
+			c.Embedder.OpenAICompatible.BaseURL = "https://api.openai.com/v1"
+		}
+	}
 
 	if c.Graph.Enabled {
 		if c.Graph.URL == "" {
@@ -316,5 +347,20 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Media.UploadCompletionTTL == 0 {
 		c.Media.UploadCompletionTTL = Duration(15 * time.Minute)
+	}
+
+	if c.MCP.Enabled {
+		if len(c.MCP.Transports) == 0 {
+			c.MCP.Transports = []string{"stdio", "http"}
+		}
+		if c.MCP.HTTPPath == "" {
+			c.MCP.HTTPPath = "/mcp"
+		}
+		if c.MCP.DefaultSyncTimeout == 0 {
+			c.MCP.DefaultSyncTimeout = Duration(30 * time.Second)
+		}
+		if c.MCP.MaxSyncTimeout == 0 {
+			c.MCP.MaxSyncTimeout = Duration(2 * time.Minute)
+		}
 	}
 }
