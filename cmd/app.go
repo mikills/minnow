@@ -268,6 +268,18 @@ func buildKBDeps(loader *kb.KB, logger *slog.Logger) Dependencies {
 	deps.DeleteKnowledgeBase = func(ctx context.Context, kbID string) error {
 		return loader.DeleteKnowledgeBase(ctx, kbID)
 	}
+	deps.IndexCodebase = func(ctx context.Context, opts kb.CodeIndexOptions) (kb.CodeIndexResult, error) {
+		return loader.IndexCodebase(ctx, opts)
+	}
+	deps.CodeIndexStatus = func(ctx context.Context, kbID string) (kb.CodeIndexStatus, error) {
+		return loader.CodeIndexStatus(ctx, kbID)
+	}
+	deps.SearchCode = func(ctx context.Context, kbID, query string, opts kb.CodeSearchOptions) ([]kb.CodeSearchResult, error) {
+		return loader.SearchCode(ctx, kbID, query, opts)
+	}
+	deps.InstallCodeHooks = kb.InstallCodeIndexHooks
+	deps.UninstallCodeHooks = kb.UninstallCodeIndexHooks
+	deps.CodeHookStatus = kb.CodeIndexHookStatus
 	// Media route closures are only installed when a MediaStore is wired.
 	// When media is disabled, MediaStore is nil and these closures stay nil,
 	// which makes cmd/actions.go return 503.
@@ -316,6 +328,12 @@ func mcpServiceFromDeps(cfg mcpserver.Config, deps Dependencies) mcpserver.Servi
 		ClearCache:            deps.ClearCache,
 		ForceCompaction:       deps.ForceCompaction,
 		DeleteKnowledgeBase:   deps.DeleteKnowledgeBase,
+		IndexCodebase:         deps.IndexCodebase,
+		CodeIndexStatus:       deps.CodeIndexStatus,
+		SearchCode:            deps.SearchCode,
+		InstallCodeHooks:      deps.InstallCodeHooks,
+		UninstallCodeHooks:    deps.UninstallCodeHooks,
+		CodeHookStatus:        deps.CodeHookStatus,
 	}
 }
 

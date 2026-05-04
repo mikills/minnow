@@ -234,6 +234,23 @@ func mcpConfigFromConfig(cfg *config.Config) mcpserver.Config {
 		MaxSyncTimeout:     cfg.MCP.MaxSyncTimeout.AsDuration(),
 		HTTPJSONResponse:   cfg.MCP.HTTPJSONResponse,
 		HTTPStateless:      cfg.MCP.HTTPStateless,
+		CodeIndex: mcpserver.CodeIndexDefaults{
+			Include:          append([]string(nil), cfg.CodeIndex.Include...),
+			Exclude:          append([]string(nil), cfg.CodeIndex.Exclude...),
+			MaxFileBytes:     cfg.CodeIndex.MaxFileBytes,
+			ChunkSize:        cfg.CodeIndex.ChunkSize,
+			ChunkOverlap:     cfg.CodeIndex.ChunkOverlap,
+			IncludeUntracked: cfg.CodeIndex.IncludeUntracked,
+			ResourcePolicy: kb.CodeIndexResourcePolicy{
+				EmbedBatchSize: cfg.CodeIndex.EmbedBatchSize,
+				MaxBatchBytes:  cfg.CodeIndex.MaxBatchBytes,
+				Throttle:       cfg.CodeIndex.Throttle.AsDuration(),
+				MaxHeapBytes:   cfg.CodeIndex.MaxHeapBytes,
+				MaxRSSBytes:    cfg.CodeIndex.MaxRSSBytes,
+				LargeRepoFiles: cfg.CodeIndex.LargeRepoFiles,
+			},
+			RequireConfirm: cfg.CodeIndex.RequireConfirm,
+		},
 	}
 }
 
@@ -305,6 +322,26 @@ func buildEmbedder(cfg *config.Config, logger *slog.Logger) (kb.Embedder, error)
 		return e, nil
 	default:
 		return nil, fmt.Errorf("configruntime: embedder provider %q not supported", cfg.Embedder.Provider)
+	}
+}
+
+func CodeIndexOptionsFromConfig(cfg *config.Config, kbID, root string) kb.CodeIndexOptions {
+	return kb.CodeIndexOptions{
+		KBID:             kbID,
+		Root:             root,
+		Include:          append([]string(nil), cfg.CodeIndex.Include...),
+		Exclude:          append([]string(nil), cfg.CodeIndex.Exclude...),
+		MaxFileBytes:     cfg.CodeIndex.MaxFileBytes,
+		ChunkSize:        cfg.CodeIndex.ChunkSize,
+		ChunkOverlap:     cfg.CodeIndex.ChunkOverlap,
+		IncludeUntracked: cfg.CodeIndex.IncludeUntracked,
+		EmbedBatchSize:   cfg.CodeIndex.EmbedBatchSize,
+		MaxBatchBytes:    cfg.CodeIndex.MaxBatchBytes,
+		Throttle:         cfg.CodeIndex.Throttle.AsDuration(),
+		MaxHeapBytes:     cfg.CodeIndex.MaxHeapBytes,
+		MaxRSSBytes:      cfg.CodeIndex.MaxRSSBytes,
+		LargeRepoFiles:   cfg.CodeIndex.LargeRepoFiles,
+		RequireConfirm:   cfg.CodeIndex.RequireConfirm,
 	}
 }
 

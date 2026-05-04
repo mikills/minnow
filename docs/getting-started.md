@@ -44,6 +44,17 @@ Install the binary globally:
 
 ```bash
 go install github.com/mikills/minnow@latest
+$(go env GOPATH)/bin/minnow setup
+```
+
+`go install` writes the binary to `$(go env GOBIN)`, or to
+`$(go env GOPATH)/bin` when `GOBIN` is unset. `minnow setup` is an interactive
+terminal setup that checks whether that directory is on `PATH` and can append
+the right export line to your shell profile. If `minnow` is already on `PATH`,
+run `minnow setup` directly. After restarting the shell, verify with:
+
+```bash
+minnow --version
 ```
 
 Create an OpenAI-backed developer config in the per-user config path:
@@ -57,6 +68,41 @@ minnow config validate
 That config enables both HTTP and stdio MCP, uses `text-embedding-3-small`, and
 stores local blobs/cache under the same user config directory. The first ingest
 fixes each KB's embedding dimension to the model output dimension.
+
+Index the current repository for code-aware retrieval:
+
+```bash
+minnow index codebase --index-key default --kb my-project --description "Default codebase index" --root .
+minnow index status --index-key default --root .
+```
+
+The first run creates `.minnow/codebase-indexes.json` in the repository:
+
+```json
+{
+  "schema_version": "minnow.codebase_indexes/v1",
+  "codebase_indexes": {
+    "default": {
+      "kb_id": "my-project",
+      "root": ".",
+      "description": "Default codebase index",
+      "include_untracked": false
+    }
+  }
+}
+```
+
+MCP clients can then use the stable `index_key` instead of remembering the
+backing `kb_id`. This also lets an agent create multiple codebase indexes, such
+as `default`, `backend`, or `docs`, each with its own description and KB.
+
+Optional Git hooks can keep the index warm after commits, checkouts, merges, and
+rebases:
+
+```bash
+minnow index hooks install --index-key default --root .
+minnow index hooks status --root .
+```
 
 The default bind address is `127.0.0.1:8080` (override `http.address` in the YAML).
 

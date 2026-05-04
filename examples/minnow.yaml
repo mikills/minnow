@@ -104,6 +104,58 @@ sharding:
   compaction_min_shard_count: 8
   compaction_tombstone_ratio: 0.20       # (0, 1]
 
+code_index:
+  include:
+    - "**/*.go"
+    - "**/*.js"
+    - "**/*.jsx"
+    - "**/*.ts"
+    - "**/*.tsx"
+    - "**/*.py"
+    - "**/*.rs"
+    - "**/*.md"
+    - "**/*.yaml"
+    - "**/*.yml"
+    - "**/*.json"
+    - "**/Dockerfile"
+  exclude:
+    - .git/**
+    - .minnow/**
+    - node_modules/**
+    - vendor/**
+    - "**/vendor/**"
+    - dist/**
+    - build/**
+    - coverage/**
+    - fixtures/**
+    - "**/fixtures/**"
+    - data/**
+    - "**/data/**"
+    - .next/**
+    - .turbo/**
+    - target/**
+    - extensions/**
+    - examples/extensions/**
+    - "**/*.duckdb"
+    - "**/*.duckdb_extension"
+    - "**/*.parquet"
+    - "**/*.min.js"
+    - "**/*.min.css"
+    - "**/*.map"
+    - "*.lock"
+    - .gitignore
+  max_file_bytes: 1048576
+  chunk_size: 1200
+  chunk_overlap: 120
+  include_untracked: false
+  embed_batch_size: 32
+  max_batch_bytes: 262144
+  throttle: 100ms
+  max_heap_bytes: 1073741824
+  max_rss_bytes: 1073741824
+  large_repo_files: 1000
+  require_confirm: false
+
 mcp:
   enabled: true
   transports: [http, stdio]

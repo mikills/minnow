@@ -22,6 +22,12 @@ type Dependencies struct {
 	Search              func(context.Context, string, []float32, *kb.SearchOptions) ([]kb.ExpandedResult, error)
 	ForceCompaction     func(context.Context, string) (*kb.CompactionPublishResult, error)
 	DeleteKnowledgeBase func(context.Context, string) error
+	IndexCodebase       func(context.Context, kb.CodeIndexOptions) (kb.CodeIndexResult, error)
+	CodeIndexStatus     func(context.Context, string) (kb.CodeIndexStatus, error)
+	SearchCode          func(context.Context, string, string, kb.CodeSearchOptions) ([]kb.CodeSearchResult, error)
+	InstallCodeHooks    func(context.Context, kb.CodeHookOptions) (kb.CodeHookStatus, error)
+	UninstallCodeHooks  func(context.Context, string) (kb.CodeHookStatus, error)
+	CodeHookStatus      func(context.Context, string) (kb.CodeHookStatus, error)
 
 	// Media subsystem (optional; when nil the media endpoints 503).
 	AppendMediaUpload func(context.Context, kb.MediaUploadInput, int64, string, string) (string, string, error)

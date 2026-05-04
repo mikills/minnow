@@ -15,9 +15,9 @@ func TestOpenAICompatibleEmbedder(t *testing.T) {
 		var gotPath string
 		var gotAuth string
 		var gotBody struct {
-			Model      string `json:"model"`
-			Input      string `json:"input"`
-			Dimensions int    `json:"dimensions"`
+			Model      string   `json:"model"`
+			Input      []string `json:"input"`
+			Dimensions int      `json:"dimensions"`
 		}
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotPath = r.URL.Path
@@ -43,8 +43,39 @@ func TestOpenAICompatibleEmbedder(t *testing.T) {
 		require.Equal(t, "/v1/embeddings", gotPath)
 		require.Equal(t, "Bearer secret-token", gotAuth)
 		require.Equal(t, "text-embedding-3-small", gotBody.Model)
-		require.Equal(t, "hello", gotBody.Input)
+		require.Equal(t, []string{"hello"}, gotBody.Input)
 		require.Equal(t, 3, gotBody.Dimensions)
+	})
+
+	t.Run("embeds_batch", func(t *testing.T) {
+		var gotBody struct {
+			Input []string `json:"input"`
+		}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+			_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[1,2]},{"index":1,"embedding":[3,4]}]}`))
+		}))
+		defer server.Close()
+
+		embedder, err := NewOpenAICompatibleEmbedder(OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "model"})
+		require.NoError(t, err)
+		vectors, err := embedder.EmbedBatch(context.Background(), []string{"one", "two"})
+		require.NoError(t, err)
+		require.Equal(t, []string{"one", "two"}, gotBody.Input)
+		require.Equal(t, [][]float32{{1, 2}, {3, 4}}, vectors)
+	})
+
+	t.Run("embeds_batch_without_indices", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"data":[{"embedding":[1,2]},{"embedding":[3,4]}]}`))
+		}))
+		defer server.Close()
+
+		embedder, err := NewOpenAICompatibleEmbedder(OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "model"})
+		require.NoError(t, err)
+		vectors, err := embedder.EmbedBatch(context.Background(), []string{"one", "two"})
+		require.NoError(t, err)
+		require.Equal(t, [][]float32{{1, 2}, {3, 4}}, vectors)
 	})
 
 	t.Run("omits_optional_token_and_dimensions", func(t *testing.T) {
@@ -75,7 +106,7 @@ func TestOpenAICompatibleEmbedder(t *testing.T) {
 		require.NoError(t, err)
 		_, err = embedder.Embed(context.Background(), "hello")
 		require.Error(t, err)
-		require.Contains(t, err.Error(), "empty embeddings")
+		require.Contains(t, err.Error(), "empty embedding")
 	})
 
 	t.Run("surfaces_non_200_body", func(t *testing.T) {

@@ -88,6 +88,53 @@ func TestService(t *testing.T) {
 		require.Equal(t, []string{"doc-1"}, out.DocIDs)
 	})
 
+	t.Run("code indexing submits options", func(t *testing.T) {
+		svc := newTestService(func(s *Service) {
+			s.Config.CodeIndex = CodeIndexDefaults{
+				Include:        []string{"**/*.go"},
+				Exclude:        []string{"vendor/**"},
+				MaxFileBytes:   1234,
+				ChunkSize:      100,
+				ChunkOverlap:   10,
+				ResourcePolicy: kb.CodeIndexResourcePolicy{EmbedBatchSize: 7, MaxBatchBytes: 2048, MaxHeapBytes: 4096, MaxRSSBytes: 8192, LargeRepoFiles: 11},
+				RequireConfirm: true,
+			}
+			s.IndexCodebase = func(_ context.Context, opts kb.CodeIndexOptions) (kb.CodeIndexResult, error) {
+				require.Equal(t, "kb-code", opts.KBID)
+				require.Equal(t, "/repo", opts.Root)
+				require.Equal(t, []string{"**/*.go"}, opts.Include)
+				require.Equal(t, []string{"vendor/**"}, opts.Exclude)
+				require.EqualValues(t, 1234, opts.MaxFileBytes)
+				require.True(t, opts.IncludeUntracked)
+				require.Equal(t, 7, opts.EmbedBatchSize)
+				require.Equal(t, 2048, opts.MaxBatchBytes)
+				require.Equal(t, uint64(4096), opts.MaxHeapBytes)
+				require.Equal(t, uint64(8192), opts.MaxRSSBytes)
+				require.Equal(t, 11, opts.LargeRepoFiles)
+				require.True(t, opts.RequireConfirm)
+				return kb.CodeIndexResult{KBID: opts.KBID, Root: opts.Root, IndexedFiles: 1}, nil
+			}
+		})
+		_, out, err := svc.indexCodebase(context.Background(), nil, codeIndexInput{KBID: "kb-code", Root: "/repo", IncludeUntracked: true})
+		require.NoError(t, err)
+		require.Equal(t, 1, out.IndexedFiles)
+	})
+
+	t.Run("code search returns enriched results", func(t *testing.T) {
+		svc := newTestService(func(s *Service) {
+			s.SearchCode = func(_ context.Context, kbID, query string, opts kb.CodeSearchOptions) ([]kb.CodeSearchResult, error) {
+				require.Equal(t, "kb-code", kbID)
+				require.Equal(t, "handler", query)
+				require.Equal(t, "go", opts.Language)
+				return []kb.CodeSearchResult{{ID: "c1", Path: "main.go", Language: "go", StartLine: 1, EndLine: 5}}, nil
+			}
+		})
+		_, out, err := svc.codeSearch(context.Background(), nil, codeSearchInput{KBID: "kb-code", Query: "handler", K: 5, Language: "go"})
+		require.NoError(t, err)
+		require.Len(t, out.Results, 1)
+		require.Equal(t, "main.go", out.Results[0].Path)
+	})
+
 	t.Run("sync ingest completes", func(t *testing.T) {
 		svc := newTestService(func(s *Service) { withSyncTimeout(s, time.Second) })
 		_, out, err := svc.ingestSync(context.Background(), nil, ingestSyncInput{Documents: oneDoc()})
@@ -167,6 +214,8 @@ func TestMCPClient(t *testing.T) {
 		names := toolNames(tools.Tools)
 		require.Contains(t, names, "minnow_query")
 		require.Contains(t, names, "minnow_ingest_documents_async")
+		require.Contains(t, names, "minnow_index_codebase")
+		require.Contains(t, names, "minnow_code_search")
 
 		queryRes, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "minnow_query", Arguments: json.RawMessage(`{"kb_id":"kb-1","query":"hello","k":1}`)})
 		require.NoError(t, err)
@@ -184,6 +233,25 @@ func TestMCPClient(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, resource.Contents, 1)
 		require.Contains(t, resource.Contents[0].Text, "evt-terminal")
+	})
+
+	t.Run("in memory client calls code search", func(t *testing.T) {
+		ctx := context.Background()
+		svc := newTestService(func(s *Service) {
+			s.SearchCode = func(context.Context, string, string, kb.CodeSearchOptions) ([]kb.CodeSearchResult, error) {
+				return []kb.CodeSearchResult{{ID: "code-1", Content: "func main() {}", Path: "main.go", Language: "go", StartLine: 1, EndLine: 1}}, nil
+			}
+		})
+		cs := connectInMemoryMCP(t, ctx, New(*svc))
+		defer cs.Close()
+
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "minnow_code_search", Arguments: json.RawMessage(`{"kb_id":"kb-1","query":"main","k":1,"language":"go"}`)})
+		require.NoError(t, err)
+		require.False(t, res.IsError)
+		var out codeSearchOutput
+		decodeStructured(t, res.StructuredContent, &out)
+		require.Equal(t, "code-1", out.Results[0].ID)
+		require.Equal(t, "main.go", out.Results[0].Path)
 	})
 
 	t.Run("http transport calls tool", func(t *testing.T) {
@@ -226,9 +294,9 @@ func TestRegisterTools(t *testing.T) {
 				"minnow_query", "minnow_operation_status", "minnow_list_media", "minnow_get_media",
 			},
 			hidden: []string{
-				"minnow_ingest_documents_async", "minnow_ingest_documents_sync",
+				"minnow_ingest_documents_async", "minnow_ingest_documents_sync", "minnow_index_codebase",
 				"minnow_delete_media", "minnow_delete_knowledge_base",
-				"minnow_sweep_cache", "minnow_clear_cache", "minnow_force_compaction",
+				"minnow_sweep_cache", "minnow_clear_cache", "minnow_force_compaction", "minnow_install_code_hooks",
 			},
 		},
 		{
@@ -252,6 +320,14 @@ func TestRegisterTools(t *testing.T) {
 			},
 		},
 		{
+			name: "code tools require implementations",
+			cfg:  Config{Enabled: true, AllowIndexing: true},
+			hidden: []string{
+				"minnow_index_codebase", "minnow_code_index_status", "minnow_code_search",
+			},
+		},
+
+		{
 			name: "destructive",
 			cfg:  Config{Enabled: true, AllowDestructive: true},
 			expected: []string{
@@ -263,7 +339,7 @@ func TestRegisterTools(t *testing.T) {
 			name: "admin alone",
 			cfg:  Config{Enabled: true, AllowAdmin: true},
 			expected: []string{
-				"minnow_sweep_cache", "minnow_force_compaction",
+				"minnow_sweep_cache", "minnow_force_compaction", "minnow_code_hooks_status", "minnow_install_code_hooks", "minnow_uninstall_code_hooks",
 			},
 			hidden: []string{"minnow_clear_cache"},
 		},
@@ -272,7 +348,7 @@ func TestRegisterTools(t *testing.T) {
 			cfg:  Config{Enabled: true, AllowAdmin: true, AllowDestructive: true},
 			expected: []string{
 				"minnow_sweep_cache", "minnow_force_compaction", "minnow_clear_cache",
-				"minnow_delete_media", "minnow_delete_knowledge_base",
+				"minnow_delete_media", "minnow_delete_knowledge_base", "minnow_code_hooks_status", "minnow_install_code_hooks", "minnow_uninstall_code_hooks",
 			},
 		},
 		{
@@ -281,7 +357,7 @@ func TestRegisterTools(t *testing.T) {
 			expected: []string{
 				"minnow_query", "minnow_ingest_documents_async", "minnow_ingest_documents_sync",
 				"minnow_delete_media", "minnow_delete_knowledge_base",
-				"minnow_sweep_cache", "minnow_force_compaction", "minnow_clear_cache",
+				"minnow_sweep_cache", "minnow_force_compaction", "minnow_clear_cache", "minnow_code_hooks_status",
 			},
 		},
 	}
@@ -333,6 +409,15 @@ func newTestService(modify func(*Service)) *Service {
 			return &kb.KBEvent{EventID: "evt-terminal", KBID: "kb-1", Kind: kb.EventKBPublished, Status: kb.EventStatusDone}, nil
 		},
 		DeleteKnowledgeBase: func(context.Context, string) error { return nil },
+		IndexCodebase: func(_ context.Context, opts kb.CodeIndexOptions) (kb.CodeIndexResult, error) {
+			return kb.CodeIndexResult{KBID: opts.KBID, Root: opts.Root}, nil
+		},
+		CodeIndexStatus: func(_ context.Context, kbID string) (kb.CodeIndexStatus, error) {
+			return kb.CodeIndexStatus{KBID: kbID, Indexed: true}, nil
+		},
+		SearchCode: func(context.Context, string, string, kb.CodeSearchOptions) ([]kb.CodeSearchResult, error) {
+			return []kb.CodeSearchResult{{ID: "code-1", Content: "func main() {}", Path: "main.go", Language: "go"}}, nil
+		},
 	}
 	if modify != nil {
 		modify(svc)
