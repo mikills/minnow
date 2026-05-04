@@ -57,6 +57,9 @@ go run ./scripts/fetch_corpus/
 
 The 768-dim real case requires Ollama running with `nomic-embed-text` pulled (`ollama pull nomic-embed-text`). The bench skips cleanly if Ollama is unavailable.
 
+Operational use cases, including real-repo code indexing timings and learned
+defaults, live in [`USECASES.md`](USECASES.md).
+
 ## vs. Turbopuffer
 
 Turbopuffer's published headline: 1M / 768 dim, p50 8 ms, p90 10 ms, p99 35 ms.

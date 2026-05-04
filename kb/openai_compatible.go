@@ -74,11 +74,27 @@ func NewOpenAICompatibleEmbedder(cfg OpenAICompatibleEmbedderConfig) (*OpenAICom
 
 // Embed requests a single embedding for input.
 func (e *OpenAICompatibleEmbedder) Embed(ctx context.Context, input string) ([]float32, error) {
+	vectors, err := e.EmbedBatch(ctx, []string{input})
+	if err != nil {
+		return nil, err
+	}
+	return vectors[0], nil
+}
+
+// EmbedBatch requests embeddings for multiple inputs in one provider call.
+func (e *OpenAICompatibleEmbedder) EmbedBatch(ctx context.Context, inputs []string) ([][]float32, error) {
 	if e == nil {
 		return nil, fmt.Errorf("openai compatible embedder is nil")
 	}
-	if strings.TrimSpace(input) == "" {
-		return nil, fmt.Errorf("input cannot be empty")
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("inputs cannot be empty")
+	}
+	cleanInputs := make([]string, len(inputs))
+	for i, input := range inputs {
+		if strings.TrimSpace(input) == "" {
+			return nil, fmt.Errorf("input cannot be empty")
+		}
+		cleanInputs[i] = input
 	}
 	if strings.TrimSpace(e.Model) == "" {
 		return nil, fmt.Errorf("openai compatible embedder model cannot be empty")
@@ -89,7 +105,7 @@ func (e *OpenAICompatibleEmbedder) Embed(ctx context.Context, input string) ([]f
 
 	body := map[string]any{
 		"model": e.Model,
-		"input": input,
+		"input": cleanInputs,
 	}
 	if e.Dimensions > 0 {
 		body["dimensions"] = e.Dimensions
@@ -129,19 +145,35 @@ func (e *OpenAICompatibleEmbedder) Embed(ctx context.Context, input string) ([]f
 
 	var parsed struct {
 		Data []struct {
+			Index     *int      `json:"index"`
 			Embedding []float64 `json:"embedding"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, fmt.Errorf("decode openai compatible embed response: %w", err)
 	}
-	if len(parsed.Data) == 0 || len(parsed.Data[0].Embedding) == 0 {
-		return nil, fmt.Errorf("openai compatible embed response contained empty embeddings")
+	if len(parsed.Data) != len(cleanInputs) {
+		return nil, fmt.Errorf("openai compatible embed response contained %d embeddings for %d inputs", len(parsed.Data), len(cleanInputs))
 	}
-
-	vector := make([]float32, len(parsed.Data[0].Embedding))
-	for i, v := range parsed.Data[0].Embedding {
-		vector[i] = float32(v)
+	vectors := make([][]float32, len(cleanInputs))
+	for fallbackIndex, item := range parsed.Data {
+		idx := fallbackIndex
+		if item.Index != nil && *item.Index >= 0 && *item.Index < len(cleanInputs) {
+			idx = *item.Index
+		}
+		if len(item.Embedding) == 0 {
+			return nil, fmt.Errorf("openai compatible embed response contained empty embedding at index %d", idx)
+		}
+		vector := make([]float32, len(item.Embedding))
+		for i, v := range item.Embedding {
+			vector[i] = float32(v)
+		}
+		vectors[idx] = vector
 	}
-	return vector, nil
+	for i, vector := range vectors {
+		if len(vector) == 0 {
+			return nil, fmt.Errorf("openai compatible embed response missing embedding at index %d", i)
+		}
+	}
+	return vectors, nil
 }

@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -17,10 +15,6 @@ import (
 // DefaultPath is the working-directory config searched when Load is called
 // with an empty path.
 const DefaultPath = "./minnow.yaml"
-
-// envVarRE matches ${VAR} style references. ${VAR:-default} is intentionally
-// not supported; defaults live in the schema, not in substitution syntax.
-var envVarRE = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 // Load reads, interpolates, strictly decodes, defaults, path-resolves and
 // validates the YAML config at path. An empty path resolves first to
@@ -120,36 +114,6 @@ func decodeStrict(data []byte) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
-}
-
-// interpolateEnv replaces ${VAR} with os.Getenv(VAR) on every occurrence in
-// the raw YAML bytes. Unset variables produce an aggregated error listing
-// every missing name, so operators see the full set rather than one at a
-// time.
-//
-// The substitution is purely textual. A literal ${X} inside a YAML comment
-// will also be expanded; operators should not put unresolved ${X} patterns
-// in comments.
-func interpolateEnv(data []byte) ([]byte, error) {
-	missing := map[string]struct{}{}
-	out := envVarRE.ReplaceAllFunc(data, func(match []byte) []byte {
-		name := string(match[2 : len(match)-1])
-		val, ok := os.LookupEnv(name)
-		if !ok {
-			missing[name] = struct{}{}
-			return match
-		}
-		return []byte(val)
-	})
-	if len(missing) > 0 {
-		names := make([]string, 0, len(missing))
-		for n := range missing {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-		return nil, fmt.Errorf("unresolved env vars: %s (note: ${VAR} in YAML comments also triggers this error)", strings.Join(names, ", "))
-	}
-	return out, nil
 }
 
 // resolvePaths rewrites any relative path field to be absolute, based on

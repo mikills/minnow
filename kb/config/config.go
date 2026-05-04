@@ -25,6 +25,7 @@ type Config struct {
 	Workers   WorkersConfig   `yaml:"workers" json:"workers"`
 	Media     MediaConfig     `yaml:"media" json:"media"`
 	Sharding  ShardingConfig  `yaml:"sharding" json:"sharding"`
+	CodeIndex CodeIndexConfig `yaml:"code_index" json:"code_index"`
 	MCP       MCPConfig       `yaml:"mcp" json:"mcp"`
 }
 
@@ -183,6 +184,23 @@ type ShardingConfig struct {
 	CompactionEnabled           *bool    `yaml:"compaction_enabled,omitempty" json:"compaction_enabled,omitempty"`
 	CompactionMinShardCount     *int     `yaml:"compaction_min_shard_count,omitempty" json:"compaction_min_shard_count,omitempty"`
 	CompactionTombstoneRatio    *float64 `yaml:"compaction_tombstone_ratio,omitempty" json:"compaction_tombstone_ratio,omitempty"`
+}
+
+// CodeIndexConfig controls codebase indexing defaults for CLI and MCP tools.
+type CodeIndexConfig struct {
+	Include          []string `yaml:"include" json:"include"`
+	Exclude          []string `yaml:"exclude" json:"exclude"`
+	MaxFileBytes     int64    `yaml:"max_file_bytes" json:"max_file_bytes"`
+	ChunkSize        int      `yaml:"chunk_size" json:"chunk_size"`
+	ChunkOverlap     int      `yaml:"chunk_overlap" json:"chunk_overlap"`
+	IncludeUntracked bool     `yaml:"include_untracked" json:"include_untracked"`
+	EmbedBatchSize   int      `yaml:"embed_batch_size" json:"embed_batch_size"`
+	MaxBatchBytes    int      `yaml:"max_batch_bytes" json:"max_batch_bytes"`
+	Throttle         Duration `yaml:"throttle" json:"throttle"`
+	MaxHeapBytes     uint64   `yaml:"max_heap_bytes" json:"max_heap_bytes"`
+	MaxRSSBytes      uint64   `yaml:"max_rss_bytes" json:"max_rss_bytes"`
+	LargeRepoFiles   int      `yaml:"large_repo_files" json:"large_repo_files"`
+	RequireConfirm   bool     `yaml:"require_confirm" json:"require_confirm"`
 }
 
 // MCPConfig controls the Model Context Protocol surface for coding agents.
@@ -347,6 +365,39 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Media.UploadCompletionTTL == 0 {
 		c.Media.UploadCompletionTTL = Duration(15 * time.Minute)
+	}
+	if len(c.CodeIndex.Include) == 0 {
+		c.CodeIndex.Include = []string{"**/*.go", "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mjs", "**/*.cjs", "**/*.py", "**/*.rs", "**/*.java", "**/*.rb", "**/*.php", "**/*.c", "**/*.cc", "**/*.cpp", "**/*.h", "**/*.hpp", "**/*.cs", "**/*.swift", "**/*.kt", "**/*.kts", "**/*.sh", "**/*.bash", "**/*.zsh", "**/*.md", "**/*.mdx", "**/*.yaml", "**/*.yml", "**/*.json", "**/*.toml", "**/*.xml", "**/Dockerfile"}
+	}
+	if len(c.CodeIndex.Exclude) == 0 {
+		c.CodeIndex.Exclude = []string{".git/**", ".minnow/**", "node_modules/**", "vendor/**", "**/vendor/**", "dist/**", "build/**", "coverage/**", "fixtures/**", "**/fixtures/**", "data/**", "**/data/**", ".next/**", ".turbo/**", "target/**", "extensions/**", "examples/extensions/**", "**/*.duckdb", "**/*.duckdb_extension", "**/*.parquet", "**/*.min.js", "**/*.min.css", "**/*.map", "*.lock", ".gitignore"}
+	}
+	if c.CodeIndex.MaxFileBytes == 0 {
+		c.CodeIndex.MaxFileBytes = 1024 * 1024
+	}
+	if c.CodeIndex.ChunkSize == 0 {
+		c.CodeIndex.ChunkSize = 1200
+	}
+	if c.CodeIndex.ChunkOverlap == 0 {
+		c.CodeIndex.ChunkOverlap = 120
+	}
+	if c.CodeIndex.EmbedBatchSize == 0 {
+		c.CodeIndex.EmbedBatchSize = 32
+	}
+	if c.CodeIndex.MaxBatchBytes == 0 {
+		c.CodeIndex.MaxBatchBytes = 256 * 1024
+	}
+	if c.CodeIndex.Throttle == 0 {
+		c.CodeIndex.Throttle = Duration(100 * time.Millisecond)
+	}
+	if c.CodeIndex.MaxHeapBytes == 0 {
+		c.CodeIndex.MaxHeapBytes = 1024 * 1024 * 1024
+	}
+	if c.CodeIndex.MaxRSSBytes == 0 {
+		c.CodeIndex.MaxRSSBytes = 1024 * 1024 * 1024
+	}
+	if c.CodeIndex.LargeRepoFiles == 0 {
+		c.CodeIndex.LargeRepoFiles = 1000
 	}
 
 	if c.MCP.Enabled {

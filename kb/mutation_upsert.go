@@ -57,6 +57,10 @@ func (l *KB) UpsertDocsAndUploadWithRetryAndOptions(ctx context.Context, kbID st
 }
 
 func (l *KB) PublishPreparedDocs(ctx context.Context, kbID string, docs []EmbeddedDocument, graphResult *GraphBuildResult, opts UpsertDocsOptions) error {
+	return l.publishPreparedDocs(ctx, kbID, docs, graphResult, opts, true)
+}
+
+func (l *KB) publishPreparedDocs(ctx context.Context, kbID string, docs []EmbeddedDocument, graphResult *GraphBuildResult, opts UpsertDocsOptions, upload bool) error {
 	format, err := l.resolveFormat(ctx, kbID)
 	if err != nil {
 		return err
@@ -69,9 +73,34 @@ func (l *KB) PublishPreparedDocs(ctx context.Context, kbID string, docs []Embedd
 		KBID:        kbID,
 		Docs:        docs,
 		GraphResult: graphResult,
-		Upload:      true,
+		Upload:      upload,
 		Options:     opts,
 	})
+	return err
+}
+
+func (l *KB) commitPreparedDocs(ctx context.Context, kbID string) error {
+	format, err := l.resolveFormat(ctx, kbID)
+	if err != nil {
+		return err
+	}
+	committer, ok := format.(PreparedArtifactCommitter)
+	if !ok {
+		return ErrArtifactFormatNotConfigured
+	}
+	return committer.CommitPrepared(ctx, kbID)
+}
+
+func (l *KB) publishPreparedStream(ctx context.Context, req PreparedStreamRequest) error {
+	format, err := l.resolveFormat(ctx, req.KBID)
+	if err != nil {
+		return err
+	}
+	streamer, ok := format.(PreparedArtifactStreamer)
+	if !ok {
+		return ErrArtifactFormatNotConfigured
+	}
+	_, err = streamer.PublishPreparedStream(ctx, req)
 	return err
 }
 

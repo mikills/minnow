@@ -15,6 +15,12 @@ type Embedder interface {
 	Embed(ctx context.Context, input string) ([]float32, error)
 }
 
+// BatchEmbedder can embed several inputs in one provider call. Embedders that
+// do not implement it still work through Embed.
+type BatchEmbedder interface {
+	EmbedBatch(ctx context.Context, inputs []string) ([][]float32, error)
+}
+
 // QueryResult represents a single vector search result.
 type QueryResult struct {
 	ID        string          `json:"id"`       // Document ID

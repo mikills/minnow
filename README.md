@@ -16,9 +16,26 @@ For globally installed MCP use with OpenAI embeddings:
 
 ```bash
 go install github.com/mikills/minnow@latest
+$(go env GOPATH)/bin/minnow setup
 minnow config init dev-openai
 OPENAI_API_KEY=sk-... minnow mcp stdio
 ```
+
+`minnow setup` checks whether Go's install directory is on your shell `PATH` and
+can update your shell profile for you. If `minnow` is already on `PATH`, just run
+`minnow setup` directly.
+
+Index a codebase for MCP/code-agent retrieval:
+
+```bash
+minnow index codebase --index-key default --kb my-project --description "Default codebase index" --root .
+minnow index hooks install --index-key default --root .
+```
+
+Code indexing writes `.minnow/codebase-indexes.json`, a small repo-local registry
+that maps stable agent-facing keys like `default` to the backing `kb_id`, root,
+description, and untracked-file setting. Later MCP calls can pass only
+`index_key: "default"` and Minnow resolves the right KB.
 
 The default `minnow.yaml` also exposes MCP for coding agents:
 
