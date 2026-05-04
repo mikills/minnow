@@ -9,6 +9,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestIndexCLIOptions(t *testing.T) {
+	t.Run("flagset parser accepts aliases and typed values", func(t *testing.T) {
+		opts, err := parseIndexCLIOptions([]string{"--kb", "code", "--index-key", "api", "--root", ".", "--batch-size", "4", "--max-rss-bytes", "1024", "--throttle", "5ms", "-y"})
+		require.NoError(t, err)
+		require.Equal(t, "code", opts.kbID)
+		require.Equal(t, "api", opts.indexKey)
+		require.Equal(t, 4, opts.embedBatchSize)
+		require.Equal(t, uint64(1024), opts.maxRSSBytes)
+		require.True(t, opts.yes)
+	})
+
+	t.Run("rejects positional args", func(t *testing.T) {
+		_, err := parseIndexCLIOptions([]string{"unexpected"})
+		require.ErrorContains(t, err, "unexpected argument")
+	})
+}
+
 func TestConfigInit(t *testing.T) {
 	t.Run("template writes and refuses overwrite without force", func(t *testing.T) {
 		t.Setenv("OPENAI_API_KEY", "test-key")

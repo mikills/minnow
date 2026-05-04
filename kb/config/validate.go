@@ -29,6 +29,7 @@ func (c *Config) Validate() error {
 	errs = appendIf(errs, c.validateWorkers())
 	errs = appendIf(errs, c.validateMedia())
 	errs = appendIf(errs, c.validateSharding())
+	errs = appendIf(errs, c.validateCodeIndex())
 	errs = appendIf(errs, c.validateMCP())
 
 	if len(errs) == 0 {
@@ -86,39 +87,34 @@ func appendIf(errs []string, err error) []string {
 	return errs
 }
 
-func (c *Config) validateHTTP() error {
-	if err := requireNonEmptyString("http.address", c.HTTP.Address); err != nil {
-		return err
-	}
-	if err := requirePositiveDuration("http.read_header_timeout", c.HTTP.ReadHeaderTimeout); err != nil {
-		return err
-	}
-	if err := requirePositiveDuration("http.shutdown_timeout", c.HTTP.ShutdownTimeout); err != nil {
-		return err
+func firstErr(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func (c *Config) validateHTTP() error {
+	return firstErr(
+		requireNonEmptyString("http.address", c.HTTP.Address),
+		requirePositiveDuration("http.read_header_timeout", c.HTTP.ReadHeaderTimeout),
+		requirePositiveDuration("http.shutdown_timeout", c.HTTP.ShutdownTimeout),
+	)
 }
 
 func (c *Config) validateStorage() error {
 	if c.Storage.Blob.Kind != "local" {
 		return fmt.Errorf("storage.blob.kind %q is not supported (only \"local\")", c.Storage.Blob.Kind)
 	}
-	if err := requireNonEmptyString("storage.blob.root", c.Storage.Blob.Root); err != nil {
-		return err
-	}
-	if err := requireNonEmptyString("storage.cache.dir", c.Storage.Cache.Dir); err != nil {
-		return err
-	}
-	if err := requireNonNegativeInt64("storage.cache.max_bytes", c.Storage.Cache.MaxBytes, 0); err != nil {
-		return err
-	}
-	if err := requireNonNegativeDurationValue("storage.cache.entry_ttl", c.Storage.Cache.EntryTTL, "0 disables the TTL"); err != nil {
-		return err
-	}
-	if err := requirePositiveDuration("storage.cache.evict_interval", c.Storage.Cache.EvictInterval); err != nil {
-		return err
-	}
-	return nil
+	return firstErr(
+		requireNonEmptyString("storage.blob.root", c.Storage.Blob.Root),
+		requireNonEmptyString("storage.cache.dir", c.Storage.Cache.Dir),
+		requireNonNegativeInt64("storage.cache.max_bytes", c.Storage.Cache.MaxBytes, 0),
+		requireNonNegativeDurationValue("storage.cache.entry_ttl", c.Storage.Cache.EntryTTL, "0 disables the TTL"),
+		requirePositiveDuration("storage.cache.evict_interval", c.Storage.Cache.EvictInterval),
+	)
 }
 
 func (c *Config) validateGraph() error {
@@ -320,6 +316,31 @@ func (c *Config) validateMedia() error {
 	return nil
 }
 
+func (c *Config) validateCodeIndex() error {
+	if err := firstErr(
+		requireNonEmptyList("code_index.include", c.CodeIndex.Include),
+		requireNoEmptyListItems("code_index.include", c.CodeIndex.Include),
+		requireNoEmptyListItems("code_index.exclude", c.CodeIndex.Exclude),
+		requirePositiveInt64Value("code_index.max_file_bytes", c.CodeIndex.MaxFileBytes),
+		requirePositiveInt("code_index.chunk_size", c.CodeIndex.ChunkSize),
+		requireNonNegativeInt("code_index.chunk_overlap", c.CodeIndex.ChunkOverlap),
+		(kb.CodeIndexResourcePolicy{
+			EmbedBatchSize: c.CodeIndex.EmbedBatchSize,
+			MaxBatchBytes:  c.CodeIndex.MaxBatchBytes,
+			Throttle:       c.CodeIndex.Throttle.AsDuration(),
+			MaxHeapBytes:   c.CodeIndex.MaxHeapBytes,
+			MaxRSSBytes:    c.CodeIndex.MaxRSSBytes,
+			LargeRepoFiles: c.CodeIndex.LargeRepoFiles,
+		}).Validate("code_index"),
+	); err != nil {
+		return err
+	}
+	if c.CodeIndex.ChunkOverlap >= c.CodeIndex.ChunkSize {
+		return errors.New("code_index.chunk_overlap must be less than code_index.chunk_size")
+	}
+	return nil
+}
+
 // validateSharding enforces both per-field positive-int rules and the
 // cross-field constraints from main.go's parseShardingPolicyFromEnv. Checks
 // run on the user-supplied values where present and on the kb package
@@ -430,14 +451,25 @@ func requireEnabledString(flagName, valueName, value string) error {
 
 func requirePositiveInt(name string, value int) error {
 	if value <= 0 {
-		return fmt.Errorf("%s must be > 0", name)
+		return fmt.Errorf("%s must be > 0, got %d", name, value)
 	}
 	return nil
 }
 
 func requirePositiveInt64(name string, value int64) error {
 	if value <= 0 {
-		return fmt.Errorf("%s must be > 0", name)
+		return fmt.Errorf("%s must be > 0, got %d", name, value)
+	}
+	return nil
+}
+
+func requirePositiveInt64Value(name string, value int64) error {
+	return requirePositiveInt64(name, value)
+}
+
+func requireNonNegativeInt(name string, value int) error {
+	if value < 0 {
+		return fmt.Errorf("%s must be >= 0, got %d", name, value)
 	}
 	return nil
 }
@@ -462,6 +494,22 @@ func requirePositiveIntPtr(name string, value *int) error {
 func requirePositiveDurationValue(name string, value Duration) error {
 	if value <= 0 {
 		return fmt.Errorf("%s must be > 0", name)
+	}
+	return nil
+}
+
+func requireNonEmptyList(name string, values []string) error {
+	if len(values) == 0 {
+		return fmt.Errorf("%s must include at least one pattern", name)
+	}
+	return nil
+}
+
+func requireNoEmptyListItems(name string, values []string) error {
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s must not contain empty patterns", name)
+		}
 	}
 	return nil
 }

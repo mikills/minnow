@@ -1,6 +1,21 @@
 package mcpserver
 
-import "time"
+import (
+	"time"
+
+	"github.com/mikills/minnow/kb"
+)
+
+type CodeIndexDefaults struct {
+	Include          []string
+	Exclude          []string
+	MaxFileBytes     int64
+	ChunkSize        int
+	ChunkOverlap     int
+	IncludeUntracked bool
+	ResourcePolicy   kb.CodeIndexResourcePolicy
+	RequireConfirm   bool
+}
 
 type Config struct {
 	Enabled            bool
@@ -16,6 +31,7 @@ type Config struct {
 	MaxSyncTimeout     time.Duration
 	HTTPJSONResponse   bool
 	HTTPStateless      bool
+	CodeIndex          CodeIndexDefaults
 }
 
 func (c Config) normalized() Config {

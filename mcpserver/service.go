@@ -31,6 +31,12 @@ type Service struct {
 	ClearCache            func(context.Context) error
 	ForceCompaction       func(context.Context, string) (*kb.CompactionPublishResult, error)
 	DeleteKnowledgeBase   func(context.Context, string) error
+	IndexCodebase         func(context.Context, kb.CodeIndexOptions) (kb.CodeIndexResult, error)
+	CodeIndexStatus       func(context.Context, string) (kb.CodeIndexStatus, error)
+	SearchCode            func(context.Context, string, string, kb.CodeSearchOptions) ([]kb.CodeSearchResult, error)
+	InstallCodeHooks      func(context.Context, kb.CodeHookOptions) (kb.CodeHookStatus, error)
+	UninstallCodeHooks    func(context.Context, string) (kb.CodeHookStatus, error)
+	CodeHookStatus        func(context.Context, string) (kb.CodeHookStatus, error)
 }
 
 // mustQueryInputSchema returns the queryInput JSONSchema with explicit bounds
@@ -85,9 +91,18 @@ func registerTools(server *mcp.Server, s *Service) {
 	mcp.AddTool(server, &mcp.Tool{Name: "minnow_operation_status", Description: "Read the status, stages, and terminal event for an async Minnow operation."}, s.operationStatus)
 	mcp.AddTool(server, &mcp.Tool{Name: "minnow_list_media", Description: "List media metadata for a knowledge base when media is configured."}, s.listMedia)
 	mcp.AddTool(server, &mcp.Tool{Name: "minnow_get_media", Description: "Get media metadata by media ID when media is configured."}, s.getMedia)
+	if s.CodeIndexStatus != nil {
+		mcp.AddTool(server, &mcp.Tool{Name: "minnow_code_index_status", Description: "Read codebase indexing status for a Minnow knowledge base."}, s.codeIndexStatus)
+	}
+	if s.SearchCode != nil {
+		mcp.AddTool(server, &mcp.Tool{Name: "minnow_code_search", Description: "Search indexed code chunks with optional path and language filters."}, s.codeSearch)
+	}
 
 	if !cfg.ReadOnly && cfg.AllowIndexing {
 		mcp.AddTool(server, &mcp.Tool{Name: "minnow_ingest_documents_async", Description: "Submit text documents for asynchronous indexing. Returns an operation ID."}, s.ingestAsync)
+		if s.IndexCodebase != nil {
+			mcp.AddTool(server, &mcp.Tool{Name: "minnow_index_codebase", Description: "Index or refresh a local codebase incrementally for a Minnow knowledge base."}, s.indexCodebase)
+		}
 		if cfg.AllowSyncIndexing {
 			mcp.AddTool(server, &mcp.Tool{Name: "minnow_ingest_documents_sync", Description: "Submit text documents for indexing and wait for publish up to a bounded timeout."}, s.ingestSync)
 		}
@@ -99,6 +114,11 @@ func registerTools(server *mcp.Server, s *Service) {
 	}
 
 	if cfg.AllowAdmin {
+		mcp.AddTool(server, &mcp.Tool{Name: "minnow_code_hooks_status", Description: "Admin tool: inspect Minnow git hook installation status for a repository."}, s.codeHooksStatus)
+		if !cfg.ReadOnly {
+			mcp.AddTool(server, &mcp.Tool{Name: "minnow_install_code_hooks", Description: "Admin tool: install optional Minnow git hooks for incremental codebase indexing."}, s.installCodeHooks)
+			mcp.AddTool(server, &mcp.Tool{Name: "minnow_uninstall_code_hooks", Description: "Admin tool: uninstall Minnow git hooks from a repository."}, s.uninstallCodeHooks)
+		}
 		mcp.AddTool(server, &mcp.Tool{Name: "minnow_sweep_cache", Description: "Admin tool: run policy-based cache eviction."}, s.sweepCache)
 		mcp.AddTool(server, &mcp.Tool{Name: "minnow_force_compaction", Description: "Admin tool: trigger compaction for a knowledge base when compaction debt exists."}, s.forceCompaction)
 		if !cfg.ReadOnly && cfg.AllowDestructive {
@@ -197,6 +217,144 @@ type ingestSyncInput struct {
 	IdempotencyKey string           `json:"idempotency_key,omitempty"`
 	CorrelationID  string           `json:"correlation_id,omitempty"`
 	TimeoutMS      int64            `json:"timeout_ms,omitempty"`
+}
+
+type codeIndexInput struct {
+	KBID             string `json:"kb_id,omitempty"`
+	IndexKey         string `json:"index_key,omitempty"`
+	Description      string `json:"description,omitempty"`
+	Root             string `json:"root,omitempty"`
+	IncludeUntracked bool   `json:"include_untracked,omitempty"`
+}
+
+func (s *Service) indexCodebase(ctx context.Context, _ *mcp.CallToolRequest, in codeIndexInput) (*mcp.CallToolResult, kb.CodeIndexResult, error) {
+	if s.Config.ReadOnly || !s.Config.AllowIndexing {
+		return nil, kb.CodeIndexResult{}, fmt.Errorf("indexing tools are disabled")
+	}
+	if s.IndexCodebase == nil {
+		return nil, kb.CodeIndexResult{}, fmt.Errorf("code indexing is unavailable")
+	}
+	opts := kb.CodeIndexOptions{
+		KBID:             strings.TrimSpace(in.KBID),
+		IndexKey:         in.IndexKey,
+		Description:      in.Description,
+		Root:             strings.TrimSpace(in.Root),
+		Include:          append([]string(nil), s.Config.CodeIndex.Include...),
+		Exclude:          append([]string(nil), s.Config.CodeIndex.Exclude...),
+		MaxFileBytes:     s.Config.CodeIndex.MaxFileBytes,
+		ChunkSize:        s.Config.CodeIndex.ChunkSize,
+		ChunkOverlap:     s.Config.CodeIndex.ChunkOverlap,
+		IncludeUntracked: s.Config.CodeIndex.IncludeUntracked || in.IncludeUntracked,
+		EmbedBatchSize:   s.Config.CodeIndex.ResourcePolicy.EmbedBatchSize,
+		MaxBatchBytes:    s.Config.CodeIndex.ResourcePolicy.MaxBatchBytes,
+		Throttle:         s.Config.CodeIndex.ResourcePolicy.Throttle,
+		MaxHeapBytes:     s.Config.CodeIndex.ResourcePolicy.MaxHeapBytes,
+		MaxRSSBytes:      s.Config.CodeIndex.ResourcePolicy.MaxRSSBytes,
+		LargeRepoFiles:   s.Config.CodeIndex.ResourcePolicy.LargeRepoFiles,
+		RequireConfirm:   s.Config.CodeIndex.RequireConfirm,
+	}
+	result, err := s.IndexCodebase(ctx, opts)
+	return nil, result, err
+}
+
+type codeIndexStatusInput struct {
+	KBID     string `json:"kb_id,omitempty"`
+	IndexKey string `json:"index_key,omitempty"`
+	Root     string `json:"root,omitempty"`
+}
+
+func (s *Service) codeIndexStatus(ctx context.Context, _ *mcp.CallToolRequest, in codeIndexStatusInput) (*mcp.CallToolResult, kb.CodeIndexStatus, error) {
+	if s.CodeIndexStatus == nil {
+		return nil, kb.CodeIndexStatus{}, fmt.Errorf("code indexing is unavailable")
+	}
+	selection, err := kb.ResolveCodeIndexSelection(in.Root, in.IndexKey, strings.TrimSpace(in.KBID))
+	if err != nil {
+		return nil, kb.CodeIndexStatus{}, err
+	}
+	status, err := s.CodeIndexStatus(ctx, selection.KBID)
+	status.IndexKey = selection.IndexKey
+	status.Description = selection.Description
+	return nil, status, err
+}
+
+type codeSearchInput struct {
+	KBID     string `json:"kb_id,omitempty"`
+	IndexKey string `json:"index_key,omitempty"`
+	Root     string `json:"root,omitempty"`
+	Query    string `json:"query"`
+	K        int    `json:"k,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Language string `json:"language,omitempty"`
+}
+
+type codeSearchOutput struct {
+	KBID    string                `json:"kb_id"`
+	Results []kb.CodeSearchResult `json:"results"`
+}
+
+func (s *Service) codeSearch(ctx context.Context, _ *mcp.CallToolRequest, in codeSearchInput) (*mcp.CallToolResult, codeSearchOutput, error) {
+	if s.SearchCode == nil {
+		return nil, codeSearchOutput{}, fmt.Errorf("code search is unavailable")
+	}
+	selection, err := kb.ResolveCodeIndexSelection(in.Root, in.IndexKey, strings.TrimSpace(in.KBID))
+	if err != nil {
+		return nil, codeSearchOutput{}, err
+	}
+	kbID := selection.KBID
+	k := in.K
+	if k <= 0 {
+		k = 10
+	}
+	if k > queryToolMaxK {
+		return nil, codeSearchOutput{}, fmt.Errorf("k must be <= %d", queryToolMaxK)
+	}
+	results, err := s.SearchCode(ctx, kbID, in.Query, kb.CodeSearchOptions{TopK: k, Path: in.Path, Language: in.Language})
+	return nil, codeSearchOutput{KBID: kbID, Results: results}, err
+}
+
+type codeHooksInput struct {
+	Root     string `json:"root,omitempty"`
+	KBID     string `json:"kb_id,omitempty"`
+	IndexKey string `json:"index_key,omitempty"`
+	Binary   string `json:"binary,omitempty"`
+	Force    bool   `json:"force,omitempty"`
+}
+
+func (s *Service) installCodeHooks(ctx context.Context, _ *mcp.CallToolRequest, in codeHooksInput) (*mcp.CallToolResult, kb.CodeHookStatus, error) {
+	if !s.Config.AllowAdmin || s.Config.ReadOnly {
+		return nil, kb.CodeHookStatus{}, fmt.Errorf("admin tools are disabled")
+	}
+	if s.InstallCodeHooks == nil {
+		return nil, kb.CodeHookStatus{}, fmt.Errorf("code hooks are unavailable")
+	}
+	selection, err := kb.ResolveCodeIndexSelection(in.Root, in.IndexKey, strings.TrimSpace(in.KBID))
+	if err != nil {
+		return nil, kb.CodeHookStatus{}, err
+	}
+	status, err := s.InstallCodeHooks(ctx, kb.CodeHookOptions{Root: in.Root, KBID: selection.KBID, IndexKey: selection.IndexKey, Binary: in.Binary, Force: in.Force})
+	return nil, status, err
+}
+
+func (s *Service) uninstallCodeHooks(ctx context.Context, _ *mcp.CallToolRequest, in codeHooksInput) (*mcp.CallToolResult, kb.CodeHookStatus, error) {
+	if !s.Config.AllowAdmin || s.Config.ReadOnly {
+		return nil, kb.CodeHookStatus{}, fmt.Errorf("admin tools are disabled")
+	}
+	if s.UninstallCodeHooks == nil {
+		return nil, kb.CodeHookStatus{}, fmt.Errorf("code hooks are unavailable")
+	}
+	status, err := s.UninstallCodeHooks(ctx, in.Root)
+	return nil, status, err
+}
+
+func (s *Service) codeHooksStatus(ctx context.Context, _ *mcp.CallToolRequest, in codeHooksInput) (*mcp.CallToolResult, kb.CodeHookStatus, error) {
+	if !s.Config.AllowAdmin {
+		return nil, kb.CodeHookStatus{}, fmt.Errorf("admin tools are disabled")
+	}
+	if s.CodeHookStatus == nil {
+		return nil, kb.CodeHookStatus{}, fmt.Errorf("code hooks are unavailable")
+	}
+	status, err := s.CodeHookStatus(ctx, in.Root)
+	return nil, status, err
 }
 
 type ingestOutput struct {

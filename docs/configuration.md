@@ -100,6 +100,62 @@ loader does not auto-create an empty block. `openai_compatible` calls
 `POST {base_url}/embeddings`, so use `base_url: http://localhost:11434/v1` for
 Ollama's OpenAI-compatible API.
 
+### `code_index`
+
+Defaults used by `minnow index ...` commands and MCP code-indexing tools.
+
+| Field                 | Type     | Default                                                                  | Notes                                      |
+| --------------------- | -------- | ------------------------------------------------------------------------ | ------------------------------------------ |
+| `include`             | []string | common source/config/docs extensions                                      | Glob-like relative path include patterns.  |
+| `exclude`             | []string | common generated/vendor/build directories, `*.lock`, `.gitignore`        | Applied after includes.                    |
+| `max_file_bytes`      | int      | `1048576`                                                                | Files larger than this are skipped.        |
+| `chunk_size`          | int      | `1200`                                                                   | Target character size for code chunks.     |
+| `chunk_overlap`       | int      | `120`                                                                    | Must be less than `chunk_size`.            |
+| `include_untracked`   | bool     | `false`                                                                  | Include untracked non-ignored Git files.   |
+| `embed_batch_size`    | int      | `32`                                                                     | Maximum chunks per embedding batch.        |
+| `max_batch_bytes`     | int      | `262144`                                                                 | Maximum text bytes per embedding batch.    |
+| `throttle`            | duration | `100ms`                                                                  | Delay between embedding batches.           |
+| `max_heap_bytes`      | int      | `1073741824`                                                             | Abort indexing if Go heap/system memory exceeds this guard. |
+| `max_rss_bytes`       | int      | `1073741824`                                                             | Abort indexing if process resident memory exceeds this guard. |
+| `large_repo_files`    | int      | `1000`                                                                   | CLI confirmation threshold for scanned files. |
+| `require_confirm`     | bool     | `false`                                                                  | Require explicit confirmation for large repositories when set by callers/config. |
+
+Code indexing respects `.gitignore` when Git is available, excludes likely
+secret paths such as `.env*`, `*.pem`, `*.key`, credentials, and secret files,
+and stores path/language/symbol/line metadata in a separate code-index manifest.
+The default include set is intentionally source-focused after real-repo testing:
+Go, JS/TS, Python, Rust, JVM/Ruby/PHP/C/C++/C#/Swift/Kotlin, shell, Markdown,
+YAML, JSON, TOML, XML, and Dockerfiles. Use `include: ["**/*"]` only when you
+also maintain explicit excludes for generated and binary artifacts.
+
+For interactive developer machines, the code indexer is resource-guarded: it
+batches by chunk count and text bytes, throttles between batches, and aborts
+before exceeding configured Go heap or process RSS guards. The CLI also requires
+`--yes` for repositories larger than `large_repo_files` by default; use
+`--low-resource` to halve batch size and increase throttling for background
+indexing.
+
+The repo-local codebase index registry lives at `.minnow/codebase-indexes.json`.
+It is created or updated by `minnow index codebase` and maps stable keys to KBs:
+
+```json
+{
+  "schema_version": "minnow.codebase_indexes/v1",
+  "codebase_indexes": {
+    "default": {
+      "kb_id": "my-project",
+      "root": ".",
+      "description": "Default codebase index",
+      "include_untracked": false
+    }
+  }
+}
+```
+
+CLI and MCP code tools accept `index_key`; when `kb_id` is omitted, Minnow reads
+this registry and resolves the key to the right KB. If no entry exists,
+`default` maps to KB `default`, and other keys map to `code-<key>`.
+
 ### `graph` (optional, RAG graph extraction)
 
 | Field         | Type   | Default                  | Notes |

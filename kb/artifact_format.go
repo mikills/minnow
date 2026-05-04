@@ -69,6 +69,12 @@ type PreparedPublishRequest struct {
 	Options     UpsertDocsOptions
 }
 
+type PreparedStreamRequest struct {
+	KBID    string
+	Next    func(context.Context) ([]EmbeddedDocument, error)
+	Options UpsertDocsOptions
+}
+
 type ArtifactFormat interface {
 	Kind() string
 	Version() int
@@ -82,6 +88,14 @@ type ArtifactFormat interface {
 
 type PreparedArtifactPublisher interface {
 	PublishPrepared(ctx context.Context, req PreparedPublishRequest) (IngestResult, error)
+}
+
+type PreparedArtifactCommitter interface {
+	CommitPrepared(ctx context.Context, kbID string) error
+}
+
+type PreparedArtifactStreamer interface {
+	PublishPreparedStream(ctx context.Context, req PreparedStreamRequest) (IngestResult, error)
 }
 
 func ValidateRagQueryRequest(req RagQueryRequest) error {
