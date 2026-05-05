@@ -122,75 +122,87 @@ func NewSchedule(cronExpr string) (*Schedule, error) {
 
 func parseCronSegment(segment string, min int, max int) (map[int]struct{}, error) {
 	slots := make(map[int]struct{}, max-min+1)
-
-	list := strings.Split(segment, ",")
-	for _, p := range list {
-		stepParts := strings.Split(p, "/")
-
-		var step int
-		switch len(stepParts) {
-		case 1:
-			step = 1
-		case 2:
-			parsedStep, err := strconv.Atoi(stepParts[1])
-			if err != nil {
-				return nil, err
-			}
-			if parsedStep < 1 || parsedStep > max {
-				return nil, fmt.Errorf("invalid segment step boundary - the step must be between 1 and the %d", max)
-			}
-			step = parsedStep
-		default:
-			return nil, errors.New("invalid segment step format - must be in the format */n or 1-30/n")
+	for _, part := range strings.Split(segment, ",") {
+		rangeMin, rangeMax, step, err := parseCronSegmentPart(part, min, max)
+		if err != nil {
+			return nil, err
 		}
-
-		var rangeMin, rangeMax int
-		if stepParts[0] == "*" {
-			rangeMin = min
-			rangeMax = max
-		} else {
-			rangeParts := strings.Split(stepParts[0], "-")
-			switch len(rangeParts) {
-			case 1:
-				if step != 1 {
-					return nil, errors.New("invalid segment step - step > 1 could be used only with the wildcard or range format")
-				}
-				parsed, err := strconv.Atoi(rangeParts[0])
-				if err != nil {
-					return nil, err
-				}
-				if parsed < min || parsed > max {
-					return nil, errors.New("invalid segment value - must be between the min and max of the segment")
-				}
-				rangeMin = parsed
-				rangeMax = rangeMin
-			case 2:
-				parsedMin, err := strconv.Atoi(rangeParts[0])
-				if err != nil {
-					return nil, err
-				}
-				if parsedMin < min || parsedMin > max {
-					return nil, fmt.Errorf("invalid segment range minimum - must be between %d and %d", min, max)
-				}
-				rangeMin = parsedMin
-
-				parsedMax, err := strconv.Atoi(rangeParts[1])
-				if err != nil {
-					return nil, err
-				}
-				if parsedMax < parsedMin || parsedMax > max {
-					return nil, fmt.Errorf("invalid segment range maximum - must be between %d and %d", rangeMin, max)
-				}
-				rangeMax = parsedMax
-			default:
-				return nil, errors.New("invalid segment range format - the range must have 1 or 2 parts")
-			}
-		}
-
 		for i := rangeMin; i <= rangeMax; i += step {
 			slots[i] = struct{}{}
 		}
 	}
-
 	return slots, nil
+}
+
+func parseCronSegmentPart(part string, min int, max int) (int, int, int, error) {
+	base, step, err := parseCronStep(part, max)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	rangeMin, rangeMax, err := parseCronRange(base, step, min, max)
+	return rangeMin, rangeMax, step, err
+}
+
+func parseCronStep(part string, max int) (string, int, error) {
+	stepParts := strings.Split(part, "/")
+	if len(stepParts) == 1 {
+		return stepParts[0], 1, nil
+	}
+	if len(stepParts) != 2 {
+		return "", 0, errors.New("invalid segment step format - must be in the format */n or 1-30/n")
+	}
+	step, err := strconv.Atoi(stepParts[1])
+	if err != nil {
+		return "", 0, err
+	}
+	if step < 1 || step > max {
+		return "", 0, fmt.Errorf("invalid segment step boundary - the step must be between 1 and the %d", max)
+	}
+	return stepParts[0], step, nil
+}
+
+func parseCronRange(base string, step int, min int, max int) (int, int, error) {
+	if base == "*" {
+		return min, max, nil
+	}
+	rangeParts := strings.Split(base, "-")
+	if len(rangeParts) == 1 {
+		return parseCronSingleValue(rangeParts[0], step, min, max)
+	}
+	if len(rangeParts) == 2 {
+		return parseCronRangeValues(rangeParts[0], rangeParts[1], min, max)
+	}
+	return 0, 0, errors.New("invalid segment range format - the range must have 1 or 2 parts")
+}
+
+func parseCronSingleValue(raw string, step int, min int, max int) (int, int, error) {
+	if step != 1 {
+		return 0, 0, errors.New("invalid segment step - step > 1 could be used only with the wildcard or range format")
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, 0, err
+	}
+	if parsed < min || parsed > max {
+		return 0, 0, errors.New("invalid segment value - must be between the min and max of the segment")
+	}
+	return parsed, parsed, nil
+}
+
+func parseCronRangeValues(rawMin string, rawMax string, min int, max int) (int, int, error) {
+	rangeMin, err := strconv.Atoi(rawMin)
+	if err != nil {
+		return 0, 0, err
+	}
+	if rangeMin < min || rangeMin > max {
+		return 0, 0, fmt.Errorf("invalid segment range minimum - must be between %d and %d", min, max)
+	}
+	rangeMax, err := strconv.Atoi(rawMax)
+	if err != nil {
+		return 0, 0, err
+	}
+	if rangeMax < rangeMin || rangeMax > max {
+		return 0, 0, fmt.Errorf("invalid segment range maximum - must be between %d and %d", rangeMin, max)
+	}
+	return rangeMin, rangeMax, nil
 }

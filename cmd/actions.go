@@ -29,7 +29,7 @@ type Dependencies struct {
 	UninstallCodeHooks  func(context.Context, string) (kb.CodeHookStatus, error)
 	CodeHookStatus      func(context.Context, string) (kb.CodeHookStatus, error)
 
-	// Media subsystem (optional; when nil the media endpoints 503).
+	// Media subsystem (optional. when nil the media endpoints 503).
 	AppendMediaUpload func(context.Context, kb.MediaUploadInput, int64, string, string) (string, string, error)
 	GetMedia          func(context.Context, string) (*kb.MediaObject, error)
 	ListMedia         func(ctx context.Context, kbID, prefix, after string, limit int) (kb.MediaPage, error)

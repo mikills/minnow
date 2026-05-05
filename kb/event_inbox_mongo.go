@@ -32,7 +32,7 @@ type MongoEventInbox struct {
 
 // NewMongoEventInbox constructs the inbox and ensures the dedup + cleanup
 // indexes exist. The unique compound index on (worker_id, idempotency_key)
-// is what guarantees at-most-once MarkProcessed; relying on the _id default
+// is what guarantees at-most-once MarkProcessed. relying on the _id default
 // would fall apart if the key shape were ever refactored.
 func NewMongoEventInbox(ctx context.Context, coll *mongo.Collection) (*MongoEventInbox, error) {
 	if coll == nil {
@@ -90,7 +90,7 @@ func (s *MongoEventInbox) Processed(ctx context.Context, workerID, idempotencyKe
 	return false, err
 }
 
-// MarkProcessed inserts a row; a duplicate insert signals the event was
+// MarkProcessed inserts a row. a duplicate insert signals the event was
 // already fully processed by this worker.
 func (s *MongoEventInbox) MarkProcessed(ctx context.Context, workerID, idempotencyKey, eventID string) error {
 	if idempotencyKey == "" {

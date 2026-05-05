@@ -144,10 +144,10 @@ func handleRagQuery(c echo.Context, deps Dependencies) error {
 	}
 	results, err := deps.Search(c.Request().Context(), req.KBID, vec, &kb.SearchOptions{Mode: mode, TopK: req.K})
 	if err != nil {
-		return handleRagSearchError(c, deps, logger, metrics, start, req, err)
+		return handleRagSearchError(ragSearchErrorContext{c: c, deps: deps, logger: logger, metrics: metrics, start: start, req: req, err: err})
 	}
 	queryResults := ragQueryResults(results, mode != kb.SearchModeVector)
-	logRagQuery(c, logger, req, modeName, len(results), start)
+	logRagQuery(ragQueryLog{c: c, logger: logger, req: req, modeName: modeName, resultCount: len(results), start: start})
 	recordRagQuerySuccess(metrics, req.KBID, start, results, queryResults)
 	return c.JSON(http.StatusOK, map[string]any{"results": queryResults})
 }
@@ -178,13 +178,23 @@ func embedRagQuery(c echo.Context, deps Dependencies, req ragQueryRequest, metri
 	return vec, err
 }
 
-func handleRagSearchError(c echo.Context, deps Dependencies, logger *slog.Logger, metrics kb.AppMetrics, start time.Time, req ragQueryRequest, err error) error {
-	metrics.RecordQuery(req.KBID, time.Since(start).Milliseconds(), 0, 0, err)
-	logger.ErrorContext(c.Request().Context(), "rag query failed", "kb_id", req.KBID, "error", err)
-	if errors.Is(err, kb.ErrGraphQueryUnavailable) || errors.Is(err, kb.ErrKBUninitialized) {
-		return c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
+type ragSearchErrorContext struct {
+	c       echo.Context
+	deps    Dependencies
+	logger  *slog.Logger
+	metrics kb.AppMetrics
+	start   time.Time
+	req     ragQueryRequest
+	err     error
+}
+
+func handleRagSearchError(ctx ragSearchErrorContext) error {
+	ctx.metrics.RecordQuery(ctx.req.KBID, time.Since(ctx.start).Milliseconds(), 0, 0, ctx.err)
+	ctx.logger.ErrorContext(ctx.c.Request().Context(), "rag query failed", "kb_id", ctx.req.KBID, "error", ctx.err)
+	if errors.Is(ctx.err, kb.ErrGraphQueryUnavailable) || errors.Is(ctx.err, kb.ErrKBUninitialized) {
+		return ctx.c.JSON(http.StatusBadRequest, map[string]any{"error": ctx.err.Error()})
 	}
-	return WriteError(c, err, deps.IsBudgetExceeded)
+	return WriteError(ctx.c, ctx.err, ctx.deps.IsBudgetExceeded)
 }
 
 func ragQueryResults(results []kb.ExpandedResult, includeScoring bool) []ragQueryResultOut {
@@ -205,12 +215,21 @@ func ragQueryResults(results []kb.ExpandedResult, includeScoring bool) []ragQuer
 	return queryResults
 }
 
-func logRagQuery(c echo.Context, logger *slog.Logger, req ragQueryRequest, modeName string, resultCount int, start time.Time) {
-	queryForLog := strings.TrimSpace(req.Query)
+type ragQueryLog struct {
+	c           echo.Context
+	logger      *slog.Logger
+	req         ragQueryRequest
+	modeName    string
+	resultCount int
+	start       time.Time
+}
+
+func logRagQuery(entry ragQueryLog) {
+	queryForLog := strings.TrimSpace(entry.req.Query)
 	if runes := []rune(queryForLog); len(runes) > 100 {
 		queryForLog = string(runes[:100])
 	}
-	logger.InfoContext(c.Request().Context(), "rag query completed", "kb_id", req.KBID, "search_mode", modeName, "query", queryForLog, "result_count", resultCount, "latency_ms", time.Since(start).Milliseconds())
+	entry.logger.InfoContext(entry.c.Request().Context(), "rag query completed", "kb_id", entry.req.KBID, "search_mode", entry.modeName, "query", queryForLog, "result_count", entry.resultCount, "latency_ms", time.Since(entry.start).Milliseconds())
 }
 
 func recordRagQuerySuccess(metrics kb.AppMetrics, kbID string, start time.Time, results []kb.ExpandedResult, queryResults []ragQueryResultOut) {
@@ -272,6 +291,33 @@ func buildIngestDocuments(req ragIngestRequest) ([]kb.Document, []string, kb.Ups
 }
 
 func handleMultipartIngest(c echo.Context, deps Dependencies, logger *slog.Logger, metrics kb.AppMetrics, start time.Time) error {
+	if err := prepareMultipartIngestRequest(c, deps); err != nil {
+		return err
+	}
+	form := c.Request().MultipartForm
+	req, files, docIDs, err := buildMultipartIngestInput(form)
+	if err != nil {
+		metrics.RecordIngest(req.KBID, time.Since(start).Milliseconds(), 0, 0, err)
+		return c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
+	}
+	defer closeMultipartFiles(files)
+	fileUploads := multipartFileUploads(req, form, files, docIDs)
+	input := kb.FileIngestInput{KBID: req.KBID, Documents: req.Documents, Files: fileUploads, ChunkSize: req.ChunkSize, Options: kb.UpsertDocsOptions{GraphEnabled: req.GraphEnabled}}
+	idemKey := strings.TrimSpace(c.Request().Header.Get("Idempotency-Key"))
+	corr := strings.TrimSpace(c.Request().Header.Get("X-Correlation-Id"))
+	evtID, effectiveIdem, err := deps.AppendFileIngest(c.Request().Context(), input, deps.MaxMediaBytes, idemKey, corr)
+	if err != nil {
+		metrics.RecordIngest(req.KBID, time.Since(start).Milliseconds(), len(req.Documents)+len(fileUploads), 0, err)
+		return writeMultipartIngestError(c, deps, err)
+	}
+	c.Response().Header().Set("X-Source-Event-Id", evtID)
+	c.Response().Header().Set("Idempotency-Key", effectiveIdem)
+	logger.InfoContext(c.Request().Context(), "multipart rag ingest accepted", "kb_id", req.KBID, "document_count", len(req.Documents)+len(fileUploads), "event_id", evtID)
+	metrics.RecordIngest(req.KBID, time.Since(start).Milliseconds(), len(req.Documents)+len(fileUploads), 0, nil)
+	return c.JSON(http.StatusAccepted, map[string]any{"event_id": evtID, "status_url": "/rag/operations/" + evtID, "kb_id": req.KBID, "document_count": len(req.Documents) + len(fileUploads), "doc_ids": docIDs})
+}
+
+func prepareMultipartIngestRequest(c echo.Context, deps Dependencies) error {
 	if deps.AppendFileIngest == nil {
 		return c.JSON(http.StatusServiceUnavailable, map[string]any{"error": "multipart file ingest not configured"})
 	}
@@ -282,40 +328,33 @@ func handleMultipartIngest(c echo.Context, deps Dependencies, logger *slog.Logge
 		c.Request().Body = http.MaxBytesReader(c.Response().Writer, c.Request().Body, deps.MaxMediaBytes)
 	}
 	if err := c.Request().ParseMultipartForm(deps.MaxMediaBytes); err != nil {
-		if isRequestBodyTooLarge(err) {
-			return c.JSON(http.StatusRequestEntityTooLarge, map[string]any{"error": "upload exceeds maximum allowed size"})
-		}
-		return c.JSON(http.StatusBadRequest, map[string]any{"error": "invalid multipart form"})
+		return multipartParseError(c, err)
 	}
-	form := c.Request().MultipartForm
-	req, files, docIDs, err := buildMultipartIngestInput(form)
-	if err != nil {
-		metrics.RecordIngest(req.KBID, time.Since(start).Milliseconds(), 0, 0, err)
-		return c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
+	return nil
+}
+
+func multipartParseError(c echo.Context, err error) error {
+	if isRequestBodyTooLarge(err) {
+		return c.JSON(http.StatusRequestEntityTooLarge, map[string]any{"error": "upload exceeds maximum allowed size"})
 	}
-	defer closeMultipartFiles(files)
+	return c.JSON(http.StatusBadRequest, map[string]any{"error": "invalid multipart form"})
+}
+
+func multipartFileUploads(req multipartIngestRequest, form *multipart.Form, files []multipart.File, docIDs []string) []kb.FileIngestUpload {
 	fileUploads := make([]kb.FileIngestUpload, 0, len(files))
 	for i, fh := range multipartFiles(form) {
 		fileID := req.FileIDs[i]
 		meta := req.FileMetadata[fileID]
 		fileUploads = append(fileUploads, kb.FileIngestUpload{FileID: fileID, DocumentID: docIDs[len(req.Documents)+i], Filename: fh.Filename, ContentType: fh.Header.Get("Content-Type"), Metadata: meta.Metadata, Body: files[i]})
 	}
-	input := kb.FileIngestInput{KBID: req.KBID, Documents: req.Documents, Files: fileUploads, ChunkSize: req.ChunkSize, Options: kb.UpsertDocsOptions{GraphEnabled: req.GraphEnabled}}
-	idemKey := strings.TrimSpace(c.Request().Header.Get("Idempotency-Key"))
-	corr := strings.TrimSpace(c.Request().Header.Get("X-Correlation-Id"))
-	evtID, effectiveIdem, err := deps.AppendFileIngest(c.Request().Context(), input, deps.MaxMediaBytes, idemKey, corr)
-	if err != nil {
-		metrics.RecordIngest(req.KBID, time.Since(start).Milliseconds(), len(req.Documents)+len(fileUploads), 0, err)
-		if errors.Is(err, kb.ErrGraphUnavailable) {
-			return c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
-		}
-		return WriteError(c, err, deps.IsBudgetExceeded)
+	return fileUploads
+}
+
+func writeMultipartIngestError(c echo.Context, deps Dependencies, err error) error {
+	if errors.Is(err, kb.ErrGraphUnavailable) {
+		return c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
 	}
-	c.Response().Header().Set("X-Source-Event-Id", evtID)
-	c.Response().Header().Set("Idempotency-Key", effectiveIdem)
-	logger.InfoContext(c.Request().Context(), "multipart rag ingest accepted", "kb_id", req.KBID, "document_count", len(req.Documents)+len(fileUploads), "event_id", evtID)
-	metrics.RecordIngest(req.KBID, time.Since(start).Milliseconds(), len(req.Documents)+len(fileUploads), 0, nil)
-	return c.JSON(http.StatusAccepted, map[string]any{"event_id": evtID, "status_url": "/rag/operations/" + evtID, "kb_id": req.KBID, "document_count": len(req.Documents) + len(fileUploads), "doc_ids": docIDs})
+	return WriteError(c, err, deps.IsBudgetExceeded)
 }
 
 func buildMultipartIngestInput(form *multipart.Form) (multipartIngestRequest, []multipart.File, []string, error) {

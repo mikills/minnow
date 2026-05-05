@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 
@@ -18,16 +19,6 @@ func uniqueTempName(prefix string) string {
 }
 
 const tempTableThreshold = 200
-
-func ensureEntityGraphTables(ctx context.Context, db *sql.DB) error {
-	if err := ensureEdgesTable(ctx, db); err != nil {
-		return err
-	}
-	if err := ensureDocEntitiesTable(ctx, db); err != nil {
-		return err
-	}
-	return nil
-}
 
 // EnsureGraphTables creates the entities, edges, and doc_entities tables and
 // their associated indexes if they do not already exist.
@@ -231,22 +222,6 @@ func insertDocEntityWeights(ctx context.Context, tx *sql.Tx, weights map[docEnti
 	return nil
 }
 
-func ensureEdgesTable(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx, `SELECT 1 FROM edges LIMIT 0`)
-	if err != nil {
-		return fmt.Errorf("edges table missing: %w", err)
-	}
-	return rows.Close()
-}
-
-func ensureDocEntitiesTable(ctx context.Context, db *sql.DB) error {
-	rows, err := db.QueryContext(ctx, `SELECT 1 FROM doc_entities LIMIT 0`)
-	if err != nil {
-		return fmt.Errorf("doc_entities table missing: %w", err)
-	}
-	return rows.Close()
-}
-
 func ensureEntitiesTable(ctx context.Context, db *sql.DB) error {
 	rows, err := db.QueryContext(ctx, `SELECT 1 FROM entities LIMIT 0`)
 	if err != nil {
@@ -259,74 +234,67 @@ func queryEdgesBySources(ctx context.Context, db *sql.DB, sources []string, edge
 	if len(sources) == 0 {
 		return nil, nil
 	}
-
 	if shouldUseTempTable(len(sources)) {
 		return queryEdgesBySourcesTempTable(ctx, db, sources, edgeTypes, maxNeighborsPerNode)
 	}
-
-	var sb strings.Builder
-	srcPlaceholders := kb.BuildInClausePlaceholders(len(sources))
-
-	args := make([]any, 0, 2*len(sources)+2*len(edgeTypes)+1)
-
-	sb.WriteString(`
-		WITH ranked AS (
-			SELECT src, dst, COALESCE(weight, 1.0) AS weight
-			FROM edges
-			WHERE src IN (`)
-	sb.WriteString(srcPlaceholders)
-	sb.WriteString(")")
-	for _, source := range sources {
-		args = append(args, source)
-	}
-	if len(edgeTypes) > 0 {
-		sb.WriteString(` AND rel_type IN (`)
-		sb.WriteString(kb.BuildInClausePlaceholders(len(edgeTypes)))
-		sb.WriteString(")")
-		for _, et := range edgeTypes {
-			args = append(args, et)
-		}
-	}
-
-	sb.WriteString(`
-			UNION ALL
-			SELECT dst AS src, src AS dst, COALESCE(weight, 1.0) AS weight
-			FROM edges
-			WHERE dst IN (`)
-	sb.WriteString(srcPlaceholders)
-	sb.WriteString(")")
-	for _, source := range sources {
-		args = append(args, source)
-	}
-	if len(edgeTypes) > 0 {
-		sb.WriteString(` AND rel_type IN (`)
-		sb.WriteString(kb.BuildInClausePlaceholders(len(edgeTypes)))
-		sb.WriteString(")")
-		for _, et := range edgeTypes {
-			args = append(args, et)
-		}
-	}
-
-	sb.WriteString(`
-		),
-		limited AS (
-			SELECT src, dst, weight,
-				ROW_NUMBER() OVER (PARTITION BY src ORDER BY weight DESC) AS rn
-			FROM ranked
-		)
-		SELECT src, dst, weight
-		FROM limited
-		WHERE rn <= ?
-	`)
-	args = append(args, maxNeighborsPerNode)
-
-	rows, err := db.QueryContext(ctx, sb.String(), args...)
+	query, args := buildEdgesBySourcesQuery(sources, edgeTypes, maxNeighborsPerNode)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("edge query failed: %w", err)
 	}
 	defer rows.Close()
+	return scanEdgeRows(rows, len(sources))
+}
 
-	results := make([]kb.EdgeRow, 0, len(sources))
+func buildEdgesBySourcesQuery(sources []string, edgeTypes []string, maxNeighborsPerNode int) (string, []any) {
+	var sb strings.Builder
+	srcPlaceholders := kb.BuildInClausePlaceholders(len(sources))
+	args := make([]any, 0, 2*len(sources)+2*len(edgeTypes)+1)
+	appendEdgeDirectionQuery(edgeDirectionQuery{builder: &sb, args: &args, fromColumn: "src", toColumn: "dst", placeholders: srcPlaceholders, sources: sources, edgeTypes: edgeTypes, first: true})
+	appendEdgeDirectionQuery(edgeDirectionQuery{builder: &sb, args: &args, fromColumn: "dst", toColumn: "src", placeholders: srcPlaceholders, sources: sources, edgeTypes: edgeTypes})
+	sb.WriteString(`
+		), limited AS (
+			SELECT src, dst, weight, ROW_NUMBER() OVER (PARTITION BY src ORDER BY weight DESC) AS rn FROM ranked
+		)
+		SELECT src, dst, weight FROM limited WHERE rn <= ?`)
+	args = append(args, maxNeighborsPerNode)
+	return sb.String(), args
+}
+
+type edgeDirectionQuery struct {
+	builder      *strings.Builder
+	args         *[]any
+	fromColumn   string
+	toColumn     string
+	placeholders string
+	sources      []string
+	edgeTypes    []string
+	first        bool
+}
+
+func appendEdgeDirectionQuery(q edgeDirectionQuery) {
+	if q.first {
+		q.builder.WriteString(`WITH ranked AS (`)
+	} else {
+		q.builder.WriteString(` UNION ALL `)
+	}
+	q.builder.WriteString(fmt.Sprintf(`SELECT %s AS src, %s AS dst, COALESCE(weight, 1.0) AS weight FROM edges WHERE %s IN (%s)`, q.fromColumn, q.toColumn, q.fromColumn, q.placeholders))
+	for _, source := range q.sources {
+		*q.args = append(*q.args, source)
+	}
+	if len(q.edgeTypes) == 0 {
+		return
+	}
+	q.builder.WriteString(` AND rel_type IN (`)
+	q.builder.WriteString(kb.BuildInClausePlaceholders(len(q.edgeTypes)))
+	q.builder.WriteString(")")
+	for _, edgeType := range q.edgeTypes {
+		*q.args = append(*q.args, edgeType)
+	}
+}
+
+func scanEdgeRows(rows *sql.Rows, capacity int) ([]kb.EdgeRow, error) {
+	results := make([]kb.EdgeRow, 0, capacity)
 	for rows.Next() {
 		var row kb.EdgeRow
 		if err := rows.Scan(&row.Src, &row.Dst, &row.Weight); err != nil {
@@ -337,7 +305,6 @@ func queryEdgesBySources(ctx context.Context, db *sql.DB, sources []string, edge
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("edge rows iteration error: %w", err)
 	}
-
 	return results, nil
 }
 
@@ -346,73 +313,66 @@ func queryEdgesBySourcesTempTable(ctx context.Context, db *sql.DB, sources []str
 	if err := createTempIDTable(ctx, db, tempName); err != nil {
 		return nil, err
 	}
-	defer func() { _ = dropTable(ctx, db, tempName) }()
+	defer func() {
+		if err := dropTable(ctx, db, tempName); err != nil {
+			slog.Default().Warn("drop temp edge source table failed", "table", tempName, "error", err)
+		}
+	}()
 
 	if err := insertIDs(ctx, db, tempName, sources); err != nil {
 		return nil, err
 	}
 
-	var sb strings.Builder
-	args := make([]any, 0, 2*len(edgeTypes)+1)
-
-	sb.WriteString(fmt.Sprintf(`
-		WITH ranked AS (
-			SELECT src, dst, COALESCE(weight, 1.0) AS weight
-			FROM edges
-			WHERE src IN (SELECT id FROM %s)`, tempName))
-	if len(edgeTypes) > 0 {
-		sb.WriteString(` AND rel_type IN (`)
-		sb.WriteString(kb.BuildInClausePlaceholders(len(edgeTypes)))
-		sb.WriteString(`)`)
-		for _, et := range edgeTypes {
-			args = append(args, et)
-		}
-	}
-	sb.WriteString(fmt.Sprintf(`
-			UNION ALL
-			SELECT dst AS src, src AS dst, COALESCE(weight, 1.0) AS weight
-			FROM edges
-			WHERE dst IN (SELECT id FROM %s)`, tempName))
-	if len(edgeTypes) > 0 {
-		sb.WriteString(` AND rel_type IN (`)
-		sb.WriteString(kb.BuildInClausePlaceholders(len(edgeTypes)))
-		sb.WriteString(`)`)
-		for _, et := range edgeTypes {
-			args = append(args, et)
-		}
-	}
-	sb.WriteString(`
-		),
-		limited AS (
-			SELECT src, dst, weight,
-				ROW_NUMBER() OVER (PARTITION BY src ORDER BY weight DESC) AS rn
-			FROM ranked
-		)
-		SELECT src, dst, weight
-		FROM limited
-		WHERE rn <= ?
-	`)
-	args = append(args, maxNeighborsPerNode)
-
-	rows, err := db.QueryContext(ctx, sb.String(), args...)
+	query, args := tempEdgeQuery(tempName, edgeTypes, maxNeighborsPerNode)
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("edge query failed: %w", err)
 	}
 	defer rows.Close()
 
-	results := make([]kb.EdgeRow, 0, len(sources))
-	for rows.Next() {
-		var row kb.EdgeRow
-		if err := rows.Scan(&row.Src, &row.Dst, &row.Weight); err != nil {
-			return nil, fmt.Errorf("failed to scan edge row: %w", err)
-		}
-		results = append(results, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("edge rows iteration error: %w", err)
-	}
+	return scanEdgeRows(rows, len(sources))
+}
 
-	return results, nil
+func tempEdgeQuery(tempName string, edgeTypes []string, maxNeighborsPerNode int) (string, []any) {
+	var sb strings.Builder
+	args := make([]any, 0, 2*len(edgeTypes)+1)
+	appendTempEdgeDirection(tempEdgeDirection{sb: &sb, args: &args, from: "src", to: "dst", tempName: tempName, edgeTypes: edgeTypes, first: true})
+	appendTempEdgeDirection(tempEdgeDirection{sb: &sb, args: &args, from: "dst", to: "src", tempName: tempName, edgeTypes: edgeTypes})
+	sb.WriteString(`), limited AS (SELECT src, dst, weight, ROW_NUMBER() OVER (PARTITION BY src ORDER BY weight DESC) AS rn FROM ranked) SELECT src, dst, weight FROM limited WHERE rn <= ?`)
+	args = append(args, maxNeighborsPerNode)
+	return sb.String(), args
+}
+
+type tempEdgeDirection struct {
+	sb        *strings.Builder
+	args      *[]any
+	from      string
+	to        string
+	tempName  string
+	edgeTypes []string
+	first     bool
+}
+
+func appendTempEdgeDirection(direction tempEdgeDirection) {
+	if direction.first {
+		direction.sb.WriteString(`WITH ranked AS (`)
+	} else {
+		direction.sb.WriteString(` UNION ALL `)
+	}
+	direction.sb.WriteString(fmt.Sprintf(`SELECT %s AS src, %s AS dst, COALESCE(weight, 1.0) AS weight FROM edges WHERE %s IN (SELECT id FROM %s)`, direction.from, direction.to, direction.from, direction.tempName))
+	appendEdgeTypeFilter(direction.sb, direction.args, direction.edgeTypes)
+}
+
+func appendEdgeTypeFilter(sb *strings.Builder, args *[]any, edgeTypes []string) {
+	if len(edgeTypes) == 0 {
+		return
+	}
+	sb.WriteString(` AND rel_type IN (`)
+	sb.WriteString(kb.BuildInClausePlaceholders(len(edgeTypes)))
+	sb.WriteString(`)`)
+	for _, edgeType := range edgeTypes {
+		*args = append(*args, edgeType)
+	}
 }
 
 func queryEntitiesForDocs(ctx context.Context, db *sql.DB, docIDs []string) (map[string]float64, error) {
@@ -522,7 +482,9 @@ func queryEntitiesForDocsTempTable(ctx context.Context, db *sql.DB, docIDs []str
 		return nil, err
 	}
 	defer func() {
-		_ = dropTable(ctx, db, tempName)
+		if err := dropTable(ctx, db, tempName); err != nil {
+			slog.Default().Warn("drop temp doc id table failed", "table", tempName, "error", err)
+		}
 	}()
 
 	if err := insertIDs(ctx, db, tempName, docIDs); err != nil {
@@ -570,7 +532,9 @@ func queryDocsForEntitiesTempTable(ctx context.Context, db *sql.DB, entityScores
 		return nil, err
 	}
 	defer func() {
-		_ = dropTable(ctx, db, tempName)
+		if err := dropTable(ctx, db, tempName); err != nil {
+			slog.Default().Warn("drop temp entity id table failed", "table", tempName, "error", err)
+		}
 	}()
 
 	if err := insertIDs(ctx, db, tempName, entityIDs); err != nil {
@@ -659,6 +623,46 @@ func dropTable(ctx context.Context, db *sql.DB, tableName string) error {
 	return err
 }
 
+func graphChunkIDsForDocs(ctx context.Context, tx *sql.Tx, placeholders string, args []any, enabled bool) ([]string, error) {
+	if !enabled {
+		return nil, nil
+	}
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT chunk_id FROM doc_entities WHERE doc_id IN (%s)`, placeholders), args...)
+	if err != nil {
+		return nil, fmt.Errorf("query doc chunk ids: %w", err)
+	}
+	defer rows.Close()
+	chunkIDs := make([]string, 0)
+	for rows.Next() {
+		var chunkID string
+		if err := rows.Scan(&chunkID); err != nil {
+			return nil, fmt.Errorf("scan chunk id: %w", err)
+		}
+		if strings.TrimSpace(chunkID) != "" {
+			chunkIDs = append(chunkIDs, chunkID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate chunk id rows: %w", err)
+	}
+	return chunkIDs, nil
+}
+
+func pruneEdgesForChunks(ctx context.Context, tx *sql.Tx, chunkIDs []string) error {
+	if len(chunkIDs) == 0 {
+		return nil
+	}
+	edgePlaceholders := kb.BuildInClausePlaceholders(len(chunkIDs))
+	edgeArgs := make([]any, 0, len(chunkIDs))
+	for _, id := range chunkIDs {
+		edgeArgs = append(edgeArgs, id)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM edges WHERE chunk_id IN (%s)`, edgePlaceholders), edgeArgs...); err != nil {
+		return fmt.Errorf("prune edges by chunk: %w", err)
+	}
+	return nil
+}
+
 func pruneGraphForDocsTx(ctx context.Context, tx *sql.Tx, docIDs []string, cleanupEdgesAndEntities bool) error {
 	if len(docIDs) == 0 {
 		return nil
@@ -678,25 +682,9 @@ func pruneGraphForDocsTx(ctx context.Context, tx *sql.Tx, docIDs []string, clean
 		args = append(args, id)
 	}
 
-	chunkIDs := make([]string, 0)
-	if cleanupEdgesAndEntities {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT DISTINCT chunk_id FROM doc_entities WHERE doc_id IN (%s)`, placeholders), args...)
-		if err != nil {
-			return fmt.Errorf("query doc chunk ids: %w", err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var chunkID string
-			if err := rows.Scan(&chunkID); err != nil {
-				return fmt.Errorf("scan chunk id: %w", err)
-			}
-			if strings.TrimSpace(chunkID) != "" {
-				chunkIDs = append(chunkIDs, chunkID)
-			}
-		}
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("iterate chunk id rows: %w", err)
-		}
+	chunkIDs, err := graphChunkIDsForDocs(ctx, tx, placeholders, args, cleanupEdgesAndEntities)
+	if err != nil {
+		return err
 	}
 
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM doc_entities WHERE doc_id IN (%s)`, placeholders), args...); err != nil {
@@ -707,38 +695,35 @@ func pruneGraphForDocsTx(ctx context.Context, tx *sql.Tx, docIDs []string, clean
 		return nil
 	}
 
+	if err := pruneGraphEdgesIfPresent(ctx, tx, chunkIDs); err != nil {
+		return err
+	}
+	return pruneOrphanEntitiesIfPresent(ctx, tx)
+}
+
+func pruneGraphEdgesIfPresent(ctx context.Context, tx *sql.Tx, chunkIDs []string) error {
 	hasEdges, err := tableExists(ctx, tx, "edges")
-	if err != nil {
+	if err != nil || !hasEdges {
 		return err
 	}
-	if hasEdges && len(chunkIDs) > 0 {
-		edgePlaceholders := kb.BuildInClausePlaceholders(len(chunkIDs))
-		edgeArgs := make([]any, 0, len(chunkIDs))
-		for _, id := range chunkIDs {
-			edgeArgs = append(edgeArgs, id)
-		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM edges WHERE chunk_id IN (%s)`, edgePlaceholders), edgeArgs...); err != nil {
-			return fmt.Errorf("prune edges by chunk: %w", err)
-		}
-	}
+	return pruneEdgesForChunks(ctx, tx, chunkIDs)
+}
 
+func pruneOrphanEntitiesIfPresent(ctx context.Context, tx *sql.Tx) error {
 	hasEntities, err := tableExists(ctx, tx, "entities")
-	if err != nil {
+	if err != nil || !hasEntities {
 		return err
 	}
-	if hasEntities {
-		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM entities e
-			WHERE NOT EXISTS (
-				SELECT 1 FROM doc_entities de WHERE de.entity_id = e.id
-			)
-			AND NOT EXISTS (
-				SELECT 1 FROM edges ed WHERE ed.src = e.id OR ed.dst = e.id
-			)
-		`); err != nil {
-			return fmt.Errorf("prune orphan entities: %w", err)
-		}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM entities e
+		WHERE NOT EXISTS (
+			SELECT 1 FROM doc_entities de WHERE de.entity_id = e.id
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM edges ed WHERE ed.src = e.id OR ed.dst = e.id
+		)
+	`); err != nil {
+		return fmt.Errorf("prune orphan entities: %w", err)
 	}
-
 	return nil
 }

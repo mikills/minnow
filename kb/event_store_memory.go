@@ -9,7 +9,7 @@ import (
 
 // MaxReasonableVisibilityFuture is the outer edge of any believable
 // ClaimedUntil. Anything beyond this is almost certainly clock skew or a
-// bogus write; the reaper treats it as an expired claim.
+// bogus write. the reaper treats it as an expired claim.
 const MaxReasonableVisibilityFuture = 1 * time.Hour
 
 // InMemoryEventStore stores events in process memory.
@@ -30,7 +30,7 @@ func NewInMemoryEventStore() *InMemoryEventStore {
 	}
 }
 
-// SetClock replaces the event store's Clock. Safe to call at any point; the
+// SetClock replaces the event store's Clock. Safe to call at any point. the
 // swap is serialised against other store operations via the primary mutex.
 func (s *InMemoryEventStore) SetClock(c Clock) {
 	s.mu.Lock()
@@ -130,7 +130,7 @@ func (s *InMemoryEventStore) Ack(_ context.Context, eventID string) error {
 
 // Fail transitions a Claimed event back to Pending (or Dead past stored
 // MaxAttempts) only if the stored attempt still equals observedAttempt. A
-// mismatch means a concurrent Claim/Requeue advanced the counter; the caller
+// mismatch means a concurrent Claim/Requeue advanced the counter. the caller
 // should re-read.
 func (s *InMemoryEventStore) Fail(_ context.Context, eventID string, observedAttempt int, errMsg string) error {
 	s.mu.Lock()
@@ -219,44 +219,72 @@ func (s *InMemoryEventStore) ListUnfinishedBefore(_ context.Context, kind EventK
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	matches := s.unfinishedEventsBeforeLocked(kind, before)
+	sortEventPage(matches)
+	return eventPageAfter(matches, after, limit), eventNextToken(matches, after, limit), nil
+}
+
+func (s *InMemoryEventStore) unfinishedEventsBeforeLocked(kind EventKind, before time.Time) []KBEvent {
 	matches := make([]KBEvent, 0)
-	for _, e := range s.events {
-		if e.Kind != kind {
-			continue
+	for _, event := range s.events {
+		if unfinishedEventMatches(event, kind, before) {
+			matches = append(matches, *event)
 		}
-		if !before.IsZero() && e.CreatedAt.After(before) {
-			continue
-		}
-		if e.Status == EventStatusDone || e.Status == EventStatusDead {
-			continue
-		}
-		matches = append(matches, *e)
 	}
-	sort.Slice(matches, func(i, j int) bool {
-		if matches[i].CreatedAt.Equal(matches[j].CreatedAt) {
-			return matches[i].EventID < matches[j].EventID
+	return matches
+}
+
+func unfinishedEventMatches(event *KBEvent, kind EventKind, before time.Time) bool {
+	if event.Kind != kind {
+		return false
+	}
+	if !before.IsZero() && event.CreatedAt.After(before) {
+		return false
+	}
+	return event.Status != EventStatusDone && event.Status != EventStatusDead
+}
+
+func sortEventPage(events []KBEvent) {
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].CreatedAt.Equal(events[j].CreatedAt) {
+			return events[i].EventID < events[j].EventID
 		}
-		return matches[i].CreatedAt.Before(matches[j].CreatedAt)
+		return events[i].CreatedAt.Before(events[j].CreatedAt)
 	})
-	start := 0
-	if after != "" {
-		for idx, m := range matches {
-			if m.EventID == after {
-				start = idx + 1
-				break
-			}
+}
+
+func eventPageAfter(events []KBEvent, after string, limit int) []KBEvent {
+	start, end := eventPageBounds(events, after, limit)
+	return append([]KBEvent(nil), events[start:end]...)
+}
+
+func eventNextToken(events []KBEvent, after string, limit int) string {
+	_, end := eventPageBounds(events, after, limit)
+	if end < len(events) {
+		return events[end-1].EventID
+	}
+	return ""
+}
+
+func eventPageBounds(events []KBEvent, after string, limit int) (int, int) {
+	start := eventPageStart(events, after)
+	end := start + limit
+	if end > len(events) {
+		end = len(events)
+	}
+	return start, end
+}
+
+func eventPageStart(events []KBEvent, after string) int {
+	if after == "" {
+		return 0
+	}
+	for idx, event := range events {
+		if event.EventID == after {
+			return idx + 1
 		}
 	}
-	end := start + limit
-	if end > len(matches) {
-		end = len(matches)
-	}
-	page := append([]KBEvent(nil), matches[start:end]...)
-	next := ""
-	if end < len(matches) {
-		next = matches[end-1].EventID
-	}
-	return page, next, nil
+	return 0
 }
 
 // Cleanup removes terminal-state events whose CreatedAt is before olderThan
@@ -305,7 +333,7 @@ func (s *InMemoryEventStore) FindByCausation(_ context.Context, kind EventKind, 
 
 // InTransaction serializes fn against other store operations via txMu so the
 // worker's append+ack+mark-inbox sequence cannot interleave with other
-// callers. The in-memory store still cannot provide true rollback; if fn
+// callers. The in-memory store still cannot provide true rollback. if fn
 // returns an error the caller is responsible for not having mutated external
 // state. This matches the Mongo store's externally visible contract closely
 // enough for tests and single-process deployments.

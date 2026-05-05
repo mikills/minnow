@@ -45,38 +45,7 @@ func DefaultShardingPolicy() ShardingPolicy {
 
 func NormalizeShardingPolicy(policy ShardingPolicy) ShardingPolicy {
 	defaults := DefaultShardingPolicy()
-
-	if policy.ShardTriggerBytes > 0 {
-		defaults.ShardTriggerBytes = policy.ShardTriggerBytes
-	}
-	if policy.ShardTriggerVectorRows > 0 {
-		defaults.ShardTriggerVectorRows = policy.ShardTriggerVectorRows
-	}
-	if policy.TargetShardBytes > 0 {
-		defaults.TargetShardBytes = policy.TargetShardBytes
-	}
-	if policy.MaxVectorRowsPerShard > 0 {
-		defaults.MaxVectorRowsPerShard = policy.MaxVectorRowsPerShard
-	}
-	if policy.QueryShardFanout > 0 {
-		defaults.QueryShardFanout = policy.QueryShardFanout
-	}
-	if policy.QueryShardFanoutAdaptiveMax > 0 {
-		defaults.QueryShardFanoutAdaptiveMax = policy.QueryShardFanoutAdaptiveMax
-	}
-	if policy.QueryShardParallelism > 0 {
-		defaults.QueryShardParallelism = policy.QueryShardParallelism
-	}
-	if policy.QueryShardLocalTopKMult > 0 {
-		defaults.QueryShardLocalTopKMult = policy.QueryShardLocalTopKMult
-	}
-
-	if policy.SmallKBMaxShards > 0 {
-		defaults.SmallKBMaxShards = policy.SmallKBMaxShards
-	}
-	if policy.CompactionMinShardCount > 0 {
-		defaults.CompactionMinShardCount = policy.CompactionMinShardCount
-	}
+	applyPositiveShardingOverrides(&defaults, policy)
 	if policy.CompactionTombstoneRatio > 0 && policy.CompactionTombstoneRatio <= 1 {
 		defaults.CompactionTombstoneRatio = policy.CompactionTombstoneRatio
 	}
@@ -84,8 +53,32 @@ func NormalizeShardingPolicy(policy ShardingPolicy) ShardingPolicy {
 		defaults.CompactionEnabled = policy.CompactionEnabled
 	}
 	defaults.CompactionEnabledSet = policy.CompactionEnabledSet
-
 	return defaults
+}
+
+func applyPositiveShardingOverrides(defaults *ShardingPolicy, policy ShardingPolicy) {
+	applyPositiveInt64(&defaults.ShardTriggerBytes, policy.ShardTriggerBytes)
+	applyPositiveInt(&defaults.ShardTriggerVectorRows, policy.ShardTriggerVectorRows)
+	applyPositiveInt64(&defaults.TargetShardBytes, policy.TargetShardBytes)
+	applyPositiveInt(&defaults.MaxVectorRowsPerShard, policy.MaxVectorRowsPerShard)
+	applyPositiveInt(&defaults.QueryShardFanout, policy.QueryShardFanout)
+	applyPositiveInt(&defaults.QueryShardFanoutAdaptiveMax, policy.QueryShardFanoutAdaptiveMax)
+	applyPositiveInt(&defaults.QueryShardParallelism, policy.QueryShardParallelism)
+	applyPositiveInt(&defaults.QueryShardLocalTopKMult, policy.QueryShardLocalTopKMult)
+	applyPositiveInt(&defaults.SmallKBMaxShards, policy.SmallKBMaxShards)
+	applyPositiveInt(&defaults.CompactionMinShardCount, policy.CompactionMinShardCount)
+}
+
+func applyPositiveInt(target *int, value int) {
+	if value > 0 {
+		*target = value
+	}
+}
+
+func applyPositiveInt64(target *int64, value int64) {
+	if value > 0 {
+		*target = value
+	}
 }
 
 // ShardMetricsObserver receives shard-level metrics events from the DuckDB backend.

@@ -89,7 +89,7 @@ func TestScheduler(t *testing.T) {
 		require.ErrorIs(t, err, wantErr)
 		require.Equal(t, SchedulerOutcomeFailed, outcome)
 
-		// Second run still works; one failure does not disable the job.
+		// Second run still works. one failure does not disable the job.
 		outcome, err = s.RunOnce(context.Background(), "flaky")
 		require.ErrorIs(t, err, wantErr)
 		require.Equal(t, SchedulerOutcomeFailed, outcome)
@@ -173,7 +173,7 @@ func TestScheduler(t *testing.T) {
 		s := NewScheduler(NewInMemoryWriteLeaseManager(), time.Second, nil, obs)
 
 		require.NoError(t, s.Register("slow", "* * * * *", func(ctx context.Context) error {
-			// Wait for ctx to be done; returning nil after deadline must still
+			// Wait for ctx to be done. returning nil after deadline must still
 			// be treated as a failure by the scheduler.
 			<-ctx.Done()
 			return nil
@@ -221,15 +221,15 @@ func TestScheduler(t *testing.T) {
 		}))
 
 		s.Start()
-		// RunOnce is synchronous; cron-triggered jobs go through the
+		// RunOnce is synchronous. cron-triggered jobs go through the
 		// trampoline. Simulate the trampoline by invoking the same lease
 		// runner path via the cron.Cron.RunDue hook.
 		s.cron.RunDue(time.Now().Add(time.Hour)) // force due match
-		// Give the trampoline a chance to start; Stop must drain without hanging
+		// Give the trampoline a chance to start. Stop must drain without hanging
 		// even though the job panicked.
 		time.Sleep(10 * time.Millisecond)
 		s.Stop()
-		// A panic inside the trampoline must not propagate; reaching here
+		// A panic inside the trampoline must not propagate. reaching here
 		// without test crash is the assertion.
 		require.True(t, panicked.Load() || true, "trampoline panic is contained")
 	})

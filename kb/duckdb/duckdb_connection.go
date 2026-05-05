@@ -48,60 +48,73 @@ func (f *DuckDBArtifactFormat) openConfiguredDB(ctx context.Context, dbPath stri
 		return nil, err
 	}
 
-	if extensionDir != "" {
-		extensionDirSQL := quoteSQLString(extensionDir)
+	if err := configureDuckDB(ctx, db, duckDBRuntimeConfig{extensionDir: extensionDir, memLimit: memLimit, offlineExt: f.deps.OfflineExt, threads: f.deps.DuckDBThreads}); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+type duckDBRuntimeConfig struct {
+	extensionDir string
+	memLimit     string
+	offlineExt   bool
+	threads      int
+}
+
+func configureDuckDB(ctx context.Context, db *sql.DB, cfg duckDBRuntimeConfig) error {
+	if cfg.extensionDir != "" {
+		extensionDirSQL := quoteSQLString(cfg.extensionDir)
 		if _, err := db.ExecContext(ctx, fmt.Sprintf(`SET extension_directory = '%s'`, extensionDirSQL)); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("set extension_directory: %w", err)
+			return fmt.Errorf("set extension_directory: %w", err)
 		}
 	}
+	if err := disableDuckDBImplicitExtensionLoading(ctx, db); err != nil {
+		return err
+	}
+	if err := loadDuckDBVSS(ctx, db, cfg.extensionDir, cfg.offlineExt); err != nil {
+		return err
+	}
+	return configureDuckDBRuntime(ctx, db, cfg.memLimit, cfg.threads)
+}
 
-	// Always disable DuckDB's implicit extension fetch/load paths. The only
-	// way an extension gets INSTALLed is an explicit INSTALL below, gated on
-	// OfflineExt=false.
+func disableDuckDBImplicitExtensionLoading(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, `SET autoinstall_known_extensions = false`); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("disable autoinstall: %w", err)
+		return fmt.Errorf("disable autoinstall: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, `SET autoload_known_extensions = false`); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("disable autoload: %w", err)
+		return fmt.Errorf("disable autoload: %w", err)
 	}
+	return nil
+}
 
-	if _, err := db.ExecContext(ctx, `LOAD vss`); err != nil {
-		if f.deps.OfflineExt {
-			db.Close()
-			return nil, fmt.Errorf("failed to load vss extension in offline mode (check extension_directory %q): %w", extensionDir, err)
-		}
-		if _, installErr := db.ExecContext(ctx, `INSTALL vss`); installErr != nil {
-			db.Close()
-			return nil, fmt.Errorf("failed to install vss: %w", installErr)
-		}
-		if _, loadErr := db.ExecContext(ctx, `LOAD vss`); loadErr != nil {
-			db.Close()
-			return nil, fmt.Errorf("failed to load vss after install: %w", loadErr)
-		}
+func loadDuckDBVSS(ctx context.Context, db *sql.DB, extensionDir string, offlineExt bool) error {
+	if _, err := db.ExecContext(ctx, `LOAD vss`); err == nil {
+		return nil
+	} else if offlineExt {
+		return fmt.Errorf("failed to load vss extension in offline mode (check extension_directory %q): %w", extensionDir, err)
 	}
+	if _, installErr := db.ExecContext(ctx, `INSTALL vss`); installErr != nil {
+		return fmt.Errorf("failed to install vss: %w", installErr)
+	}
+	if _, loadErr := db.ExecContext(ctx, `LOAD vss`); loadErr != nil {
+		return fmt.Errorf("failed to load vss after install: %w", loadErr)
+	}
+	return nil
+}
 
+func configureDuckDBRuntime(ctx context.Context, db *sql.DB, memLimit string, threads int) error {
 	if _, err := db.ExecContext(ctx, `SET hnsw_enable_experimental_persistence = true`); err != nil {
-		db.Close()
-		return nil, err
+		return err
 	}
-
 	if _, err := db.ExecContext(ctx, fmt.Sprintf(`SET memory_limit = '%s'`, quoteSQLString(memLimit))); err != nil {
-		db.Close()
-		return nil, err
+		return err
 	}
-	threads := f.deps.DuckDBThreads
 	if threads <= 0 {
 		threads = 1
 	}
-	if _, err := db.ExecContext(ctx, fmt.Sprintf(`PRAGMA threads = %d`, threads)); err != nil {
-		db.Close()
-		return nil, err
-	}
-
-	return db, nil
+	_, err := db.ExecContext(ctx, fmt.Sprintf(`PRAGMA threads = %d`, threads))
+	return err
 }
 
 // OpenConfiguredDB is the exported variant for test helpers.

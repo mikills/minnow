@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +33,7 @@ type QueryResult struct {
 // Document is a source document for ingestion pipelines. MediaIDs carries
 // simple doc-level media references (synthesised into ChunkMediaRef rows
 // when persisted). MediaRefs carries rich chunk-level refs (role/label/
-// locator) when the ingest caller has them; when both are present MediaRefs
+// locator) when the ingest caller has them. when both are present MediaRefs
 // wins.
 type Document struct {
 	ID        string
@@ -49,7 +50,7 @@ type Chunk struct {
 	Text      string
 	Start     int
 	End       int
-	MediaRefs []ChunkMediaRef // optional; nil for text-only chunks
+	MediaRefs []ChunkMediaRef // optional and nil for text-only chunks
 }
 
 // Chunker produces chunks from raw text.
@@ -74,17 +75,17 @@ type KB struct {
 	CacheEntryTTL     time.Duration
 
 	// Clock drives all time-based behaviour inside the KB (event timestamps,
-	// GC cutoffs, TTL comparisons). Defaults to RealClock; substitute a
+	// GC cutoffs, TTL comparisons). Defaults to RealClock. substitute a
 	// FakeClock for tests and the simulation harness.
 	Clock Clock
 
 	// EventStore and EventInbox back the event-driven ingest pipeline. Both
-	// are optional; when nil the scheduler skips the related reaper/cleanup
+	// are optional. when nil the scheduler skips the related reaper/cleanup
 	// jobs.
 	EventStore EventStore
 	EventInbox EventInbox
 
-	// MediaStore holds media metadata. Optional; when nil the media upload
+	// MediaStore holds media metadata. Optional. when nil the media upload
 	// path and media-gc sweeps are no-ops.
 	MediaStore MediaStore
 
@@ -132,7 +133,7 @@ func WithManifestStore(store ManifestStore) KBOption {
 
 // WithArtifactFormat registers a single artifact format.
 // When multiple formats are registered, the first registered format becomes the
-// default for new KBs; call SetDefaultFormatKind after construction to override.
+// default for new KBs. call SetDefaultFormatKind after construction to override.
 func WithArtifactFormat(format ArtifactFormat) KBOption {
 	return func(kb *KB) {
 		if err := kb.RegisterFormat(format); err != nil {
@@ -143,7 +144,7 @@ func WithArtifactFormat(format ArtifactFormat) KBOption {
 
 // WithFormats registers multiple artifact formats in order.
 // When multiple formats are registered, the first registered format becomes the
-// default for new KBs; call SetDefaultFormatKind after construction to override.
+// default for new KBs. call SetDefaultFormatKind after construction to override.
 func WithFormats(formats ...ArtifactFormat) KBOption {
 	return func(kb *KB) {
 		for _, f := range formats {
@@ -243,7 +244,7 @@ func WithMediaContentTypeAllowlist(list []string) KBOption {
 
 // NewKB creates a new KB instance with the given blob store and cache directory.
 // Callers must provide at least one ArtifactFormat via WithArtifactFormat,
-// WithFormats, or RegisterFormat; without one, query/ingest/delete
+// WithFormats, or RegisterFormat. without one, query/ingest/delete
 // operations will return ErrArtifactFormatNotConfigured.
 func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 	kb := &KB{
@@ -332,14 +333,18 @@ func (l *KB) SetWriteLeaseTTL(ttl time.Duration) {
 	l.WriteLeaseTTL = ttl
 }
 
+var cacheMutationRootContext = context.Background()
+
 // SetMaxCacheBytes updates max cache bytes for local snapshot eviction.
 func (l *KB) SetMaxCacheBytes(max int64) {
 	l.mu.Lock()
 	l.MaxCacheBytes = max
 	l.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), defaultCacheEvictionRetryWindow)
+	ctx, cancel := context.WithTimeout(cacheMutationRootContext, defaultCacheEvictionRetryWindow)
 	defer cancel()
-	_ = l.evictCacheIfNeeded(ctx, "")
+	if err := l.evictCacheIfNeeded(ctx, ""); err != nil {
+		slog.Default().Warn("cache eviction after max bytes update failed", "error", err)
+	}
 }
 
 // SetCacheEntryTTL updates TTL for time-based cache eviction.
@@ -347,9 +352,11 @@ func (l *KB) SetCacheEntryTTL(ttl time.Duration) {
 	l.mu.Lock()
 	l.CacheEntryTTL = ttl
 	l.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), defaultCacheEvictionRetryWindow)
+	ctx, cancel := context.WithTimeout(cacheMutationRootContext, defaultCacheEvictionRetryWindow)
 	defer cancel()
-	_ = l.evictCacheIfNeeded(ctx, "")
+	if err := l.evictCacheIfNeeded(ctx, ""); err != nil {
+		slog.Default().Warn("cache eviction after ttl update failed", "error", err)
+	}
 }
 
 func (l *KB) SetGraphBuilder(builder *GraphBuilder) {

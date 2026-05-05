@@ -57,11 +57,11 @@ func (l *KB) UpsertDocsAndUploadWithRetryAndOptions(ctx context.Context, kbID st
 }
 
 func (l *KB) PublishPreparedDocs(ctx context.Context, kbID string, docs []EmbeddedDocument, graphResult *GraphBuildResult, opts UpsertDocsOptions) error {
-	return l.publishPreparedDocs(ctx, kbID, docs, graphResult, opts, true)
+	return l.publishPreparedDocs(ctx, PreparedPublishRequest{KBID: kbID, Docs: docs, GraphResult: graphResult, Options: opts, Upload: true})
 }
 
-func (l *KB) publishPreparedDocs(ctx context.Context, kbID string, docs []EmbeddedDocument, graphResult *GraphBuildResult, opts UpsertDocsOptions, upload bool) error {
-	format, err := l.resolveFormat(ctx, kbID)
+func (l *KB) publishPreparedDocs(ctx context.Context, req PreparedPublishRequest) error {
+	format, err := l.resolveFormat(ctx, req.KBID)
 	if err != nil {
 		return err
 	}
@@ -69,13 +69,7 @@ func (l *KB) publishPreparedDocs(ctx context.Context, kbID string, docs []Embedd
 	if !ok {
 		return ErrArtifactFormatNotConfigured
 	}
-	_, err = publisher.PublishPrepared(ctx, PreparedPublishRequest{
-		KBID:        kbID,
-		Docs:        docs,
-		GraphResult: graphResult,
-		Upload:      upload,
-		Options:     opts,
-	})
+	_, err = publisher.PublishPrepared(ctx, req)
 	return err
 }
 
@@ -102,31 +96,4 @@ func (l *KB) publishPreparedStream(ctx context.Context, req PreparedStreamReques
 	}
 	_, err = streamer.PublishPreparedStream(ctx, req)
 	return err
-}
-
-func shouldActivateSharding(policy ShardingPolicy, snapshotBytes int64, vectorRows int64) bool {
-	resolved := NormalizeShardingPolicy(policy)
-	if snapshotBytes >= resolved.ShardTriggerBytes {
-		return true
-	}
-
-	if vectorRows >= int64(resolved.ShardTriggerVectorRows) {
-		return true
-	}
-
-	return false
-}
-
-func shardingActivationReason(policy ShardingPolicy, snapshotBytes int64, vectorRows int64) string {
-	resolved := NormalizeShardingPolicy(policy)
-	switch {
-	case snapshotBytes >= resolved.ShardTriggerBytes && vectorRows >= int64(resolved.ShardTriggerVectorRows):
-		return "bytes_and_vector_rows"
-	case snapshotBytes >= resolved.ShardTriggerBytes:
-		return "snapshot_bytes"
-	case vectorRows >= int64(resolved.ShardTriggerVectorRows):
-		return "vector_rows"
-	default:
-		return "within_threshold"
-	}
 }

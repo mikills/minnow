@@ -106,9 +106,11 @@ func (l *KB) SweepMediaGCMark(ctx context.Context, now time.Time) (MediaGCResult
 			activeByKB[m.KBID] = active
 		}
 		if _, isReferenced := active[m.ID]; isReferenced {
-			// Promote to active in-place; publish worker should have done
+			// Promote to active in-place. The publish worker should have done
 			// this, but mark phase is a backstop.
-			_ = l.MediaStore.UpdateState(ctx, m.ID, MediaStateActive, 0)
+			if err := l.MediaStore.UpdateState(ctx, m.ID, MediaStateActive, 0); err != nil {
+				slog.Default().Warn("media-gc-mark: activate referenced media failed", "media_id", m.ID, "error", err)
+			}
 			return nil
 		}
 		if err := l.MediaStore.UpdateState(ctx, m.ID, MediaStateTombstoned, now.UnixMilli()); err != nil {

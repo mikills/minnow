@@ -10,7 +10,7 @@ import (
 
 // ConcurrentIngestAndQuery runs a writer that ingests several batches while
 // a reader runs many queries in parallel. The reader must never panic or
-// receive a corrupt result; intermediate states (no manifest yet, partial
+// receive a corrupt result. intermediate states (no manifest yet, partial
 // results) are acceptable. Regression target: read path unsafety while a
 // publish is swapping the manifest or shard files underneath.
 func ConcurrentIngestAndQuery(h *sim.Harness) {
@@ -59,7 +59,7 @@ func ConcurrentIngestAndQuery(h *sim.Harness) {
 				continue
 			}
 			// A pre-first-publish query legitimately surfaces
-			// ErrKBUninitialized; anything else during the race is
+			// ErrKBUninitialized. anything else during the race is
 			// suspicious and worth flagging.
 			if !isTolerableConcurrentReadError(err) {
 				h.Errorf("concurrent query (seed=%d): %v", h.Seed(), err)

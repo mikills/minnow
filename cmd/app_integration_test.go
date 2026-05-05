@@ -273,7 +273,7 @@ func testAppMediaUploadAsync(t *testing.T) {
 }
 
 func testAppMediaUploadTooLarge(t *testing.T) {
-	// MaxMediaBytes defaults to 0 (unlimited) in AppConfig; we need to set
+	// MaxMediaBytes defaults to 0 (unlimited) in AppConfig. we need to set
 	// an explicit cap to exercise the 413 path.
 	baseURL := setupAppTestWithCap(t, appKeywordEmbedder{}, "kb-app-media-too-large", 1024, kb.WithMediaStore(kb.NewInMemoryMediaStore()))
 	// Build a body that exceeds the 1KB cap.

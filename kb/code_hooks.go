@@ -36,6 +36,20 @@ func InstallCodeIndexHooks(ctx context.Context, opts CodeHookOptions) (CodeHookS
 	if err != nil {
 		return CodeHookStatus{}, err
 	}
+	binary, kbID, indexKey := normalizeCodeHookOptions(opts)
+	block := renderCodeHookBlock(binary, kbID, indexKey, root)
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		return CodeHookStatus{}, err
+	}
+	for _, name := range CodeHookNames {
+		if err := installCodeHook(hooksDir, name, block, opts.Force); err != nil {
+			return CodeHookStatus{}, err
+		}
+	}
+	return CodeIndexHookStatus(ctx, opts.Root)
+}
+
+func normalizeCodeHookOptions(opts CodeHookOptions) (string, string, string) {
 	binary := strings.TrimSpace(opts.Binary)
 	if binary == "" {
 		binary = "minnow"
@@ -44,36 +58,40 @@ func InstallCodeIndexHooks(ctx context.Context, opts CodeHookOptions) (CodeHookS
 	if kbID == "" {
 		kbID = "default"
 	}
-	indexKey := sanitizeCodeIndexKey(opts.IndexKey)
-	block := renderCodeHookBlock(binary, kbID, indexKey, root)
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
-		return CodeHookStatus{}, err
+	return binary, kbID, sanitizeCodeIndexKey(opts.IndexKey)
+}
+
+func installCodeHook(hooksDir string, name string, block string, force bool) error {
+	path := filepath.Join(hooksDir, name)
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
 	}
-	for _, name := range CodeHookNames {
-		path := filepath.Join(hooksDir, name)
-		data, err := os.ReadFile(path)
-		if err != nil && !os.IsNotExist(err) {
-			return CodeHookStatus{}, err
-		}
-		content := string(data)
-		if strings.Contains(content, codeHookStart) {
-			content = replaceManagedHookBlock(content, block)
-		} else if strings.TrimSpace(content) != "" && !opts.Force {
-			return CodeHookStatus{}, fmt.Errorf("git hook %s already exists; rerun with force to append Minnow managed block", name)
-		} else {
-			if strings.TrimSpace(content) == "" {
-				content = "#!/bin/sh\n"
-			}
-			if !strings.HasSuffix(content, "\n") {
-				content += "\n"
-			}
-			content += block
-		}
-		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
-			return CodeHookStatus{}, err
-		}
+	content, err := updatedCodeHookContent(name, string(data), block, force)
+	if err != nil {
+		return err
 	}
-	return CodeIndexHookStatus(ctx, opts.Root)
+	return os.WriteFile(path, []byte(content), 0o755)
+}
+
+func updatedCodeHookContent(name string, content string, block string, force bool) (string, error) {
+	if strings.Contains(content, codeHookStart) {
+		return replaceManagedHookBlock(content, block), nil
+	}
+	if strings.TrimSpace(content) != "" && !force {
+		return "", fmt.Errorf("git hook %s already exists; rerun with force to append Minnow managed block", name)
+	}
+	return appendManagedHookBlock(content, block), nil
+}
+
+func appendManagedHookBlock(content string, block string) string {
+	if strings.TrimSpace(content) == "" {
+		content = "#!/bin/sh\n"
+	}
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	return content + block
 }
 
 func UninstallCodeIndexHooks(ctx context.Context, root string) (CodeHookStatus, error) {

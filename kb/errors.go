@@ -47,24 +47,30 @@ func isEmbeddingDimensionMismatchErr(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	// Direct DuckDB Binder errors do not always mention the FLOAT[N] type;
+	// Direct DuckDB Binder errors do not always mention the FLOAT[N] type.
 	// the Function call ("array_distance: Array arguments must be of the
 	// same size") is sufficient signal.
-	if strings.Contains(msg, "array_distance") &&
-		(strings.Contains(msg, "size") || strings.Contains(msg, "cast") || strings.Contains(msg, "argument")) {
+	if isArrayDistanceMismatch(msg) {
 		return true
 	}
-	if !strings.Contains(msg, "float[") {
-		return false
-	}
-	if strings.Contains(msg, "cannot cast") {
-		return true
-	}
-	if strings.Contains(msg, "array") && strings.Contains(msg, "mismatch") {
-		return true
-	}
-	if strings.Contains(msg, "different") && strings.Contains(msg, "size") {
-		return true
+	return strings.Contains(msg, "float[") && isFloatDimensionMismatchMessage(msg)
+}
+
+func isArrayDistanceMismatch(msg string) bool {
+	return strings.Contains(msg, "array_distance") && containsAnySubstring(msg, "size", "cast", "argument")
+}
+
+func isFloatDimensionMismatchMessage(msg string) bool {
+	return strings.Contains(msg, "cannot cast") ||
+		(strings.Contains(msg, "array") && strings.Contains(msg, "mismatch")) ||
+		(strings.Contains(msg, "different") && strings.Contains(msg, "size"))
+}
+
+func containsAnySubstring(msg string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(msg, needle) {
+			return true
+		}
 	}
 	return false
 }

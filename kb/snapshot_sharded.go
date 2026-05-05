@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -41,7 +42,7 @@ type SnapshotShardMetadata struct {
 	Centroid       []float32 `json:"centroid,omitempty"`
 	SHA256         string    `json:"sha256,omitempty"`
 	// MediaIDs lists media object ids referenced by chunks in this shard.
-	// Empty for shards that predate the media subsystem; readers must treat
+	// Empty for shards that predate the media subsystem. readers must treat
 	// a nil slice as "no refs" rather than "unknown".
 	MediaIDs []string `json:"media_ids,omitempty"`
 }
@@ -59,7 +60,7 @@ type SnapshotShardManifest struct {
 }
 
 // ShardManifestKey returns the blob key for a KB's shard manifest.
-// The ".duckdb" segment is a historical artifact name; the key is format-agnostic.
+// The ".duckdb" segment is a historical artifact name. the key is format-agnostic.
 func ShardManifestKey(kbID string) string {
 	return kbID + ".duckdb.manifest.json"
 }
@@ -67,17 +68,10 @@ func ShardManifestKey(kbID string) string {
 // UploadSnapshotShardedIfMatch uploads a DB snapshot as immutable shard objects
 // and updates the manifest with optimistic version matching.
 func (l *KB) UploadSnapshotShardedIfMatch(ctx context.Context, kbID, localDBPath, expectedManifestVersion string, partSize int64) (*BlobObjectInfo, error) {
-	if kbID == "" {
-		return nil, fmt.Errorf("kbID cannot be empty")
+	if err := validateSnapshotShardUpload(kbID, localDBPath); err != nil {
+		return nil, err
 	}
-
-	if localDBPath == "" {
-		return nil, fmt.Errorf("localDBPath cannot be empty")
-	}
-
-	if partSize <= 0 {
-		partSize = DefaultSnapshotShardSize
-	}
+	partSize = normalizeSnapshotPartSize(partSize)
 
 	leaseManager, lease, err := l.AcquireWriteLease(ctx, kbID)
 	if err != nil {
@@ -85,7 +79,9 @@ func (l *KB) UploadSnapshotShardedIfMatch(ctx context.Context, kbID, localDBPath
 	}
 
 	defer func() {
-		_ = leaseManager.Release(context.Background(), lease)
+		if err := leaseManager.Release(context.WithoutCancel(ctx), lease); err != nil {
+			slog.Default().Warn("snapshot shard lease release failed", "kb_id", kbID, "error", err)
+		}
 	}()
 
 	format, err := l.resolveFormat(ctx, kbID)
@@ -98,21 +94,7 @@ func (l *KB) UploadSnapshotShardedIfMatch(ctx context.Context, kbID, localDBPath
 		return nil, err
 	}
 
-	totalSize := int64(0)
-	for _, a := range artifacts {
-		totalSize += a.SizeBytes
-	}
-
-	manifest := SnapshotShardManifest{
-		SchemaVersion:  1,
-		Layout:         ShardManifestLayoutDuckDBs,
-		FormatKind:     format.Kind(),
-		FormatVersion:  format.Version(),
-		KBID:           kbID,
-		CreatedAt:      l.Clock.Now(),
-		TotalSizeBytes: totalSize,
-		Shards:         artifacts,
-	}
+	manifest := l.snapshotShardManifest(kbID, format, artifacts)
 
 	newVersion, err := l.ManifestStore.UpsertIfMatch(ctx, kbID, manifest, expectedManifestVersion)
 	if err != nil {
@@ -123,8 +105,34 @@ func (l *KB) UploadSnapshotShardedIfMatch(ctx context.Context, kbID, localDBPath
 	}
 
 	l.recordShardCount(kbID, len(artifacts))
-	return &BlobObjectInfo{
-		Key:     ShardManifestKey(kbID),
-		Version: newVersion,
-	}, nil
+	return &BlobObjectInfo{Key: ShardManifestKey(kbID), Version: newVersion}, nil
+}
+
+func validateSnapshotShardUpload(kbID string, localDBPath string) error {
+	if kbID == "" {
+		return fmt.Errorf("kbID cannot be empty")
+	}
+	if localDBPath == "" {
+		return fmt.Errorf("localDBPath cannot be empty")
+	}
+	return nil
+}
+
+func normalizeSnapshotPartSize(partSize int64) int64 {
+	if partSize <= 0 {
+		return DefaultSnapshotShardSize
+	}
+	return partSize
+}
+
+func (l *KB) snapshotShardManifest(kbID string, format ArtifactFormat, artifacts []SnapshotShardMetadata) SnapshotShardManifest {
+	return SnapshotShardManifest{SchemaVersion: 1, Layout: ShardManifestLayoutDuckDBs, FormatKind: format.Kind(), FormatVersion: format.Version(), KBID: kbID, CreatedAt: l.Clock.Now(), TotalSizeBytes: snapshotShardTotalSize(artifacts), Shards: artifacts}
+}
+
+func snapshotShardTotalSize(artifacts []SnapshotShardMetadata) int64 {
+	totalSize := int64(0)
+	for _, artifact := range artifacts {
+		totalSize += artifact.SizeBytes
+	}
+	return totalSize
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 	"time"
@@ -26,7 +27,7 @@ func expandEntityScoresDuckPGQ(ctx context.Context, db *sql.DB, scores map[strin
 	}
 	defer cleanup()
 
-	expansions, err := queryGraphScoresDuckPGQ(ctx, db, graphName, seedIDs, options.Hops, options.Decay, options.MaxNeighborsPerNode)
+	expansions, err := queryGraphScoresDuckPGQ(ctx, db, pgqScoreQuery{graphName: graphName, seeds: seedIDs, hops: options.Hops, decay: options.Decay, maxNeighborsPerNode: options.MaxNeighborsPerNode})
 	if err != nil {
 		return nil, err
 	}
@@ -71,15 +72,21 @@ func ensurePropertyGraph(ctx context.Context, db *sql.DB, edgeTypes []string) (s
 		return "", nil, err
 	}
 	if err := createPropertyGraph(ctx, db, graphName, filteredTable, edgeLabel); err != nil {
-		_ = dropTable(ctx, db, filteredTable)
+		if dropErr := dropTable(ctx, db, filteredTable); dropErr != nil {
+			slog.Default().Warn("drop filtered edge table after property graph failure failed", "table", filteredTable, "error", dropErr)
+		}
 		return "", nil, err
 	}
 
 	cleanup := func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		_ = dropPropertyGraph(cleanupCtx, db, graphName)
-		_ = dropTable(cleanupCtx, db, filteredTable)
+		if err := dropPropertyGraph(cleanupCtx, db, graphName); err != nil {
+			slog.Default().Warn("drop property graph failed", "graph", graphName, "error", err)
+		}
+		if err := dropTable(cleanupCtx, db, filteredTable); err != nil {
+			slog.Default().Warn("drop filtered edge table failed", "table", filteredTable, "error", err)
+		}
 	}
 
 	return graphName, cleanup, nil
@@ -132,12 +139,20 @@ func dropPropertyGraph(ctx context.Context, db *sql.DB, graphName string) error 
 	return nil
 }
 
-func queryGraphScoresDuckPGQ(ctx context.Context, db *sql.DB, graphName string, seeds []string, hops int, decay float64, maxNeighborsPerNode int) (map[string]float64, error) {
-	if len(seeds) == 0 || hops <= 0 {
+type pgqScoreQuery struct {
+	graphName           string
+	seeds               []string
+	hops                int
+	decay               float64
+	maxNeighborsPerNode int
+}
+
+func queryGraphScoresDuckPGQ(ctx context.Context, db *sql.DB, q pgqScoreQuery) (map[string]float64, error) {
+	if len(q.seeds) == 0 || q.hops <= 0 {
 		return map[string]float64{}, nil
 	}
 
-	placeholders := kb.BuildInClausePlaceholders(len(seeds))
+	placeholders := kb.BuildInClausePlaceholders(len(q.seeds))
 	query := fmt.Sprintf(`
 		SELECT src_id, dst_id, hop
 		FROM (
@@ -149,13 +164,13 @@ func queryGraphScoresDuckPGQ(ctx context.Context, db *sql.DB, graphName string, 
 			)
 		)
 		WHERE rn <= ?
-	`, graphName, placeholders, hops)
+	`, q.graphName, placeholders, q.hops)
 
-	args := make([]any, 0, len(seeds)+1)
-	for _, seed := range seeds {
+	args := make([]any, 0, len(q.seeds)+1)
+	for _, seed := range q.seeds {
 		args = append(args, seed)
 	}
-	args = append(args, maxNeighborsPerNode)
+	args = append(args, q.maxNeighborsPerNode)
 
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -174,7 +189,7 @@ func queryGraphScoresDuckPGQ(ctx context.Context, db *sql.DB, graphName string, 
 		if hop <= 0 {
 			continue
 		}
-		score := math.Pow(decay, float64(hop))
+		score := math.Pow(q.decay, float64(hop))
 		scores[dstID] += score
 	}
 	if err := rows.Err(); err != nil {

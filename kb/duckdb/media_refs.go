@@ -8,7 +8,7 @@ import (
 )
 
 // encodeMediaRefs serialises the doc's media refs. Prefers explicit
-// MediaRefs (rich: role/label/locator) when provided; otherwise synthesises
+// MediaRefs (rich: role/label/locator) when provided. otherwise synthesises
 // minimal {MediaID} entries from MediaIDs. Returns a null value when there
 // are no refs.
 func encodeMediaRefs(mediaIDs []string, explicit []kb.ChunkMediaRef) (sql.NullString, error) {

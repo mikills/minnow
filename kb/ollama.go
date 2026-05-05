@@ -226,36 +226,41 @@ func (o *OllamaGrapher) extractChunk(ctx context.Context, chunk Chunk) ([]Entity
 		return nil, nil, fmt.Errorf("ollama grapher parse failed for chunk %s: %w", chunk.ChunkID, err)
 	}
 
-	seenEntities := make(map[string]struct{}, len(result.Entities))
+	return ollamaGraphCandidates(result, chunk.ChunkID), ollamaEdgeCandidates(result, chunk.ChunkID), nil
+}
+
+func ollamaGraphCandidates(result ollamaGrapherResult, chunkID string) []EntityCandidate {
+	seen := make(map[string]struct{}, len(result.Entities))
 	entities := make([]EntityCandidate, 0, len(result.Entities))
 	for _, entityName := range result.Entities {
 		trimmed := strings.TrimSpace(entityName)
-		if trimmed == "" {
+		if trimmed == "" || hasSeenEntity(seen, trimmed) {
 			continue
 		}
-		if _, exists := seenEntities[trimmed]; exists {
-			continue
-		}
-		seenEntities[trimmed] = struct{}{}
-		entities = append(entities, EntityCandidate{Name: trimmed, ChunkID: chunk.ChunkID})
+		seen[trimmed] = struct{}{}
+		entities = append(entities, EntityCandidate{Name: trimmed, ChunkID: chunkID})
 	}
+	return entities
+}
 
+func hasSeenEntity(seen map[string]struct{}, name string) bool {
+	_, exists := seen[name]
+	return exists
+}
+
+func ollamaEdgeCandidates(result ollamaGrapherResult, chunkID string) []EdgeCandidate {
 	edges := make([]EdgeCandidate, 0, len(result.Edges))
 	for _, edge := range result.Edges {
-		weight := edge.Weight
-		if weight <= 0 {
-			weight = 1.0
-		}
-		edges = append(edges, EdgeCandidate{
-			Src:     edge.Src,
-			Dst:     edge.Dst,
-			RelType: edge.Rel,
-			Weight:  weight,
-			ChunkID: chunk.ChunkID,
-		})
+		edges = append(edges, EdgeCandidate{Src: edge.Src, Dst: edge.Dst, RelType: edge.Rel, Weight: positiveEdgeWeight(edge.Weight), ChunkID: chunkID})
 	}
+	return edges
+}
 
-	return entities, edges, nil
+func positiveEdgeWeight(weight float64) float64 {
+	if weight <= 0 {
+		return 1.0
+	}
+	return weight
 }
 
 // Extract implements Grapher.
@@ -264,25 +269,9 @@ func (o *OllamaGrapher) Extract(ctx context.Context, chunks []Chunk) (*GraphExtr
 		return &GraphExtraction{}, nil
 	}
 
-	workers := o.MaxParallel
-	if workers <= 0 {
-		workers = defaultGrapherWorkers
-	}
-	if workers > len(chunks) {
-		workers = len(chunks)
-	}
+	workers := grapherWorkerCount(o.MaxParallel, len(chunks))
 	if workers <= 1 {
-		allEntities := make([]EntityCandidate, 0)
-		allEdges := make([]EdgeCandidate, 0)
-		for _, chunk := range chunks {
-			entities, edges, err := o.extractChunk(ctx, chunk)
-			if err != nil {
-				return nil, err
-			}
-			allEntities = append(allEntities, entities...)
-			allEdges = append(allEdges, edges...)
-		}
-		return &GraphExtraction{Entities: allEntities, Edges: allEdges}, nil
+		return o.extractChunksSerial(ctx, chunks)
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -293,7 +282,7 @@ func (o *OllamaGrapher) Extract(ctx context.Context, chunks []Chunk) (*GraphExtr
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		startOllamaGrapherWorker(ctx, o, chunks, jobs, results, cancel, &wg)
+		startOllamaGrapherWorker(ollamaWorkerState{ctx: ctx, grapher: o, chunks: chunks, jobs: jobs, results: results, cancel: cancel, wg: &wg})
 	}
 
 	// Producer goroutine: sends chunk indices to the jobs channel.
@@ -313,6 +302,35 @@ func (o *OllamaGrapher) Extract(ctx context.Context, chunks []Chunk) (*GraphExtr
 
 	wg.Wait()
 
+	return graphExtractionFromChunkResults(results)
+}
+
+func grapherWorkerCount(maxParallel int, chunks int) int {
+	workers := maxParallel
+	if workers <= 0 {
+		workers = defaultGrapherWorkers
+	}
+	if workers > chunks {
+		return chunks
+	}
+	return workers
+}
+
+func (o *OllamaGrapher) extractChunksSerial(ctx context.Context, chunks []Chunk) (*GraphExtraction, error) {
+	allEntities := make([]EntityCandidate, 0)
+	allEdges := make([]EdgeCandidate, 0)
+	for _, chunk := range chunks {
+		entities, edges, err := o.extractChunk(ctx, chunk)
+		if err != nil {
+			return nil, err
+		}
+		allEntities = append(allEntities, entities...)
+		allEdges = append(allEdges, edges...)
+	}
+	return &GraphExtraction{Entities: allEntities, Edges: allEdges}, nil
+}
+
+func graphExtractionFromChunkResults(results []chunkResult) (*GraphExtraction, error) {
 	allEntities := make([]EntityCandidate, 0)
 	allEdges := make([]EdgeCandidate, 0)
 	for i := range results {
@@ -322,25 +340,34 @@ func (o *OllamaGrapher) Extract(ctx context.Context, chunks []Chunk) (*GraphExtr
 		allEntities = append(allEntities, results[i].entities...)
 		allEdges = append(allEdges, results[i].edges...)
 	}
-
 	return &GraphExtraction{Entities: allEntities, Edges: allEdges}, nil
 }
 
-func startOllamaGrapherWorker(ctx context.Context, grapher *OllamaGrapher, chunks []Chunk, jobs <-chan int, results []chunkResult, cancel context.CancelFunc, wg *sync.WaitGroup) {
-	wg.Add(1)
-	go runOllamaGrapherWorker(ctx, grapher, chunks, jobs, results, cancel, wg)
+type ollamaWorkerState struct {
+	ctx     context.Context
+	grapher *OllamaGrapher
+	chunks  []Chunk
+	jobs    <-chan int
+	results []chunkResult
+	cancel  context.CancelFunc
+	wg      *sync.WaitGroup
 }
 
-func runOllamaGrapherWorker(ctx context.Context, grapher *OllamaGrapher, chunks []Chunk, jobs <-chan int, results []chunkResult, cancel context.CancelFunc, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for idx := range jobs {
-		entities, edges, err := grapher.extractChunk(ctx, chunks[idx])
+func startOllamaGrapherWorker(state ollamaWorkerState) {
+	state.wg.Add(1)
+	go runOllamaGrapherWorker(state)
+}
+
+func runOllamaGrapherWorker(state ollamaWorkerState) {
+	defer state.wg.Done()
+	for idx := range state.jobs {
+		entities, edges, err := state.grapher.extractChunk(state.ctx, state.chunks[idx])
 		if err != nil {
-			results[idx].err = err
-			cancel()
+			state.results[idx].err = err
+			state.cancel()
 			continue
 		}
-		results[idx].entities = entities
-		results[idx].edges = edges
+		state.results[idx].entities = entities
+		state.results[idx].edges = edges
 	}
 }

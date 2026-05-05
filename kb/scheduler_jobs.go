@@ -7,7 +7,7 @@ import (
 )
 
 // Default cron expressions for minnow maintenance jobs. Cadence is part of the
-// job's contract; it is not configurable per-job at runtime.
+// job's contract. It is not configurable per job at runtime.
 const (
 	ShardGCJobID            = "shard-gc"
 	ShardGCJobExpr          = "*/2 * * * *"
@@ -39,60 +39,99 @@ func (l *KB) RegisterDefaultJobs(s *Scheduler) error {
 		return fmt.Errorf("scheduler: nil")
 	}
 
-	if err := s.Register(ShardGCJobID, ShardGCJobExpr, func(ctx context.Context) error {
-		_, err := l.SweepDelayedShardGC(ctx, time.Time{})
-		return err
-	}); err != nil {
+	if err := s.Register(ShardGCJobID, ShardGCJobExpr, l.runShardGCJob); err != nil {
 		return err
 	}
+	return l.registerRemainingDefaultJobs(s)
+}
 
-	if l.EventStore != nil {
-		if err := s.Register(EventReaperJobID, EventReaperJobExpr, func(ctx context.Context) error {
-			_, err := l.EventStore.Requeue(ctx, l.Clock.Now())
-			return err
-		}); err != nil {
-			return err
-		}
-		if err := s.Register(EventCleanupJobID, EventCleanupJobExpr, func(ctx context.Context) error {
-			_, err := l.EventStore.Cleanup(ctx, l.Clock.Now().Add(-EventRetention))
-			return err
-		}); err != nil {
+func (l *KB) registerRemainingDefaultJobs(s *Scheduler) error {
+	if err := l.registerEventJobs(s); err != nil {
+		return err
+	}
+	if err := l.registerInboxJobs(s); err != nil {
+		return err
+	}
+	if err := l.registerMediaJobs(s); err != nil {
+		return err
+	}
+	return l.registerMediaUploadAbortJob(s)
+}
+
+func (l *KB) registerEventJobs(s *Scheduler) error {
+	if l.EventStore == nil {
+		return nil
+	}
+	return firstSchedulerJobErr(
+		func() error { return s.Register(EventReaperJobID, EventReaperJobExpr, l.runEventReaperJob) },
+		func() error { return s.Register(EventCleanupJobID, EventCleanupJobExpr, l.runEventCleanupJob) },
+	)
+}
+
+func (l *KB) registerInboxJobs(s *Scheduler) error {
+	if l.EventInbox == nil {
+		return nil
+	}
+	return s.Register(InboxCleanupJobID, InboxCleanupJobExpr, l.runInboxCleanupJob)
+}
+
+func (l *KB) registerMediaJobs(s *Scheduler) error {
+	if l.MediaStore == nil {
+		return nil
+	}
+	return firstSchedulerJobErr(
+		func() error { return s.Register(MediaGCMarkJobID, MediaGCMarkJobExpr, l.runMediaGCMarkJob) },
+		func() error { return s.Register(MediaGCSweepJobID, MediaGCSweepJobExpr, l.runMediaGCSweepJob) },
+	)
+}
+
+func (l *KB) registerMediaUploadAbortJob(s *Scheduler) error {
+	if l.EventStore == nil || l.BlobStore == nil {
+		return nil
+	}
+	return s.Register(MediaUploadAbortJobID, MediaUploadAbortJobExpr, l.runMediaUploadAbortJob)
+}
+
+func firstSchedulerJobErr(steps ...func() error) error {
+	for _, step := range steps {
+		if err := step(); err != nil {
 			return err
 		}
 	}
-
-	if l.EventInbox != nil {
-		if err := s.Register(InboxCleanupJobID, InboxCleanupJobExpr, func(ctx context.Context) error {
-			_, err := l.EventInbox.Cleanup(ctx, l.Clock.Now().Add(-InboxRetention))
-			return err
-		}); err != nil {
-			return err
-		}
-	}
-
-	if l.MediaStore != nil {
-		if err := s.Register(MediaGCMarkJobID, MediaGCMarkJobExpr, func(ctx context.Context) error {
-			_, err := l.SweepMediaGCMark(ctx, time.Time{})
-			return err
-		}); err != nil {
-			return err
-		}
-		if err := s.Register(MediaGCSweepJobID, MediaGCSweepJobExpr, func(ctx context.Context) error {
-			_, err := l.SweepMediaGCDelete(ctx, time.Time{})
-			return err
-		}); err != nil {
-			return err
-		}
-	}
-
-	if l.EventStore != nil && l.BlobStore != nil {
-		if err := s.Register(MediaUploadAbortJobID, MediaUploadAbortJobExpr, func(ctx context.Context) error {
-			_, err := l.SweepAbortedMediaUploads(ctx, time.Time{})
-			return err
-		}); err != nil {
-			return err
-		}
-	}
-
 	return nil
+}
+
+func (l *KB) runShardGCJob(ctx context.Context) error {
+	_, err := l.SweepDelayedShardGC(ctx, time.Time{})
+	return err
+}
+
+func (l *KB) runEventReaperJob(ctx context.Context) error {
+	_, err := l.EventStore.Requeue(ctx, l.Clock.Now())
+	return err
+}
+
+func (l *KB) runEventCleanupJob(ctx context.Context) error {
+	_, err := l.EventStore.Cleanup(ctx, l.Clock.Now().Add(-EventRetention))
+	return err
+}
+
+func (l *KB) runInboxCleanupJob(ctx context.Context) error {
+	_, err := l.EventInbox.Cleanup(ctx, l.Clock.Now().Add(-InboxRetention))
+	return err
+}
+
+func (l *KB) runMediaGCMarkJob(ctx context.Context) error {
+	_, err := l.SweepMediaGCMark(ctx, time.Time{})
+	return err
+}
+
+func (l *KB) runMediaGCSweepJob(ctx context.Context) error {
+	_, err := l.SweepMediaGCDelete(ctx, time.Time{})
+	return err
+}
+
+func (l *KB) runMediaUploadAbortJob(ctx context.Context) error {
+	_, err := l.SweepAbortedMediaUploads(ctx, time.Time{})
+	return err
 }

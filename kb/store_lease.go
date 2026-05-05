@@ -21,7 +21,7 @@ type WriteLease struct {
 
 // WriteLeaseManager provides distributed coordination for KB writes.
 // Acquire returns ErrWriteLeaseConflict when the lease is already held.
-// Renew extends an existing lease; it returns ErrWriteLeaseConflict if the
+// Renew extends an existing lease. it returns ErrWriteLeaseConflict if the
 // lease has expired or been taken by another writer. Release is always
 // best-effort and must not be skipped on error paths.
 type WriteLeaseManager interface {
@@ -53,7 +53,7 @@ func (l *KB) writeLeaseManagerAndTTL() (WriteLeaseManager, time.Duration) {
 // and lease. The caller must defer leaseManager.Release(context.Background(), lease)
 // regardless of subsequent errors to avoid holding the lease until TTL expiry.
 //
-// Conflicts are logged at WARN level; other errors at ERROR level.
+// Conflicts are logged at WARN level. other errors at ERROR level.
 func (l *KB) AcquireWriteLease(ctx context.Context, kbID string) (WriteLeaseManager, *WriteLease, error) {
 	leaseManager, ttl := l.writeLeaseManagerAndTTL()
 	lease, err := leaseManager.Acquire(ctx, kbID, ttl)

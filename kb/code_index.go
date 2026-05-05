@@ -219,8 +219,8 @@ type resolvedCodeIndexTarget struct {
 
 func (k *KB) IndexCodebase(ctx context.Context, opts CodeIndexOptions) (CodeIndexResult, error) {
 	started := time.Now()
-	if k == nil || k.BlobStore == nil {
-		return CodeIndexResult{}, errors.New("code index: BlobStore not configured")
+	if err := k.validateCodeIndexReady(); err != nil {
+		return CodeIndexResult{}, err
 	}
 	target, err := resolveCodeIndexTarget(opts)
 	if err != nil {
@@ -236,12 +236,12 @@ func (k *KB) IndexCodebase(ctx context.Context, opts CodeIndexOptions) (CodeInde
 	if err != nil {
 		return CodeIndexResult{}, err
 	}
-	if target.Options.RequireConfirm && !target.Options.ConfirmedLarge && len(scanned) > target.Options.LargeRepoFiles {
-		return CodeIndexResult{}, fmt.Errorf("%w: scanned %d files exceeds threshold %d; rerun with confirmation or lower the threshold", ErrCodeIndexRequiresConfirmation, len(scanned), target.Options.LargeRepoFiles)
+	if err := validateCodeIndexConfirmation(target.Options, len(scanned)); err != nil {
+		return CodeIndexResult{}, err
 	}
 
 	result, deleteIDs, nextFiles, nextChunks := diffCodeIndexManifest(target, manifest, scanned, skipped)
-	if err := k.publishCodeIndexChanges(ctx, target, scanned, nextFiles, nextChunks, &result); err != nil {
+	if err := k.publishCodeIndexChanges(ctx, target, codeIndexPublishState{scanned: scanned, nextFiles: nextFiles, nextChunks: nextChunks, result: &result}); err != nil {
 		return CodeIndexResult{}, err
 	}
 	if err := k.deleteRemovedCodeChunks(ctx, target.KBID, deleteIDs); err != nil {
@@ -252,6 +252,20 @@ func (k *KB) IndexCodebase(ctx context.Context, opts CodeIndexOptions) (CodeInde
 	}
 	slog.Default().InfoContext(ctx, "code index complete", "kb_id", target.KBID, "indexed_files", result.IndexedFiles, "unchanged_files", result.UnchangedFiles, "chunks_indexed", result.ChunksIndexed, "total_duration_ms", time.Since(started).Milliseconds())
 	return result, nil
+}
+
+func (k *KB) validateCodeIndexReady() error {
+	if k == nil || k.BlobStore == nil {
+		return errors.New("code index: BlobStore not configured")
+	}
+	return nil
+}
+
+func validateCodeIndexConfirmation(opts CodeIndexOptions, scanned int) error {
+	if opts.RequireConfirm && !opts.ConfirmedLarge && scanned > opts.LargeRepoFiles {
+		return fmt.Errorf("%w: scanned %d files exceeds threshold %d; rerun with confirmation or lower the threshold", ErrCodeIndexRequiresConfirmation, scanned, opts.LargeRepoFiles)
+	}
+	return nil
 }
 
 func resolveCodeIndexTarget(opts CodeIndexOptions) (resolvedCodeIndexTarget, error) {
@@ -269,27 +283,44 @@ func resolveCodeIndexTarget(opts CodeIndexOptions) (resolvedCodeIndexTarget, err
 		return resolvedCodeIndexTarget{}, err
 	}
 	entry, hasEntry := registry.Indexes[opts.IndexKey]
+	root = resolvedCodeIndexRoot(root, repoRoot, entry, hasEntry)
+	kbID := resolvedCodeIndexKBID(opts, entry, hasEntry)
+	description := resolvedCodeIndexDescription(opts, entry, hasEntry, root)
+	opts.IncludeUntracked = resolvedIncludeUntracked(opts, entry, hasEntry)
+	return resolvedCodeIndexTarget{Root: root, RepoRoot: repoRoot, RegistryRoot: repoRoot, RepoID: codeRepoID(repoRoot), KBID: kbID, IndexKey: opts.IndexKey, Description: description, Registry: registry, Options: opts}, nil
+}
+
+func resolvedCodeIndexRoot(root string, repoRoot string, entry CodebaseIndexRegistryEntry, hasEntry bool) string {
 	if hasEntry {
-		root = rootFromRegistryEntry(repoRoot, entry)
+		return rootFromRegistryEntry(repoRoot, entry)
 	}
+	return root
+}
+
+func resolvedCodeIndexKBID(opts CodeIndexOptions, entry CodebaseIndexRegistryEntry, hasEntry bool) string {
 	kbID := strings.TrimSpace(opts.KBID)
 	if kbID == "" && hasEntry {
 		kbID = entry.KBID
 	}
 	if kbID == "" {
-		kbID = defaultKBIDForIndexKey(opts.IndexKey)
+		return defaultKBIDForIndexKey(opts.IndexKey)
 	}
+	return kbID
+}
+
+func resolvedCodeIndexDescription(opts CodeIndexOptions, entry CodebaseIndexRegistryEntry, hasEntry bool, root string) string {
 	description := strings.TrimSpace(opts.Description)
 	if description == "" && hasEntry {
 		description = entry.Description
 	}
 	if description == "" {
-		description = defaultCodeIndexDescription(root, opts.IndexKey)
+		return defaultCodeIndexDescription(root, opts.IndexKey)
 	}
-	if !opts.IncludeUntracked && hasEntry && entry.IncludeUntracked {
-		opts.IncludeUntracked = true
-	}
-	return resolvedCodeIndexTarget{Root: root, RepoRoot: repoRoot, RegistryRoot: repoRoot, RepoID: codeRepoID(repoRoot), KBID: kbID, IndexKey: opts.IndexKey, Description: description, Registry: registry, Options: opts}, nil
+	return description
+}
+
+func resolvedIncludeUntracked(opts CodeIndexOptions, entry CodebaseIndexRegistryEntry, hasEntry bool) bool {
+	return opts.IncludeUntracked || (hasEntry && entry.IncludeUntracked)
 }
 
 func (k *KB) loadPreparedCodeIndexManifest(ctx context.Context, kbID string) (codeIndexManifest, string, error) {
@@ -345,14 +376,21 @@ func copyExistingCodeChunks(dst map[string]CodeChunkMetadata, src map[string]Cod
 	}
 }
 
-func (k *KB) publishCodeIndexChanges(ctx context.Context, target resolvedCodeIndexTarget, scanned []codeScannedFile, nextFiles map[string]codeIndexedFile, nextChunks map[string]CodeChunkMetadata, result *CodeIndexResult) error {
+type codeIndexPublishState struct {
+	scanned    []codeScannedFile
+	nextFiles  map[string]codeIndexedFile
+	nextChunks map[string]CodeChunkMetadata
+	result     *CodeIndexResult
+}
+
+func (k *KB) publishCodeIndexChanges(ctx context.Context, target resolvedCodeIndexTarget, state codeIndexPublishState) error {
 	streamStarted := time.Now()
-	streamer := newCodeDocumentStreamer(k, target.Root, target.RepoID, scanned, target.Options, nextFiles, nextChunks, result)
+	streamer := newCodeDocumentStreamer(k, target, state)
 	graphEnabled := false
 	if err := k.publishPreparedStream(ctx, PreparedStreamRequest{KBID: target.KBID, Options: UpsertDocsOptions{GraphEnabled: &graphEnabled}, Next: streamer.Next}); err != nil {
 		return err
 	}
-	slog.Default().InfoContext(ctx, "code index stream publish complete", "kb_id", target.KBID, "indexed_files", result.IndexedFiles, "chunks_indexed", result.ChunksIndexed, "duration_ms", time.Since(streamStarted).Milliseconds())
+	slog.Default().InfoContext(ctx, "code index stream publish complete", "kb_id", target.KBID, "indexed_files", state.result.IndexedFiles, "chunks_indexed", state.result.ChunksIndexed, "duration_ms", time.Since(streamStarted).Milliseconds())
 	return nil
 }
 
@@ -384,18 +422,11 @@ func (k *KB) embedCodeDocuments(ctx context.Context, docs []Document, batchSize 
 	if len(docs) == 0 {
 		return nil, nil
 	}
-	out := make([]EmbeddedDocument, 0, len(docs))
 	batcher, ok := k.Embedder.(BatchEmbedder)
 	if !ok {
-		for _, doc := range docs {
-			vec, err := k.Embed(ctx, doc.Text)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, EmbeddedDocument{ID: doc.ID, Text: doc.Text, Metadata: doc.Metadata, Embedding: vec})
-		}
-		return out, nil
+		return k.embedCodeDocumentsOneByOne(ctx, docs)
 	}
+	out := make([]EmbeddedDocument, 0, len(docs))
 	if batchSize <= 0 {
 		batchSize = DefaultCodeEmbedBatchSize
 	}
@@ -404,10 +435,7 @@ func (k *KB) embedCodeDocuments(ctx context.Context, docs []Document, batchSize 
 		if end > len(docs) {
 			end = len(docs)
 		}
-		inputs := make([]string, end-start)
-		for i, doc := range docs[start:end] {
-			inputs[i] = doc.Text
-		}
+		inputs := codeDocumentTexts(docs[start:end])
 		vectors, err := batcher.EmbedBatch(ctx, inputs)
 		if err != nil {
 			return nil, err
@@ -415,11 +443,37 @@ func (k *KB) embedCodeDocuments(ctx context.Context, docs []Document, batchSize 
 		if len(vectors) != len(inputs) {
 			return nil, fmt.Errorf("batch embed returned %d vectors for %d code chunks", len(vectors), len(inputs))
 		}
-		for i, doc := range docs[start:end] {
-			out = append(out, EmbeddedDocument{ID: doc.ID, Text: doc.Text, Metadata: doc.Metadata, Embedding: vectors[i]})
-		}
+		out = append(out, embeddedCodeDocuments(docs[start:end], vectors)...)
 	}
 	return out, nil
+}
+
+func (k *KB) embedCodeDocumentsOneByOne(ctx context.Context, docs []Document) ([]EmbeddedDocument, error) {
+	out := make([]EmbeddedDocument, 0, len(docs))
+	for _, doc := range docs {
+		vec, err := k.Embed(ctx, doc.Text)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, EmbeddedDocument{ID: doc.ID, Text: doc.Text, Metadata: doc.Metadata, Embedding: vec})
+	}
+	return out, nil
+}
+
+func codeDocumentTexts(docs []Document) []string {
+	inputs := make([]string, len(docs))
+	for i, doc := range docs {
+		inputs[i] = doc.Text
+	}
+	return inputs
+}
+
+func embeddedCodeDocuments(docs []Document, vectors [][]float32) []EmbeddedDocument {
+	out := make([]EmbeddedDocument, 0, len(docs))
+	for i, doc := range docs {
+		out = append(out, EmbeddedDocument{ID: doc.ID, Text: doc.Text, Metadata: doc.Metadata, Embedding: vectors[i]})
+	}
+	return out
 }
 
 type codeDocumentStreamer struct {
@@ -436,35 +490,16 @@ type codeDocumentStreamer struct {
 	pending    []Document
 }
 
-func newCodeDocumentStreamer(k *KB, root, repoID string, files []codeScannedFile, opts CodeIndexOptions, nextFiles map[string]codeIndexedFile, nextChunks map[string]CodeChunkMetadata, result *CodeIndexResult) *codeDocumentStreamer {
-	return &codeDocumentStreamer{k: k, root: root, repoID: repoID, files: files, opts: opts, policy: codeIndexResourcePolicyFromOptions(opts), nextFiles: nextFiles, nextChunks: nextChunks, result: result}
+func newCodeDocumentStreamer(k *KB, target resolvedCodeIndexTarget, state codeIndexPublishState) *codeDocumentStreamer {
+	return &codeDocumentStreamer{k: k, root: target.Root, repoID: target.RepoID, files: state.scanned, opts: target.Options, policy: codeIndexResourcePolicyFromOptions(target.Options), nextFiles: state.nextFiles, nextChunks: state.nextChunks, result: state.result}
 }
 
 func (s *codeDocumentStreamer) Next(ctx context.Context) ([]EmbeddedDocument, error) {
 	if err := s.policy.Check(ctx); err != nil {
 		return nil, err
 	}
-	for len(s.pending) < s.policy.EmbedBatchSize && documentsTextBytes(s.pending) < s.policy.MaxBatchBytes && s.filePos < len(s.files) {
-		file := s.files[s.filePos]
-		s.filePos++
-		if _, ok := s.nextFiles[file.RelPath]; ok {
-			continue
-		}
-		docs, metas, err := buildCodeDocuments(ctx, s.root, s.repoID, file, s.opts)
-		if err != nil {
-			return nil, err
-		}
-		chunkIDs := make([]string, 0, len(docs))
-		for _, doc := range docs {
-			chunkIDs = append(chunkIDs, doc.ID)
-			s.pending = append(s.pending, doc)
-		}
-		for _, meta := range metas {
-			s.nextChunks[meta.ID] = meta
-		}
-		s.nextFiles[file.RelPath] = codeIndexedFile{Path: file.RelPath, Hash: file.Hash, SizeBytes: file.SizeBytes, Language: file.Language, ChunkIDs: chunkIDs}
-		s.result.IndexedFiles++
-		s.result.ChunksIndexed += len(docs)
+	if err := s.fillPending(ctx); err != nil {
+		return nil, err
 	}
 	if len(s.pending) == 0 {
 		return nil, nil
@@ -488,6 +523,43 @@ func (s *codeDocumentStreamer) Next(ctx context.Context) ([]EmbeddedDocument, er
 		return nil, err
 	}
 	return embedded, nil
+}
+
+func (s *codeDocumentStreamer) fillPending(ctx context.Context) error {
+	for s.shouldReadMoreFiles() {
+		file := s.files[s.filePos]
+		s.filePos++
+		if _, ok := s.nextFiles[file.RelPath]; ok {
+			continue
+		}
+		if err := s.addCodeFile(ctx, file); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *codeDocumentStreamer) shouldReadMoreFiles() bool {
+	return len(s.pending) < s.policy.EmbedBatchSize && documentsTextBytes(s.pending) < s.policy.MaxBatchBytes && s.filePos < len(s.files)
+}
+
+func (s *codeDocumentStreamer) addCodeFile(ctx context.Context, file codeScannedFile) error {
+	docs, metas, err := buildCodeDocuments(ctx, s.root, s.repoID, file, s.opts)
+	if err != nil {
+		return err
+	}
+	chunkIDs := make([]string, 0, len(docs))
+	for _, doc := range docs {
+		chunkIDs = append(chunkIDs, doc.ID)
+		s.pending = append(s.pending, doc)
+	}
+	for _, meta := range metas {
+		s.nextChunks[meta.ID] = meta
+	}
+	s.nextFiles[file.RelPath] = codeIndexedFile{Path: file.RelPath, Hash: file.Hash, SizeBytes: file.SizeBytes, Language: file.Language, ChunkIDs: chunkIDs}
+	s.result.IndexedFiles++
+	s.result.ChunksIndexed += len(docs)
+	return nil
 }
 
 func (k *KB) publishCodeDocumentStream(ctx context.Context, kbID string, docs []Document, opts UpsertDocsOptions) error {

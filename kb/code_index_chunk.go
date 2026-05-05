@@ -27,7 +27,7 @@ func buildCodeDocuments(ctx context.Context, root, repoID string, file codeScann
 	docs := make([]Document, 0, len(chunks))
 	metas := make([]CodeChunkMetadata, 0, len(chunks))
 	for _, chunk := range chunks {
-		id := stableCodeChunkID(repoID, file.RelPath, chunk.StartLine, chunk.EndLine, file.Hash, chunk.Text)
+		id := stableCodeChunkID(codeChunkIDInput{repoID: repoID, relPath: file.RelPath, startLine: chunk.StartLine, endLine: chunk.EndLine, fileHash: file.Hash, text: chunk.Text})
 		meta := CodeChunkMetadata{ID: id, Path: file.RelPath, Hash: file.Hash, Language: file.Language, Symbol: chunk.Symbol, Kind: chunk.Kind, StartLine: chunk.StartLine, EndLine: chunk.EndLine}
 		docs = append(docs, Document{ID: id, Text: formatCodeChunkText(file.RelPath, file.Language, chunk), Metadata: map[string]any{"code": meta}})
 		metas = append(metas, meta)
@@ -115,57 +115,82 @@ func lineChunks(lines []string, chunkSize, overlap int, symbol, kind string) []c
 	start := 0
 	for start < len(lines) {
 		if len(lines[start])+1 > chunkSize {
-			chunks = append(chunks, splitLongLineChunks(lines[start], start+1, chunkSize, overlap, symbol, kind)...)
+			chunks = append(chunks, splitLongLineChunks(longLineChunkInput{line: lines[start], lineNo: start + 1, chunkSize: chunkSize, overlap: overlap, symbol: symbol, kind: kind})...)
 			start++
 			continue
 		}
-		end := start
-		length := 0
-		for end < len(lines) {
-			lineLen := len(lines[end]) + 1
-			if end > start && length+lineLen > chunkSize {
-				break
-			}
-			length += lineLen
-			end++
-		}
-		if end == start {
-			end++
-		}
-		text := strings.TrimSpace(strings.Join(lines[start:end], "\n"))
-		if text != "" {
-			chunks = append(chunks, codeChunk{Text: text, Symbol: symbol, Kind: kind, StartLine: start + 1, EndLine: end})
+		end := codeChunkEnd(lines, start, chunkSize)
+		if chunk := codeChunkFromLines(lines, start, end, symbol, kind); chunk.Text != "" {
+			chunks = append(chunks, chunk)
 		}
 		if end >= len(lines) {
 			break
 		}
-		back := overlapLines(lines[start:end], overlap)
-		start = end - back
-		if start < 0 || start >= end {
-			start = end
-		}
+		start = nextCodeChunkStart(lines[start:end], end, overlap)
 	}
 	return chunks
 }
 
-func splitLongLineChunks(line string, lineNo, chunkSize, overlap int, symbol, kind string) []codeChunk {
-	line = strings.TrimSpace(line)
+func codeChunkEnd(lines []string, start int, chunkSize int) int {
+	end := start
+	length := 0
+	for end < len(lines) {
+		lineLen := len(lines[end]) + 1
+		if end > start && length+lineLen > chunkSize {
+			break
+		}
+		length += lineLen
+		end++
+	}
+	if end == start {
+		return end + 1
+	}
+	return end
+}
+
+func codeChunkFromLines(lines []string, start int, end int, symbol string, kind string) codeChunk {
+	text := strings.TrimSpace(strings.Join(lines[start:end], "\n"))
+	if text == "" {
+		return codeChunk{}
+	}
+	return codeChunk{Text: text, Symbol: symbol, Kind: kind, StartLine: start + 1, EndLine: end}
+}
+
+func nextCodeChunkStart(window []string, end int, overlap int) int {
+	start := end - overlapLines(window, overlap)
+	if start < 0 || start >= end {
+		return end
+	}
+	return start
+}
+
+type longLineChunkInput struct {
+	line      string
+	lineNo    int
+	chunkSize int
+	overlap   int
+	symbol    string
+	kind      string
+}
+
+func splitLongLineChunks(input longLineChunkInput) []codeChunk {
+	line := strings.TrimSpace(input.line)
 	if line == "" {
 		return nil
 	}
-	step := chunkSize - overlap
+	step := input.chunkSize - input.overlap
 	if step <= 0 {
-		step = chunkSize
+		step = input.chunkSize
 	}
 	var chunks []codeChunk
 	for start := 0; start < len(line); {
-		end := start + chunkSize
+		end := start + input.chunkSize
 		if end > len(line) {
 			end = len(line)
 		}
 		text := strings.TrimSpace(line[start:end])
 		if text != "" {
-			chunks = append(chunks, codeChunk{Text: text, Symbol: symbol, Kind: kind, StartLine: lineNo, EndLine: lineNo})
+			chunks = append(chunks, codeChunk{Text: text, Symbol: input.symbol, Kind: input.kind, StartLine: input.lineNo, EndLine: input.lineNo})
 		}
 		if end >= len(line) {
 			break
@@ -221,13 +246,22 @@ func formatCodeChunkText(path, language string, chunk codeChunk) string {
 	return b.String()
 }
 
-func stableCodeChunkID(repoID, relPath string, startLine, endLine int, fileHash, text string) string {
-	sum := sha256.Sum256([]byte(repoID + "\x00" + relPath + "\x00" + fmt.Sprint(startLine) + "\x00" + fmt.Sprint(endLine) + "\x00" + fileHash + "\x00" + text))
-	pathToken := sanitizeCodeIDToken(relPath)
+type codeChunkIDInput struct {
+	repoID    string
+	relPath   string
+	startLine int
+	endLine   int
+	fileHash  string
+	text      string
+}
+
+func stableCodeChunkID(input codeChunkIDInput) string {
+	sum := sha256.Sum256([]byte(input.repoID + "\x00" + input.relPath + "\x00" + fmt.Sprint(input.startLine) + "\x00" + fmt.Sprint(input.endLine) + "\x00" + input.fileHash + "\x00" + input.text))
+	pathToken := sanitizeCodeIDToken(input.relPath)
 	if len(pathToken) > 80 {
 		pathToken = pathToken[len(pathToken)-80:]
 	}
-	return fmt.Sprintf("code-%s-%d-%d-%s", pathToken, startLine, endLine, hex.EncodeToString(sum[:8]))
+	return fmt.Sprintf("code-%s-%d-%d-%s", pathToken, input.startLine, input.endLine, hex.EncodeToString(sum[:8]))
 }
 
 func sanitizeCodeIDToken(s string) string {

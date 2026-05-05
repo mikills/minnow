@@ -571,7 +571,7 @@ func testKBUpsertEmbedOnce(t *testing.T) {
 		{ID: "b", Text: "second doc"},
 	})
 	require.NoError(t, err)
-	// The mock format receives the docs; the KB layer does not embed on its own.
+	// The mock format receives the docs. the KB layer does not embed on its own.
 	// countingEmbedder.Calls() == 0 because embedding is the format's responsibility.
 	// We verify the upsert went through without error.
 }

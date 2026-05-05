@@ -335,7 +335,7 @@ func (s *MongoEventStore) FindByCausation(ctx context.Context, kind EventKind, s
 
 // ListUnfinishedBefore returns up to limit events (default 1000), sorted
 // by created_at then _id. A non-empty continuation token means more results
-// remain; pass it as `after` to continue.
+// remain. pass it as `after` to continue.
 func (s *MongoEventStore) ListUnfinishedBefore(ctx context.Context, kind EventKind, before time.Time, after string, limit int) ([]KBEvent, string, error) {
 	if limit <= 0 {
 		limit = 1000

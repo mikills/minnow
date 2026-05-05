@@ -12,9 +12,21 @@ import (
 )
 
 func registerMediaRoutes(e *echo.Echo, deps Dependencies) {
-	e.POST("/rag/media/upload", func(c echo.Context) error { return handleMediaUpload(c, deps) })
-	e.GET("/rag/media/list", func(c echo.Context) error { return handleMediaList(c, deps) })
-	e.GET("/rag/media/:id", func(c echo.Context) error { return handleMediaGet(c, deps) })
+	e.POST("/rag/media/upload", mediaUploadHandler(deps))
+	e.GET("/rag/media/list", mediaListHandler(deps))
+	e.GET("/rag/media/:id", mediaGetHandler(deps))
+}
+
+func mediaUploadHandler(deps Dependencies) echo.HandlerFunc {
+	return func(c echo.Context) error { return handleMediaUpload(c, deps) }
+}
+
+func mediaListHandler(deps Dependencies) echo.HandlerFunc {
+	return func(c echo.Context) error { return handleMediaList(c, deps) }
+}
+
+func mediaGetHandler(deps Dependencies) echo.HandlerFunc {
+	return func(c echo.Context) error { return handleMediaGet(c, deps) }
 }
 
 func handleMediaUpload(c echo.Context, deps Dependencies) error {

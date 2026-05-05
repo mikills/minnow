@@ -18,24 +18,24 @@ func TestMongoManifestStore(t *testing.T) {
 	})
 
 	t.Run("nil collection returns ErrInvalidManifestStore", func(t *testing.T) {
-	store := NewMongoManifestStore(nil)
-	ctx := context.Background()
+		store := NewMongoManifestStore(nil)
+		ctx := context.Background()
 
-	tests := []struct {
-		name string
-		fn   func() error
-	}{
-		{"Get", func() error { _, err := store.Get(ctx, "kb"); return err }},
-		{"HeadVersion", func() error { _, err := store.HeadVersion(ctx, "kb"); return err }},
-		{"UpsertIfMatch", func() error { _, err := store.UpsertIfMatch(ctx, "kb", SnapshotShardManifest{}, ""); return err }},
-		{"Delete", func() error { return store.Delete(ctx, "kb") }},
-	}
+		tests := []struct {
+			name string
+			fn   func() error
+		}{
+			{"Get", func() error { _, err := store.Get(ctx, "kb"); return err }},
+			{"HeadVersion", func() error { _, err := store.HeadVersion(ctx, "kb"); return err }},
+			{"UpsertIfMatch", func() error { _, err := store.UpsertIfMatch(ctx, "kb", SnapshotShardManifest{}, ""); return err }},
+			{"Delete", func() error { return store.Delete(ctx, "kb") }},
+		}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.ErrorIs(t, tt.fn(), ErrInvalidManifestStore)
-		})
-	}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				require.ErrorIs(t, tt.fn(), ErrInvalidManifestStore)
+			})
+		}
 	})
 }
 

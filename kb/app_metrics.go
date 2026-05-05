@@ -311,7 +311,7 @@ func (m *InMemAppMetrics) RecordMediaUpload(kbID, contentType string, sizeBytes 
 
 // normalizeContentType maps an arbitrary user-supplied Content-Type header
 // down to a fixed allowlist so metric keys cannot be used as a cardinality
-// attack vector. Charset / boundary parameters after ";" are stripped before
+// attack vector. Charset / boundary parameters after "." are stripped before
 // matching.
 func normalizeContentType(ct string) string {
 	ct = strings.SplitN(strings.TrimSpace(ct), ";", 2)[0]

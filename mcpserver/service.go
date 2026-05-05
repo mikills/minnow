@@ -97,39 +97,55 @@ func registerTools(server *mcp.Server, s *Service) {
 	mcp.AddTool(server, &mcp.Tool{Name: "minnow_operation_status", Description: "Read the status, stages, and terminal event for an async Minnow operation."}, s.operationStatus)
 	mcp.AddTool(server, &mcp.Tool{Name: "minnow_list_media", Description: "List media metadata for a knowledge base when media is configured."}, s.listMedia)
 	mcp.AddTool(server, &mcp.Tool{Name: "minnow_get_media", Description: "Get media metadata by media ID when media is configured."}, s.getMedia)
+	registerCodeTools(server, s)
+	registerIndexingTools(server, s, cfg)
+	registerDestructiveTools(server, s, cfg)
+	registerAdminTools(server, s, cfg)
+}
+
+func registerCodeTools(server *mcp.Server, s *Service) {
 	if s.CodeIndexStatus != nil {
 		mcp.AddTool(server, &mcp.Tool{Name: "minnow_code_index_status", Description: "Read codebase indexing status for a Minnow knowledge base."}, s.codeIndexStatus)
 	}
 	if s.SearchCode != nil {
 		mcp.AddTool(server, &mcp.Tool{Name: "minnow_code_search", Description: "Search indexed code chunks with optional path and language filters."}, s.codeSearch)
 	}
+}
 
-	if !cfg.ReadOnly && cfg.AllowIndexing {
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_ingest_documents_async", Description: "Submit text documents for asynchronous indexing. Returns an operation ID."}, s.ingestAsync)
-		if s.IndexCodebase != nil {
-			mcp.AddTool(server, &mcp.Tool{Name: "minnow_index_codebase", Description: "Index or refresh a local codebase incrementally for a Minnow knowledge base."}, s.indexCodebase)
-		}
-		if cfg.AllowSyncIndexing {
-			mcp.AddTool(server, &mcp.Tool{Name: "minnow_ingest_documents_sync", Description: "Submit text documents for indexing and wait for publish up to a bounded timeout."}, s.ingestSync)
-		}
+func registerIndexingTools(server *mcp.Server, s *Service, cfg Config) {
+	if cfg.ReadOnly || !cfg.AllowIndexing {
+		return
 	}
+	mcp.AddTool(server, &mcp.Tool{Name: "minnow_ingest_documents_async", Description: "Submit text documents for asynchronous indexing. Returns an operation ID."}, s.ingestAsync)
+	if s.IndexCodebase != nil {
+		mcp.AddTool(server, &mcp.Tool{Name: "minnow_index_codebase", Description: "Index or refresh a local codebase incrementally for a Minnow knowledge base."}, s.indexCodebase)
+	}
+	if cfg.AllowSyncIndexing {
+		mcp.AddTool(server, &mcp.Tool{Name: "minnow_ingest_documents_sync", Description: "Submit text documents for indexing and wait for publish up to a bounded timeout."}, s.ingestSync)
+	}
+}
 
+func registerDestructiveTools(server *mcp.Server, s *Service, cfg Config) {
+	if cfg.ReadOnly || !cfg.AllowDestructive {
+		return
+	}
+	mcp.AddTool(server, &mcp.Tool{Name: "minnow_delete_media", Description: "Destructive tool: tombstone media by media ID."}, s.deleteMedia)
+	mcp.AddTool(server, &mcp.Tool{Name: "minnow_delete_knowledge_base", Description: "Destructive tool: delete a knowledge base manifest, shards, cache, and media metadata."}, s.deleteKnowledgeBase)
+}
+
+func registerAdminTools(server *mcp.Server, s *Service, cfg Config) {
+	if !cfg.AllowAdmin {
+		return
+	}
+	mcp.AddTool(server, &mcp.Tool{Name: "minnow_code_hooks_status", Description: "Admin tool: inspect Minnow git hook installation status for a repository."}, s.codeHooksStatus)
+	if !cfg.ReadOnly {
+		mcp.AddTool(server, &mcp.Tool{Name: "minnow_install_code_hooks", Description: "Admin tool: install optional Minnow git hooks for incremental codebase indexing."}, s.installCodeHooks)
+		mcp.AddTool(server, &mcp.Tool{Name: "minnow_uninstall_code_hooks", Description: "Admin tool: uninstall Minnow git hooks from a repository."}, s.uninstallCodeHooks)
+	}
+	mcp.AddTool(server, &mcp.Tool{Name: "minnow_sweep_cache", Description: "Admin tool: run policy-based cache eviction."}, s.sweepCache)
+	mcp.AddTool(server, &mcp.Tool{Name: "minnow_force_compaction", Description: "Admin tool: trigger compaction for a knowledge base when compaction debt exists."}, s.forceCompaction)
 	if !cfg.ReadOnly && cfg.AllowDestructive {
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_delete_media", Description: "Destructive tool: tombstone media by media ID."}, s.deleteMedia)
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_delete_knowledge_base", Description: "Destructive tool: delete a knowledge base manifest, shards, cache, and media metadata."}, s.deleteKnowledgeBase)
-	}
-
-	if cfg.AllowAdmin {
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_code_hooks_status", Description: "Admin tool: inspect Minnow git hook installation status for a repository."}, s.codeHooksStatus)
-		if !cfg.ReadOnly {
-			mcp.AddTool(server, &mcp.Tool{Name: "minnow_install_code_hooks", Description: "Admin tool: install optional Minnow git hooks for incremental codebase indexing."}, s.installCodeHooks)
-			mcp.AddTool(server, &mcp.Tool{Name: "minnow_uninstall_code_hooks", Description: "Admin tool: uninstall Minnow git hooks from a repository."}, s.uninstallCodeHooks)
-		}
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_sweep_cache", Description: "Admin tool: run policy-based cache eviction."}, s.sweepCache)
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_force_compaction", Description: "Admin tool: trigger compaction for a knowledge base when compaction debt exists."}, s.forceCompaction)
-		if !cfg.ReadOnly && cfg.AllowDestructive {
-			mcp.AddTool(server, &mcp.Tool{Name: "minnow_clear_cache", Description: "Admin destructive tool: clear all local cache entries."}, s.clearCache)
-		}
+		mcp.AddTool(server, &mcp.Tool{Name: "minnow_clear_cache", Description: "Admin destructive tool: clear all local cache entries."}, s.clearCache)
 	}
 }
 
@@ -157,14 +173,8 @@ type resultOut struct {
 
 func (s *Service) query(ctx context.Context, _ *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, queryOutput, error) {
 	kbID := defaultKBID(in.KBID)
-	if strings.TrimSpace(in.Query) == "" {
-		return nil, queryOutput{}, fmt.Errorf("query is required")
-	}
-	if in.K <= 0 {
-		return nil, queryOutput{}, fmt.Errorf("k must be > 0")
-	}
-	if in.K > queryToolMaxK {
-		return nil, queryOutput{}, fmt.Errorf("k must be <= %d", queryToolMaxK)
+	if err := validateQueryInput(in); err != nil {
+		return nil, queryOutput{}, err
 	}
 	mode, modeName, err := parseSearchMode(in.SearchMode)
 	if err != nil {
@@ -181,21 +191,42 @@ func (s *Service) query(ctx context.Context, _ *mcp.CallToolRequest, in queryInp
 	if err != nil {
 		return nil, queryOutput{}, err
 	}
-	out := queryOutput{KBID: kbID, SearchMode: modeName, Results: make([]resultOut, 0, len(results))}
-	for _, r := range results {
-		item := resultOut{ID: r.ID, Content: r.Content, Distance: r.Distance}
-		if mode != kb.SearchModeVector {
-			score := r.Score
-			graphScore := r.GraphScore
-			item.Score = &score
-			item.GraphScore = &graphScore
-		}
-		if len(r.MediaRefs) > 0 {
-			item.MediaRefs = r.MediaRefs
-		}
-		out.Results = append(out.Results, item)
+	return nil, queryOutput{KBID: kbID, SearchMode: modeName, Results: resultOutputs(results, mode)}, nil
+}
+
+func validateQueryInput(in queryInput) error {
+	if strings.TrimSpace(in.Query) == "" {
+		return fmt.Errorf("query is required")
 	}
-	return nil, out, nil
+	if in.K <= 0 {
+		return fmt.Errorf("k must be > 0")
+	}
+	if in.K > queryToolMaxK {
+		return fmt.Errorf("k must be <= %d", queryToolMaxK)
+	}
+	return nil
+}
+
+func resultOutputs(results []kb.ExpandedResult, mode kb.SearchMode) []resultOut {
+	out := make([]resultOut, 0, len(results))
+	for _, result := range results {
+		out = append(out, resultOutput(result, mode))
+	}
+	return out
+}
+
+func resultOutput(result kb.ExpandedResult, mode kb.SearchMode) resultOut {
+	item := resultOut{ID: result.ID, Content: result.Content, Distance: result.Distance}
+	if mode != kb.SearchModeVector {
+		score := result.Score
+		graphScore := result.GraphScore
+		item.Score = &score
+		item.GraphScore = &graphScore
+	}
+	if len(result.MediaRefs) > 0 {
+		item.MediaRefs = result.MediaRefs
+	}
+	return item
 }
 
 type ingestDocInput struct {
@@ -376,7 +407,7 @@ type ingestOutput struct {
 }
 
 func (s *Service) ingestAsync(ctx context.Context, _ *mcp.CallToolRequest, in ingestInput) (*mcp.CallToolResult, ingestOutput, error) {
-	out, err := s.submitIngest(ctx, in.KBID, in.Documents, in.ChunkSize, in.GraphEnabled, in.IdempotencyKey, in.CorrelationID)
+	out, err := s.submitIngest(ctx, ingestSubmission{kbID: in.KBID, documents: in.Documents, chunkSize: in.ChunkSize, graphEnabled: in.GraphEnabled, idempotencyKey: in.IdempotencyKey, correlationID: in.CorrelationID})
 	return nil, out, err
 }
 
@@ -384,36 +415,21 @@ func (s *Service) ingestSync(ctx context.Context, _ *mcp.CallToolRequest, in ing
 	if !s.Config.AllowSyncIndexing {
 		return nil, ingestOutput{}, fmt.Errorf("sync indexing tools are disabled")
 	}
-	out, err := s.submitIngest(ctx, in.KBID, in.Documents, in.ChunkSize, in.GraphEnabled, in.IdempotencyKey, in.CorrelationID)
+	out, err := s.submitIngest(ctx, ingestSubmission{kbID: in.KBID, documents: in.Documents, chunkSize: in.ChunkSize, graphEnabled: in.GraphEnabled, idempotencyKey: in.IdempotencyKey, correlationID: in.CorrelationID})
 	if err != nil {
 		return nil, ingestOutput{}, err
 	}
-	timeout := s.Config.DefaultSyncTimeout
-	if in.TimeoutMS > 0 {
-		timeout = time.Duration(in.TimeoutMS) * time.Millisecond
-	}
-	if timeout > s.Config.MaxSyncTimeout {
-		timeout = s.Config.MaxSyncTimeout
-	}
+	timeout := s.syncIngestTimeout(in.TimeoutMS)
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(syncIngestPollInterval)
 	defer ticker.Stop()
 	for {
-		status, statusErr := s.operationStatusOutput(ctx, out.EventID)
-		switch {
-		case statusErr == nil:
-			out.Stages = status.Stages
-			out.Terminal = status.Terminal
-			if status.Terminal != nil {
-				out.Status = "completed"
-				return nil, out, nil
-			}
-		case errors.Is(statusErr, kb.ErrEventNotFound):
-			// Event not yet visible (eventually-consistent inbox); keep polling.
-		default:
-			// Misconfiguration or backend failure: surface immediately rather
-			// than spin until MaxSyncTimeout.
+		completed, statusErr := s.refreshSyncIngestStatus(ctx, &out)
+		if statusErr != nil {
 			return nil, ingestOutput{}, statusErr
+		}
+		if completed {
+			return nil, out, nil
 		}
 		if time.Now().After(deadline) {
 			out.TimedOut = true
@@ -430,35 +446,59 @@ func (s *Service) ingestSync(ctx context.Context, _ *mcp.CallToolRequest, in ing
 
 const syncIngestPollInterval = 100 * time.Millisecond
 
-func (s *Service) submitIngest(ctx context.Context, rawKBID string, docsIn []ingestDocInput, chunkSize int, graphEnabled bool, idem, corr string) (ingestOutput, error) {
+func (s *Service) syncIngestTimeout(timeoutMS int64) time.Duration {
+	timeout := s.Config.DefaultSyncTimeout
+	if timeoutMS > 0 {
+		timeout = time.Duration(timeoutMS) * time.Millisecond
+	}
+	if timeout > s.Config.MaxSyncTimeout {
+		return s.Config.MaxSyncTimeout
+	}
+	return timeout
+}
+
+func (s *Service) refreshSyncIngestStatus(ctx context.Context, out *ingestOutput) (bool, error) {
+	status, err := s.operationStatusOutput(ctx, out.EventID)
+	if err != nil {
+		if errors.Is(err, kb.ErrEventNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	out.Stages = status.Stages
+	out.Terminal = status.Terminal
+	if status.Terminal == nil {
+		return false, nil
+	}
+	out.Status = "completed"
+	return true, nil
+}
+
+type ingestSubmission struct {
+	kbID           string
+	documents      []ingestDocInput
+	chunkSize      int
+	graphEnabled   bool
+	idempotencyKey string
+	correlationID  string
+}
+
+func (s *Service) submitIngest(ctx context.Context, submission ingestSubmission) (ingestOutput, error) {
 	if s.Config.ReadOnly || !s.Config.AllowIndexing {
 		return ingestOutput{}, fmt.Errorf("indexing tools are disabled")
 	}
 	if s.AppendDocumentUpsert == nil {
 		return ingestOutput{}, fmt.Errorf("ingest event pipeline not configured")
 	}
-	kbID := defaultKBID(rawKBID)
-	if len(docsIn) == 0 {
-		return ingestOutput{}, fmt.Errorf("documents are required")
+	kbID := defaultKBID(submission.kbID)
+	docs, docIDs, err := ingestDocumentsFromInput(submission.documents)
+	if err != nil {
+		return ingestOutput{}, err
 	}
-	docs := make([]kb.Document, 0, len(docsIn))
-	docIDs := make([]string, 0, len(docsIn))
-	for _, d := range docsIn {
-		id := strings.TrimSpace(d.ID)
-		text := strings.TrimSpace(d.Text)
-		if id == "" {
-			return ingestOutput{}, fmt.Errorf("document id is required")
-		}
-		if text == "" {
-			return ingestOutput{}, fmt.Errorf("document text is required")
-		}
-		docs = append(docs, kb.Document{ID: id, Text: text, MediaIDs: d.MediaIDs, MediaRefs: d.MediaRefs, Metadata: d.Metadata})
-		docIDs = append(docIDs, id)
-	}
-	graph := graphEnabled
+	graph := submission.graphEnabled
 	evtID, effectiveIdem, err := s.AppendDocumentUpsert(ctx, kb.DocumentUpsertPayload{
-		KBID: kbID, Documents: docs, ChunkSize: chunkSize, Options: kb.UpsertDocsOptions{GraphEnabled: &graph},
-	}, strings.TrimSpace(idem), strings.TrimSpace(corr))
+		KBID: kbID, Documents: docs, ChunkSize: submission.chunkSize, Options: kb.UpsertDocsOptions{GraphEnabled: &graph},
+	}, strings.TrimSpace(submission.idempotencyKey), strings.TrimSpace(submission.correlationID))
 	if err != nil {
 		return ingestOutput{}, err
 	}
@@ -480,6 +520,35 @@ func (s *Service) operationStatus(ctx context.Context, _ *mcp.CallToolRequest, i
 	return nil, out, err
 }
 
+func ingestDocumentsFromInput(docsIn []ingestDocInput) ([]kb.Document, []string, error) {
+	if len(docsIn) == 0 {
+		return nil, nil, fmt.Errorf("documents are required")
+	}
+	docs := make([]kb.Document, 0, len(docsIn))
+	docIDs := make([]string, 0, len(docsIn))
+	for _, input := range docsIn {
+		doc, err := ingestDocumentFromInput(input)
+		if err != nil {
+			return nil, nil, err
+		}
+		docs = append(docs, doc)
+		docIDs = append(docIDs, doc.ID)
+	}
+	return docs, docIDs, nil
+}
+
+func ingestDocumentFromInput(input ingestDocInput) (kb.Document, error) {
+	id := strings.TrimSpace(input.ID)
+	text := strings.TrimSpace(input.Text)
+	if id == "" {
+		return kb.Document{}, fmt.Errorf("document id is required")
+	}
+	if text == "" {
+		return kb.Document{}, fmt.Errorf("document text is required")
+	}
+	return kb.Document{ID: id, Text: text, MediaIDs: input.MediaIDs, MediaRefs: input.MediaRefs, Metadata: input.Metadata}, nil
+}
+
 func (s *Service) operationStatusOutput(ctx context.Context, eventID string) (operationStatusOutput, error) {
 	if eventID == "" {
 		return operationStatusOutput{}, fmt.Errorf("event_id required")
@@ -492,34 +561,48 @@ func (s *Service) operationStatusOutput(ctx context.Context, eventID string) (op
 		return operationStatusOutput{}, err
 	}
 	out := operationStatusOutput{EventID: eventID, Root: eventPayload(ev)}
-	if s.FindOperationTerminal != nil {
-		terminal, terminalErr := s.FindOperationTerminal(ctx, eventID)
-		switch {
-		case terminalErr != nil && !errors.Is(terminalErr, kb.ErrEventNotFound):
-			s.logWarn(ctx, "operation_status: terminal lookup failed", "event_id", eventID, "error", terminalErr)
-		case terminal != nil:
-			out.Terminal = eventPayload(terminal)
-		}
-	}
-	if s.OperationStages != nil {
-		stages, stagesErr := s.OperationStages(ctx, eventID)
-		if stagesErr != nil {
-			s.logWarn(ctx, "operation_status: stages lookup failed", "event_id", eventID, "error", stagesErr)
-		} else {
-			out.Stages = make([]map[string]any, 0, len(stages))
-			for _, stage := range stages {
-				item := eventPayload(stage.Event)
-				if item == nil {
-					item = map[string]any{}
-				}
-				if stage.Failure != nil {
-					item["failure"] = eventPayload(stage.Failure)
-				}
-				out.Stages = append(out.Stages, item)
-			}
-		}
-	}
+	out.Terminal = s.operationTerminalPayload(ctx, eventID)
+	out.Stages = s.operationStagesPayload(ctx, eventID)
 	return out, nil
+}
+
+func (s *Service) operationTerminalPayload(ctx context.Context, eventID string) map[string]any {
+	if s.FindOperationTerminal == nil {
+		return nil
+	}
+	terminal, err := s.FindOperationTerminal(ctx, eventID)
+	if err != nil && !errors.Is(err, kb.ErrEventNotFound) {
+		s.logWarn(ctx, "operation_status: terminal lookup failed", "event_id", eventID, "error", err)
+		return nil
+	}
+	return eventPayload(terminal)
+}
+
+func (s *Service) operationStagesPayload(ctx context.Context, eventID string) []map[string]any {
+	if s.OperationStages == nil {
+		return nil
+	}
+	stages, err := s.OperationStages(ctx, eventID)
+	if err != nil {
+		s.logWarn(ctx, "operation_status: stages lookup failed", "event_id", eventID, "error", err)
+		return nil
+	}
+	out := make([]map[string]any, 0, len(stages))
+	for _, stage := range stages {
+		out = append(out, operationStagePayload(stage))
+	}
+	return out
+}
+
+func operationStagePayload(stage kb.OperationStageSnapshot) map[string]any {
+	item := eventPayload(stage.Event)
+	if item == nil {
+		item = map[string]any{}
+	}
+	if stage.Failure != nil {
+		item["failure"] = eventPayload(stage.Failure)
+	}
+	return item
 }
 
 type listMediaInput struct {

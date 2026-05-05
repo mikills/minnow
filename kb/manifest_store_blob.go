@@ -23,7 +23,6 @@ func (s *BlobManifestStore) manifestKey(kbID string) string {
 
 func (s *BlobManifestStore) Get(ctx context.Context, kbID string) (*ManifestDocument, error) {
 	key := s.manifestKey(kbID)
-
 	tmpDir, err := os.MkdirTemp("", "minnow-manifest-get-*")
 	if err != nil {
 		return nil, err
@@ -31,69 +30,93 @@ func (s *BlobManifestStore) Get(ctx context.Context, kbID string) (*ManifestDocu
 	defer os.RemoveAll(tmpDir)
 
 	manifestPath := filepath.Join(tmpDir, "manifest.json")
-
-	var info *BlobObjectInfo
-	const maxAttempts = 4
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		info, err = s.Store.Head(ctx, key)
-		if err != nil {
-			if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
-				return nil, ErrManifestNotFound
-			}
-			return nil, err
-		}
-
-		if err := s.Store.Download(ctx, key, manifestPath); err != nil {
-			if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
-				return nil, ErrManifestNotFound
-			}
-			return nil, err
-		}
-
-		latest, headErr := s.Store.Head(ctx, key)
-		if headErr != nil {
-			if errors.Is(headErr, ErrBlobNotFound) || errors.Is(headErr, os.ErrNotExist) {
-				return nil, ErrManifestNotFound
-			}
-			return nil, headErr
-		}
-		if latest.Version == info.Version {
-			break
-		}
-		if attempt == maxAttempts-1 {
-			return nil, fmt.Errorf("manifest changed during read: %w", ErrBlobVersionMismatch)
-		}
-		// Backoff before retry: 10ms, 20ms, 40ms + up to 5ms jitter.
-		backoff := time.Duration(5<<uint(attempt+1)) * time.Millisecond
-		jitter := time.Duration(rand.Int63n(int64(5 * time.Millisecond)))
-		if err := sleepWithContext(ctx, backoff+jitter); err != nil {
-			return nil, err
-		}
-	}
-
-	data, err := os.ReadFile(manifestPath)
+	info, err := s.downloadStableManifest(ctx, key, manifestPath)
 	if err != nil {
 		return nil, err
 	}
-
-	var manifest SnapshotShardManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
+	manifest, err := readManifestFile(manifestPath)
+	if err != nil {
 		return nil, err
 	}
+	return &ManifestDocument{Manifest: manifest, Version: info.Version}, nil
+}
 
+func (s *BlobManifestStore) downloadStableManifest(ctx context.Context, key string, path string) (*BlobObjectInfo, error) {
+	const maxAttempts = 4
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		info, err := s.downloadManifestAttempt(ctx, key, path)
+		if err == nil {
+			return info, nil
+		}
+		if !errors.Is(err, ErrBlobVersionMismatch) || attempt == maxAttempts-1 {
+			return nil, err
+		}
+		if err := sleepWithContext(ctx, manifestReadBackoff(attempt)); err != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("manifest changed during read: %w", ErrBlobVersionMismatch)
+}
+
+func (s *BlobManifestStore) downloadManifestAttempt(ctx context.Context, key string, path string) (*BlobObjectInfo, error) {
+	info, err := s.headManifest(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.Store.Download(ctx, key, path); err != nil {
+		return nil, manifestStoreReadError(err)
+	}
+	latest, err := s.headManifest(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if latest.Version != info.Version {
+		return nil, fmt.Errorf("manifest changed during read: %w", ErrBlobVersionMismatch)
+	}
+	return info, nil
+}
+
+func (s *BlobManifestStore) headManifest(ctx context.Context, key string) (*BlobObjectInfo, error) {
+	info, err := s.Store.Head(ctx, key)
+	if err != nil {
+		return nil, manifestStoreReadError(err)
+	}
+	return info, nil
+}
+
+func manifestStoreReadError(err error) error {
+	if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
+		return ErrManifestNotFound
+	}
+	return err
+}
+
+func manifestReadBackoff(attempt int) time.Duration {
+	backoff := time.Duration(5<<uint(attempt+1)) * time.Millisecond
+	jitter := time.Duration(rand.Int63n(int64(5 * time.Millisecond)))
+	return backoff + jitter
+}
+
+func readManifestFile(path string) (SnapshotShardManifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return SnapshotShardManifest{}, err
+	}
+	var manifest SnapshotShardManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return SnapshotShardManifest{}, err
+	}
+	applyManifestReadDefaults(&manifest)
+	return manifest, nil
+}
+
+func applyManifestReadDefaults(manifest *SnapshotShardManifest) {
 	if manifest.FormatKind == "" {
-		// default when format_kind is absent in a stored manifest document
 		manifest.FormatKind = "duckdb_sharded"
 	}
 	if manifest.FormatVersion <= 0 {
-		// default when format_version is absent in a stored manifest document
 		manifest.FormatVersion = 1
 	}
-
-	return &ManifestDocument{
-		Manifest: manifest,
-		Version:  info.Version,
-	}, nil
 }
 
 func (s *BlobManifestStore) HeadVersion(ctx context.Context, kbID string) (string, error) {

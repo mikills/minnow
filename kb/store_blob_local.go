@@ -58,7 +58,7 @@ func (l *LocalBlobStore) Head(ctx context.Context, key string) (*BlobObjectInfo,
 		return nil, err
 	}
 
-	version, err := FileContentSHA256(path)
+	version, err := FileContentSHA256(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -85,19 +85,11 @@ func (l *LocalBlobStore) UploadIfMatch(ctx context.Context, key string, src stri
 		return nil, err
 	}
 
-	// check version match before upload
-	if expectedVersion != "" {
-		current, err := l.Head(ctx, key)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		if errors.Is(err, os.ErrNotExist) || current == nil || current.Version != expectedVersion {
-			return nil, ErrBlobVersionMismatch
-		}
+	if err := l.checkUploadVersion(ctx, key, expectedVersion); err != nil {
+		return nil, err
 	}
 
-	// compute sha256 of source file before copy (avoids hashing twice)
-	srcHash, err := FileContentSHA256(src)
+	srcHash, err := FileContentSHA256(ctx, src)
 	if err != nil {
 		return nil, err
 	}
@@ -112,12 +104,21 @@ func (l *LocalBlobStore) UploadIfMatch(ctx context.Context, key string, src stri
 		return nil, err
 	}
 
-	return &BlobObjectInfo{
-		Key:       key,
-		Version:   srcHash,
-		UpdatedAt: info.ModTime().UTC(),
-		Size:      info.Size(),
-	}, nil
+	return &BlobObjectInfo{Key: key, Version: srcHash, UpdatedAt: info.ModTime().UTC(), Size: info.Size()}, nil
+}
+
+func (l *LocalBlobStore) checkUploadVersion(ctx context.Context, key string, expectedVersion string) error {
+	if expectedVersion == "" {
+		return nil
+	}
+	current, err := l.Head(ctx, key)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if errors.Is(err, os.ErrNotExist) || current == nil || current.Version != expectedVersion {
+		return ErrBlobVersionMismatch
+	}
+	return nil
 }
 
 // lockForKey returns a per-key mutex for serializing uploads to the same blob.
@@ -169,42 +170,11 @@ func (l *LocalBlobStore) List(ctx context.Context, prefix string) ([]BlobObjectI
 
 	items := make([]BlobObjectInfo, 0)
 	err := filepath.WalkDir(l.Root, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-
-		if d.IsDir() {
-			return nil
-		}
-
-		if err := ctx.Err(); err != nil {
+		item, ok, err := l.blobListItem(ctx, prefix, path, d, walkErr)
+		if err != nil || !ok {
 			return err
 		}
-
-		rel, err := filepath.Rel(l.Root, path)
-		if err != nil {
-			return err
-		}
-
-		key := filepath.ToSlash(rel)
-		if prefix != "" && !strings.HasPrefix(key, prefix) {
-			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-
-		// use mtime+size as cheap version proxy instead of expensive sha256
-		version := fmt.Sprintf("%d-%d", info.ModTime().UnixNano(), info.Size())
-
-		items = append(items, BlobObjectInfo{
-			Key:       key,
-			Version:   version,
-			UpdatedAt: info.ModTime().UTC(),
-			Size:      info.Size(),
-		})
+		items = append(items, item)
 		return nil
 	})
 	if err != nil {
@@ -220,4 +190,37 @@ func (l *LocalBlobStore) List(ctx context.Context, prefix string) ([]BlobObjectI
 	})
 
 	return items, nil
+}
+
+func (l *LocalBlobStore) blobListItem(ctx context.Context, prefix string, path string, d os.DirEntry, walkErr error) (BlobObjectInfo, bool, error) {
+	if walkErr != nil {
+		return BlobObjectInfo{}, false, walkErr
+	}
+	if d.IsDir() {
+		return BlobObjectInfo{}, false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return BlobObjectInfo{}, false, err
+	}
+	key, err := localBlobKey(l.Root, path)
+	if err != nil || (prefix != "" && !strings.HasPrefix(key, prefix)) {
+		return BlobObjectInfo{}, false, err
+	}
+	info, err := d.Info()
+	if err != nil {
+		return BlobObjectInfo{}, false, err
+	}
+	return localBlobObjectInfo(key, info), true, nil
+}
+
+func localBlobKey(root string, path string) (string, error) {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.ToSlash(rel), nil
+}
+
+func localBlobObjectInfo(key string, info os.FileInfo) BlobObjectInfo {
+	return BlobObjectInfo{Key: key, Version: fmt.Sprintf("%d-%d", info.ModTime().UnixNano(), info.Size()), UpdatedAt: info.ModTime().UTC(), Size: info.Size()}
 }

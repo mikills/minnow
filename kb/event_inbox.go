@@ -4,7 +4,7 @@
 // Worker handler protocol:
 //  1. Apply side effects outside any transaction. They must be idempotent
 //     because a crash before commit leaves them pending a retry.
-//  2. Open a single EventStore transaction; inside it, in order:
+//  2. Open a single EventStore transaction. inside it, in order:
 //     (a) append follow-up events,
 //     (b) run the worker's commit-side mutation (blob deletes, etc.),
 //     (c) Ack the source event,
@@ -12,13 +12,13 @@
 //
 // MarkProcessed inside the transaction doubles as a "first writer wins"
 // claim: if two workers ran side-effects concurrently, only one MarkProcessed
-// succeeds; the other sees ErrInboxDuplicate and aborts its transaction so
+// succeeds. the other sees ErrInboxDuplicate and aborts its transaction so
 // the follow-ups and ack it staged never land. The worker that lost the race
 // treats the source event as already processed and acks it outside the failed
 // transaction to drain the queue.
 //
 // Because MarkProcessed is the claim, there is no longer an upfront
-// Processed() check in the hot path; redundant readers made the window
+// Processed() check in the hot path. redundant readers made the window
 // larger, not smaller.
 
 package kb

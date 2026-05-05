@@ -67,7 +67,7 @@ func scanCodebaseFile(ctx context.Context, root, rel string, opts CodeIndexOptio
 	if binary {
 		return codeScannedFile{}, false, nil
 	}
-	hash, err := FileContentSHA256(abs)
+	hash, err := FileContentSHA256(ctx, abs)
 	if err != nil {
 		return codeScannedFile{}, false, err
 	}
@@ -150,11 +150,15 @@ func isLikelyBinaryBytes(data []byte) bool {
 	}
 	control := 0
 	for _, b := range data {
-		if b < 0x20 && b != '\n' && b != '\r' && b != '\t' && b != '\f' && b != '\b' {
+		if isBinaryControlByte(b) {
 			control++
 		}
 	}
 	return float64(control)/float64(len(data)) > 0.30
+}
+
+func isBinaryControlByte(b byte) bool {
+	return b < 0x20 && b != '\n' && b != '\r' && b != '\t' && b != '\f' && b != '\b'
 }
 
 func matchesAnyCodePattern(rel string, patterns []string) bool {
@@ -163,30 +167,39 @@ func matchesAnyCodePattern(rel string, patterns []string) bool {
 	}
 	rel = filepath.ToSlash(rel)
 	base := filepath.Base(rel)
-	for _, pattern := range patterns {
-		pattern = filepath.ToSlash(strings.TrimSpace(pattern))
-		if pattern == "" {
-			continue
-		}
-		if strings.HasSuffix(pattern, "/**") {
-			prefix := strings.TrimSuffix(pattern, "/**")
-			if rel == prefix || strings.HasPrefix(rel, prefix+"/") {
-				return true
-			}
-		}
-		if matchRecursiveCodePattern(pattern, rel) {
+	for _, raw := range patterns {
+		if codePatternMatches(filepath.ToSlash(strings.TrimSpace(raw)), rel, base) {
 			return true
-		}
-		if ok, _ := filepath.Match(pattern, rel); ok {
-			return true
-		}
-		if !strings.Contains(pattern, "/") {
-			if ok, _ := filepath.Match(pattern, base); ok {
-				return true
-			}
 		}
 	}
 	return false
+}
+
+func codePatternMatches(pattern string, rel string, base string) bool {
+	if pattern == "" {
+		return false
+	}
+	return codeDirectoryPatternMatches(pattern, rel) ||
+		matchRecursiveCodePattern(pattern, rel) ||
+		filepathPatternMatches(pattern, rel) ||
+		basePatternMatches(pattern, base)
+}
+
+func codeDirectoryPatternMatches(pattern string, rel string) bool {
+	if !strings.HasSuffix(pattern, "/**") {
+		return false
+	}
+	prefix := strings.TrimSuffix(pattern, "/**")
+	return rel == prefix || strings.HasPrefix(rel, prefix+"/")
+}
+
+func filepathPatternMatches(pattern string, value string) bool {
+	ok, _ := filepath.Match(pattern, value)
+	return ok
+}
+
+func basePatternMatches(pattern string, base string) bool {
+	return !strings.Contains(pattern, "/") && filepathPatternMatches(pattern, base)
 }
 
 func matchRecursiveCodePattern(pattern, rel string) bool {

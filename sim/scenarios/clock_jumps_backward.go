@@ -43,7 +43,7 @@ func ClockJumpsBackward(h *sim.Harness) {
 		h.Fatalf("query after clock jump (seed=%d): %v", h.Seed(), err)
 	}
 
-	// Every doc from both ingests should still be reachable; a monotonic-
+	// Every doc from both ingests should still be reachable. a monotonic-
 	// time assumption elsewhere could silently drop rows on the rewind.
 	seen := make(map[string]struct{}, len(matches))
 	for _, r := range matches {

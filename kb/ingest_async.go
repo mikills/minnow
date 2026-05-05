@@ -12,7 +12,7 @@ import (
 )
 
 // Recommended visibility timeouts per ingest stage. Exposed so operators can
-// tune them; the default WorkerPoolConfig value (kb/worker.go) is too short
+// tune them. the default WorkerPoolConfig value (kb/worker.go) is too short
 // for embedding / graph / publish work.
 const (
 	DocumentUpsertWorkerVisibilityTimeout  = 5 * time.Minute
@@ -139,28 +139,39 @@ func newULIDLikeAt(prefix string, now time.Time) string {
 	return fmt.Sprintf("%s_%013d_%s", prefix, now.UnixMilli(), hex.EncodeToString(b))
 }
 
-func (l *KB) newPendingEvent(kind EventKind, kbID, schema, correlationID, causationID, idempotencyKey string, payload []byte) KBEvent {
+type pendingEventInput struct {
+	kind           EventKind
+	kbID           string
+	schema         string
+	correlationID  string
+	causationID    string
+	idempotencyKey string
+	payload        []byte
+}
+
+func (l *KB) newPendingEvent(input pendingEventInput) KBEvent {
 	now := l.Clock.Now()
 	return KBEvent{
 		EventID:        newULIDLikeAt("evt", now),
-		KBID:           kbID,
-		Kind:           kind,
-		Payload:        payload,
-		PayloadSchema:  schema,
-		CorrelationID:  correlationID,
-		CausationID:    causationID,
-		IdempotencyKey: idempotencyKey,
+		KBID:           input.kbID,
+		Kind:           input.kind,
+		Payload:        input.payload,
+		PayloadSchema:  input.schema,
+		CorrelationID:  input.correlationID,
+		CausationID:    input.causationID,
+		IdempotencyKey: input.idempotencyKey,
 		Status:         EventStatusPending,
 		CreatedAt:      now,
 	}
 }
 
-func (l *KB) newRootPendingEvent(kind EventKind, kbID, schema, correlationID, idempotencyKey string, payload []byte) KBEvent {
-	return l.newPendingEvent(kind, kbID, schema, correlationID, "", idempotencyKey, payload)
+func (l *KB) newRootPendingEvent(input pendingEventInput) KBEvent {
+	input.causationID = ""
+	return l.newPendingEvent(input)
 }
 
 func (l *KB) newChildPendingEvent(parent *KBEvent, kind EventKind, schema, idempotencyKey string, payload []byte) KBEvent {
-	return l.newPendingEvent(kind, parent.KBID, schema, parent.CorrelationID, parent.EventID, idempotencyKey, payload)
+	return l.newPendingEvent(pendingEventInput{kind: kind, kbID: parent.KBID, schema: schema, correlationID: parent.CorrelationID, causationID: parent.EventID, idempotencyKey: idempotencyKey, payload: payload})
 }
 
 // NewULIDLike on *KB uses the KB's Clock. Prefer this over the package-level
@@ -182,32 +193,53 @@ func (l *KB) AppendDocumentUpsertDetailed(ctx context.Context, p DocumentUpsertP
 	if err != nil {
 		return "", "", fmt.Errorf("marshal payload: %w", err)
 	}
+	idempotencyKey, correlationID = l.ensureEventKeys(idempotencyKey, correlationID)
+	if err := l.validateDocumentUpsertRequest(ctx, p); err != nil {
+		return "", "", err
+	}
+	if err := l.ValidateDocumentReferences(ctx, p.KBID, p.Documents); err != nil {
+		return "", "", err
+	}
+	event := l.newRootPendingEvent(pendingEventInput{kind: EventDocumentUpsert, kbID: p.KBID, schema: "document.upsert/v1", correlationID: correlationID, idempotencyKey: idempotencyKey, payload: payload})
+	return l.appendDocumentUpsertEvent(ctx, event, p.KBID, idempotencyKey)
+}
+
+func (l *KB) ensureEventKeys(idempotencyKey string, correlationID string) (string, string) {
 	if idempotencyKey == "" {
 		idempotencyKey = l.NewULIDLike("idem")
 	}
 	if correlationID == "" {
 		correlationID = l.NewULIDLike("corr")
 	}
+	return idempotencyKey, correlationID
+}
+
+func (l *KB) validateDocumentUpsertRequest(ctx context.Context, p DocumentUpsertPayload) error {
 	if p.Options.GraphEnabled != nil && *p.Options.GraphEnabled && l.GraphBuilder == nil {
-		return "", "", ErrGraphUnavailable
+		return ErrGraphUnavailable
 	}
-	if err := l.ValidateDocumentReferences(ctx, p.KBID, p.Documents); err != nil {
-		return "", "", err
-	}
-	event := l.newRootPendingEvent(EventDocumentUpsert, p.KBID, "document.upsert/v1", correlationID, idempotencyKey, payload)
+	return nil
+}
+
+func (l *KB) appendDocumentUpsertEvent(ctx context.Context, event KBEvent, kbID string, idempotencyKey string) (string, string, error) {
 	if err := l.EventStore.Append(ctx, event); err != nil {
-		if errors.Is(err, ErrEventDuplicateKey) {
-			existing, findErr := l.EventStore.FindByIdempotency(ctx, EventDocumentUpsert, p.KBID, idempotencyKey)
-			if findErr != nil {
-				return "", "", findErr
-			}
-			if existing != nil {
-				return existing.EventID, idempotencyKey, nil
-			}
-		}
-		return "", "", err
+		return l.handleDocumentUpsertAppendError(ctx, err, kbID, idempotencyKey)
 	}
 	return event.EventID, idempotencyKey, nil
+}
+
+func (l *KB) handleDocumentUpsertAppendError(ctx context.Context, err error, kbID string, idempotencyKey string) (string, string, error) {
+	if !errors.Is(err, ErrEventDuplicateKey) {
+		return "", "", err
+	}
+	existing, findErr := l.EventStore.FindByIdempotency(ctx, EventDocumentUpsert, kbID, idempotencyKey)
+	if findErr != nil {
+		return "", "", findErr
+	}
+	if existing != nil {
+		return existing.EventID, idempotencyKey, nil
+	}
+	return "", "", err
 }
 
 func (l *KB) AppendDocumentUpsert(ctx context.Context, p DocumentUpsertPayload, idempotencyKey, correlationID string) (string, error) {

@@ -14,12 +14,12 @@ import (
 type EventKind string
 
 const (
-	// External boundary commands (imperative; addressed to one handler;
+	// External boundary commands (imperative. addressed to one handler.
 	// may be rejected).
 	EventMediaUpload    EventKind = "media.upload"
 	EventDocumentUpsert EventKind = "document.upsert"
 
-	// Domain events (facts, past tense; trigger downstream stages).
+	// Domain events (facts, past tense. trigger downstream stages).
 	EventMediaUploaded          EventKind = "media.uploaded"
 	EventDocumentChunked        EventKind = "document.chunked"
 	EventDocumentEmbedded       EventKind = "document.embedded"
@@ -45,13 +45,13 @@ const (
 //
 // Every event carries an IdempotencyKey, producer-generated and stable across
 // retries, so consumer-side inbox dedup is possible. External clients provide
-// the key via Idempotency-Key header; internal producers derive it from
+// the key via Idempotency-Key header. internal producers derive it from
 // (parent_event_id, child_kind).
 //
 // MaxAttempts is stored on the event at Append time so all workers agree on
 // the retry ceiling for a given event, even if WorkerPoolConfig drifts across
 // replicas. Migration: events appended before this field existed decode as
-// zero; callers must fall back to DefaultEventMaxAttempts when event.MaxAttempts
+// zero. callers must fall back to DefaultEventMaxAttempts when event.MaxAttempts
 // <= 0.
 type KBEvent struct {
 	EventID        string
@@ -90,7 +90,7 @@ func (e KBEvent) EffectiveMaxAttempts() int {
 //
 // Implementations must commit event appends and caller-supplied state mutations
 // in a single atomic transaction, which rules out pure message-queue backings.
-// InMemoryEventStore covers tests and single-process deployments; the Mongo
+// InMemoryEventStore covers tests and single-process deployments. the Mongo
 // store is the production target and relies on multi-document transactions.
 type EventStore interface {
 	// Append inserts a new event. Returns ErrEventDuplicateKey if an event
@@ -99,7 +99,7 @@ type EventStore interface {
 
 	// Claim atomically transitions one Pending event of the given Kind to
 	// Claimed and returns it. Returns ErrEventNoneAvailable if no event is
-	// ready. The visibility timeout is set to now+visibilityTimeout; if the
+	// ready. The visibility timeout is set to now+visibilityTimeout. if the
 	// worker does not Ack/Fail within that window, the event-reaper sweep
 	// returns it to Pending.
 	Claim(ctx context.Context, kind EventKind, workerID string, visibilityTimeout time.Duration) (*KBEvent, error)
@@ -110,7 +110,7 @@ type EventStore interface {
 
 	// Fail transitions a Claimed event back to Pending, or Dead when the
 	// stored MaxAttempts has been reached. The caller passes the attempt
-	// counter value observed at Claim time; if the stored attempt has
+	// counter value observed at Claim time. if the stored attempt has
 	// advanced since then, implementations return ErrEventStateChanged so
 	// the caller can re-read and decide what to do. The target status
 	// (Pending vs Dead) is decided server-side from the stored
@@ -135,7 +135,7 @@ type EventStore interface {
 	// ListUnfinishedBefore returns at most limit events of a kind older
 	// than before whose lifecycle is not terminal yet (default 1000 when
 	// limit <= 0), sorted by created_at ascending. When more events
-	// remain, the returned continuation token is non-empty; pass it back
+	// remain, the returned continuation token is non-empty. pass it back
 	// as `after` on the next call. Callers iterate until the token is
 	// empty.
 	ListUnfinishedBefore(ctx context.Context, kind EventKind, before time.Time, after string, limit int) (events []KBEvent, next string, err error)
@@ -158,7 +158,7 @@ var (
 
 // TransactionRunner is an optional capability on EventStore implementations
 // that can execute a closure inside a single transaction. Mongo-backed
-// stores use a multi-document transaction; the in-memory store executes
+// stores use a multi-document transaction. the in-memory store executes
 // the closure directly and is best-effort.
 //
 // Workers use this to commit the (Reserve inbox → append child events →

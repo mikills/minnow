@@ -35,7 +35,7 @@ func searchExpandedWithDB(ctx context.Context, db *sql.DB, queryVec []float32, t
 		entityScores = kb.TopNEntityScores(entityScores, options.MaxEntityResults)
 	}
 
-	return buildExpandedResults(ctx, db, queryVec, topK, seeds, entityScores, options.Alpha)
+	return buildExpandedResults(ctx, db, expandedResultInput{queryVec: queryVec, topK: topK, seeds: seeds, entityScores: entityScores, alpha: options.Alpha})
 }
 
 func mergeExpandedShardResults(shardResults [][]kb.ExpandedResult, topK int) []kb.ExpandedResult {
@@ -131,14 +131,22 @@ func expandEntityScoresBFS(ctx context.Context, db *sql.DB, scores map[string]fl
 	return scores, nil
 }
 
-func buildExpandedResults(ctx context.Context, db *sql.DB, queryVec []float32, topK int, seeds []kb.QueryResult, entityScores map[string]float64, alpha float64) ([]kb.ExpandedResult, error) {
-	docGraphScore, err := queryDocsForEntities(ctx, db, entityScores)
+type expandedResultInput struct {
+	queryVec     []float32
+	topK         int
+	seeds        []kb.QueryResult
+	entityScores map[string]float64
+	alpha        float64
+}
+
+func buildExpandedResults(ctx context.Context, db *sql.DB, input expandedResultInput) ([]kb.ExpandedResult, error) {
+	docGraphScore, err := queryDocsForEntities(ctx, db, input.entityScores)
 	if err != nil {
 		return nil, err
 	}
 
-	candidateIDs := candidateIDsFromSeeds(seeds, docGraphScore)
-	docMatches, err := queryDocMatchesForIDs(ctx, db, queryVec, candidateIDs)
+	candidateIDs := candidateIDsFromSeeds(input.seeds, docGraphScore)
+	docMatches, err := queryDocMatchesForIDs(ctx, db, input.queryVec, candidateIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -146,47 +154,57 @@ func buildExpandedResults(ctx context.Context, db *sql.DB, queryVec []float32, t
 		return []kb.ExpandedResult{}, nil
 	}
 
-	var maxGraphScore float64
-	for _, score := range docGraphScore {
-		if score > maxGraphScore {
-			maxGraphScore = score
-		}
-	}
+	results := expandedResultsFromMatches(docMatches, docGraphScore, maxFloat64Value(docGraphScore), input.alpha)
+	sortExpandedResults(results)
+	return limitExpandedResults(results, input.topK), nil
+}
 
+func expandedResultsFromMatches(docMatches map[string]docMatch, docGraphScore map[string]float64, maxGraphScore float64, alpha float64) []kb.ExpandedResult {
 	results := make([]kb.ExpandedResult, 0, len(docMatches))
 	for id, match := range docMatches {
-		graph := docGraphScore[id]
-		graphNorm := 0.0
-		if maxGraphScore > 0 {
-			graphNorm = graph / maxGraphScore
-		}
-		sim := 1.0 / (1.0 + match.Distance)
-		score := alpha*sim + (1.0-alpha)*graphNorm
-		results = append(results, kb.ExpandedResult{
-			ID:         id,
-			Content:    match.Content,
-			Distance:   match.Distance,
-			GraphScore: graph,
-			Score:      score,
-			MediaRefs:  match.MediaRefs,
-		})
+		results = append(results, expandedResultFromMatch(id, match, docGraphScore[id], maxGraphScore, alpha))
 	}
+	return results
+}
 
-	sort.Slice(results, func(i, j int) bool {
-		if results[i].Score == results[j].Score {
-			if results[i].Distance == results[j].Distance {
-				return results[i].ID < results[j].ID
-			}
-			return results[i].Distance < results[j].Distance
+func expandedResultFromMatch(id string, match docMatch, graph float64, maxGraphScore float64, alpha float64) kb.ExpandedResult {
+	graphNorm := 0.0
+	if maxGraphScore > 0 {
+		graphNorm = graph / maxGraphScore
+	}
+	sim := 1.0 / (1.0 + match.Distance)
+	return kb.ExpandedResult{ID: id, Content: match.Content, Distance: match.Distance, GraphScore: graph, Score: alpha*sim + (1.0-alpha)*graphNorm, MediaRefs: match.MediaRefs}
+}
+
+func maxFloat64Value(values map[string]float64) float64 {
+	var maxValue float64
+	for _, value := range values {
+		if value > maxValue {
+			maxValue = value
 		}
-		return results[i].Score > results[j].Score
-	})
+	}
+	return maxValue
+}
 
+func sortExpandedResults(results []kb.ExpandedResult) {
+	sort.Slice(results, func(i, j int) bool { return expandedResultLess(results[i], results[j]) })
+}
+
+func expandedResultLess(left kb.ExpandedResult, right kb.ExpandedResult) bool {
+	if left.Score != right.Score {
+		return left.Score > right.Score
+	}
+	if left.Distance != right.Distance {
+		return left.Distance < right.Distance
+	}
+	return left.ID < right.ID
+}
+
+func limitExpandedResults(results []kb.ExpandedResult, topK int) []kb.ExpandedResult {
 	if len(results) > topK {
-		results = results[:topK]
+		return results[:topK]
 	}
-
-	return results, nil
+	return results
 }
 
 func candidateIDsFromSeeds(seeds []kb.QueryResult, docGraphScore map[string]float64) []string {

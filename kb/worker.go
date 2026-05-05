@@ -213,57 +213,57 @@ func (p *WorkerPool) dispatch(ctx context.Context, event *KBEvent) error {
 		return handlerErr
 	}
 
-	// Commit transactionally. Order matters: follow-ups → commit mutation →
-	// Ack source → MarkProcessed (the atomic claim). If any step fails, the
-	// inbox marker is never written, so a redelivery still sees "not
-	// processed" and retries. Commit mutations (blob deletes) must therefore
-	// be idempotent.
-	commit := func(ctx context.Context) error {
-		for _, up := range result.FollowUps {
-			if err := p.store.Append(ctx, up); err != nil && !errors.Is(err, ErrEventDuplicateKey) {
-				return fmt.Errorf("append follow-up %s: %w", up.Kind, err)
-			}
+	commitErr := p.runner.InTransaction(ctx, func(ctx context.Context) error {
+		return p.commitWorkerResult(ctx, event, result)
+	})
+	dur := time.Since(start)
+	return p.finishDispatch(ctx, event, commitErr, dur)
+}
+
+func (p *WorkerPool) commitWorkerResult(ctx context.Context, event *KBEvent, result WorkerResult) error {
+	// Order matters: follow-ups → commit mutation → Ack source → MarkProcessed.
+	for _, up := range result.FollowUps {
+		if err := p.store.Append(ctx, up); err != nil && !errors.Is(err, ErrEventDuplicateKey) {
+			return fmt.Errorf("append follow-up %s: %w", up.Kind, err)
 		}
-		if result.Commit != nil {
-			if err := result.Commit(ctx); err != nil {
-				return err
-			}
-		}
-		if err := p.store.Ack(ctx, event.EventID); err != nil {
+	}
+	if result.Commit != nil {
+		if err := result.Commit(ctx); err != nil {
 			return err
 		}
-		if event.IdempotencyKey != "" && p.inbox != nil {
-			if err := p.inbox.MarkProcessed(ctx, p.worker.WorkerID(), event.IdempotencyKey, event.EventID); err != nil {
-				return err
-			}
-		}
+	}
+	if err := p.store.Ack(ctx, event.EventID); err != nil {
+		return err
+	}
+	return p.markWorkerProcessed(ctx, event)
+}
+
+func (p *WorkerPool) markWorkerProcessed(ctx context.Context, event *KBEvent) error {
+	if event.IdempotencyKey == "" || p.inbox == nil {
 		return nil
 	}
+	return p.inbox.MarkProcessed(ctx, p.worker.WorkerID(), event.IdempotencyKey, event.EventID)
+}
 
-	commitErr := p.runner.InTransaction(ctx, commit)
-	dur := time.Since(start)
-
-	// If we lost the inbox race, another worker already committed this
-	// event. Ack outside the failed transaction so we stop being
-	// redelivered and exit cleanly.
-	if commitErr != nil && IsInboxDuplicate(commitErr) {
-		slog.Default().Info("worker lost inbox race; acking duplicate",
-			"kind", string(p.worker.Kind()), "event_id", event.EventID, "idempotency_key", event.IdempotencyKey)
-		if err := p.store.Ack(ctx, event.EventID); err != nil && !errors.Is(err, ErrEventNotFound) {
-			slog.Default().Warn("worker ack after duplicate failed", "error", err)
-		}
-		p.metrics.OnWorkerTick(p.worker.Kind(), p.worker.WorkerID(), "duplicate", dur, nil)
+func (p *WorkerPool) finishDispatch(ctx context.Context, event *KBEvent, commitErr error, dur time.Duration) error {
+	if commitErr == nil {
+		p.metrics.OnWorkerTick(p.worker.Kind(), p.worker.WorkerID(), "success", dur, nil)
 		return nil
 	}
-
-	if commitErr != nil {
-		slog.Default().Warn("worker commit failed",
-			"kind", string(p.worker.Kind()), "event_id", event.EventID, "error", commitErr)
-		p.recordFailure(ctx, event, commitErr, dur)
-		return commitErr
+	if IsInboxDuplicate(commitErr) {
+		return p.finishDuplicateDispatch(ctx, event, dur)
 	}
+	slog.Default().Warn("worker commit failed", "kind", string(p.worker.Kind()), "event_id", event.EventID, "error", commitErr)
+	p.recordFailure(ctx, event, commitErr, dur)
+	return commitErr
+}
 
-	p.metrics.OnWorkerTick(p.worker.Kind(), p.worker.WorkerID(), "success", dur, nil)
+func (p *WorkerPool) finishDuplicateDispatch(ctx context.Context, event *KBEvent, dur time.Duration) error {
+	slog.Default().Info("worker lost inbox race; acking duplicate", "kind", string(p.worker.Kind()), "event_id", event.EventID, "idempotency_key", event.IdempotencyKey)
+	if err := p.store.Ack(ctx, event.EventID); err != nil && !errors.Is(err, ErrEventNotFound) {
+		slog.Default().Warn("worker ack after duplicate failed", "error", err)
+	}
+	p.metrics.OnWorkerTick(p.worker.Kind(), p.worker.WorkerID(), "duplicate", dur, nil)
 	return nil
 }
 
@@ -277,9 +277,9 @@ func (p *WorkerPool) recordFailure(ctx context.Context, event *KBEvent, handlerE
 	willRetry := event.Attempt < maxAttempts
 
 	var resultCarrier fileResultCarrier
-	_ = errors.As(handlerErr, &resultCarrier)
+	hasFileResults := errors.As(handlerErr, &resultCarrier)
 	var fileResults []FileIngestResult
-	if resultCarrier != nil {
+	if hasFileResults && resultCarrier != nil {
 		fileResults = resultCarrier.FileIngestResults()
 	}
 
@@ -313,7 +313,7 @@ func (p *WorkerPool) recordFailure(ctx context.Context, event *KBEvent, handlerE
 
 	if err := p.store.Fail(ctx, event.EventID, event.Attempt, handlerErr.Error()); err != nil {
 		// ErrEventStateChanged means a concurrent actor advanced the attempt
-		// counter; the worker.failed event is in place, so metrics report
+		// counter. the worker.failed event is in place, so metrics report
 		// "failed" and the reaper/next claim will make the terminal call.
 		slog.Default().Warn("worker store.Fail failed", "error", err)
 	}

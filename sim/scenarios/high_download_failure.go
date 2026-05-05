@@ -3,6 +3,7 @@ package scenarios
 import (
 	"errors"
 
+	"github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/sim"
 )
 
@@ -36,11 +37,7 @@ func HighDownloadFailure(h *sim.Harness) {
 	ok, injected := 0, 0
 	for i := 0; i < 20; i++ {
 		matches, err := h.Search(kbID, probe, 5)
-		if err == nil {
-			if len(matches) == 0 {
-				h.Errorf("query returned empty results with %d docs present (seed=%d)",
-					len(docs), h.Seed())
-			}
+		if querySucceeded(h, docs, matches, err) {
 			ok++
 			continue
 		}
@@ -53,4 +50,14 @@ func HighDownloadFailure(h *sim.Harness) {
 	if ok == 0 && injected == 0 {
 		h.Fatalf("neither success nor injected error observed (seed=%d)", h.Seed())
 	}
+}
+
+func querySucceeded(h *sim.Harness, docs []kb.Document, matches []kb.ExpandedResult, err error) bool {
+	if err != nil {
+		return false
+	}
+	if len(matches) == 0 {
+		h.Errorf("query returned empty results with %d docs present (seed=%d)", len(docs), h.Seed())
+	}
+	return true
 }

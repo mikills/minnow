@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// Clock returns the current time. Production code uses RealClock; tests and
+// Clock returns the current time. Production code uses RealClock. tests and
 // the simulation harness substitute FakeClock to drive time deterministically.
 type Clock interface {
 	Now() time.Time
@@ -19,7 +19,7 @@ func (realClock) Now() time.Time { return time.Now().UTC() }
 var RealClock Clock = realClock{}
 
 // FakeClock is a deterministic Clock for tests and simulation. It never moves
-// on its own; callers drive it forward with Advance or Set.
+// on its own. callers drive it forward with Advance or Set.
 type FakeClock struct {
 	mu  sync.Mutex
 	now time.Time

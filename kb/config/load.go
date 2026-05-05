@@ -76,7 +76,7 @@ func UserConfigPath() (string, error) {
 
 // ResolveDefaultPath returns the config path used when the caller does not pass
 // an explicit path. The local working-directory file wins so repo/dev runs keep
-// their existing behavior; the user config makes `go install` usable globally.
+// their existing behavior. the user config makes `go install` usable globally.
 func ResolveDefaultPath() (string, error) {
 	if _, err := os.Stat(DefaultPath); err == nil {
 		return DefaultPath, nil
@@ -125,7 +125,7 @@ func decodeStrict(data []byte) (*Config, error) {
 // via template-substituted `../../etc/foo`) lets a misconfigured operator
 // trick minnow into reading or writing state at an arbitrary filesystem
 // location. Explicit absolute paths remain allowed because there is no
-// authoritative base dir to compare against; the operator's choice is
+// authoritative base dir to compare against. the operator's choice is
 // final, and we only audit-log it.
 func (c *Config) resolvePaths(baseDir string) error {
 	fields := []struct {

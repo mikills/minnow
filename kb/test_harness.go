@@ -179,8 +179,10 @@ func (h *TestHarness) Cleanup() {
 
 // DB returns a database connection to the KB.
 // The connection is cached - subsequent calls return the same connection.
+var testHarnessRootContext = context.Background()
+
 func (h *TestHarness) DB() *sql.DB {
-	return h.DBContext(context.Background())
+	return h.DBContext(testHarnessRootContext)
 }
 
 // DBContext returns a database connection to the KB using the provided context.

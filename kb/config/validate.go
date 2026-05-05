@@ -42,39 +42,63 @@ func (c *Config) validateMCP() error {
 	if !c.MCP.Enabled {
 		return nil
 	}
-	if len(c.MCP.Transports) == 0 {
-		return errors.New("mcp.transports must include at least one transport when mcp.enabled is true")
+	seen, err := validateMCPTransports(c.MCP.Transports)
+	if err != nil {
+		return err
+	}
+	return firstErr(
+		validateMCPHTTPPath(seen["http"], c.MCP.HTTPPath),
+		validateMCPToolGates(c.MCP),
+		validateMCPSyncTimeouts(c.MCP),
+	)
+}
+
+func validateMCPTransports(transports []string) (map[string]bool, error) {
+	if len(transports) == 0 {
+		return nil, errors.New("mcp.transports must include at least one transport when mcp.enabled is true")
 	}
 	seen := map[string]bool{}
-	for _, transport := range c.MCP.Transports {
-		switch strings.ToLower(strings.TrimSpace(transport)) {
-		case "http", "stdio":
-			seen[strings.ToLower(strings.TrimSpace(transport))] = true
-		default:
-			return fmt.Errorf("mcp.transports contains unsupported transport %q (allowed: http, stdio)", transport)
+	for _, transport := range transports {
+		name := strings.ToLower(strings.TrimSpace(transport))
+		if name != "http" && name != "stdio" {
+			return nil, fmt.Errorf("mcp.transports contains unsupported transport %q (allowed: http, stdio)", transport)
 		}
+		seen[name] = true
 	}
-	if seen["http"] {
-		if !strings.HasPrefix(c.MCP.HTTPPath, "/") {
-			return fmt.Errorf("mcp.http_path must start with / when http transport is enabled")
-		}
-		if strings.ContainsAny(c.MCP.HTTPPath, " \t\n\r") {
-			return fmt.Errorf("mcp.http_path must not contain whitespace")
-		}
+	return seen, nil
+}
+
+func validateMCPHTTPPath(enabled bool, path string) error {
+	if !enabled {
+		return nil
 	}
-	if c.MCP.ReadOnly && (c.MCP.AllowIndexing || c.MCP.AllowSyncIndexing || c.MCP.AllowDestructive || c.MCP.AllowAdmin) {
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("mcp.http_path must start with / when http transport is enabled")
+	}
+	if strings.ContainsAny(path, " \t\n\r") {
+		return fmt.Errorf("mcp.http_path must not contain whitespace")
+	}
+	return nil
+}
+
+func validateMCPToolGates(cfg MCPConfig) error {
+	if cfg.ReadOnly && (cfg.AllowIndexing || cfg.AllowSyncIndexing || cfg.AllowDestructive || cfg.AllowAdmin) {
 		return errors.New("mcp.read_only cannot be combined with indexing, destructive, or admin tools")
 	}
-	if c.MCP.AllowSyncIndexing && !c.MCP.AllowIndexing {
+	if cfg.AllowSyncIndexing && !cfg.AllowIndexing {
 		return errors.New("mcp.allow_sync_indexing requires mcp.allow_indexing")
 	}
-	if c.MCP.DefaultSyncTimeout <= 0 {
+	return nil
+}
+
+func validateMCPSyncTimeouts(cfg MCPConfig) error {
+	if cfg.DefaultSyncTimeout <= 0 {
 		return errors.New("mcp.default_sync_timeout must be > 0 when mcp.enabled is true")
 	}
-	if c.MCP.MaxSyncTimeout <= 0 {
+	if cfg.MaxSyncTimeout <= 0 {
 		return errors.New("mcp.max_sync_timeout must be > 0 when mcp.enabled is true")
 	}
-	if c.MCP.DefaultSyncTimeout > c.MCP.MaxSyncTimeout {
+	if cfg.DefaultSyncTimeout > cfg.MaxSyncTimeout {
 		return errors.New("mcp.default_sync_timeout must be <= mcp.max_sync_timeout")
 	}
 	return nil
@@ -121,24 +145,24 @@ func (c *Config) validateGraph() error {
 	if !c.Graph.Enabled {
 		return nil
 	}
-	if err := requireEnabledString("graph.enabled", "graph.url", c.Graph.URL); err != nil {
-		return err
-	}
-	parsed, err := url.Parse(c.Graph.URL)
+	return firstErr(
+		requireEnabledString("graph.enabled", "graph.url", c.Graph.URL),
+		validateHTTPURL("graph.url", c.Graph.URL),
+		requireEnabledString("graph.enabled", "graph.model", c.Graph.Model),
+		requirePositiveIntPtr("graph.parallelism", c.Graph.Parallelism),
+	)
+}
+
+func validateHTTPURL(name, raw string) error {
+	parsed, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("graph.url must be a valid URL: %w", err)
+		return fmt.Errorf("%s must be a valid URL: %w", name, err)
 	}
 	if parsed.Scheme == "" || parsed.Host == "" {
-		return fmt.Errorf("graph.url must include a scheme and host (got %q)", c.Graph.URL)
+		return fmt.Errorf("%s must include a scheme and host (got %q)", name, raw)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("graph.url scheme must be http or https (got %q)", parsed.Scheme)
-	}
-	if err := requireEnabledString("graph.enabled", "graph.model", c.Graph.Model); err != nil {
-		return err
-	}
-	if err := requirePositiveIntPtr("graph.parallelism", c.Graph.Parallelism); err != nil {
-		return err
+		return fmt.Errorf("%s scheme must be http or https (got %q)", name, parsed.Scheme)
 	}
 	return nil
 }
@@ -176,47 +200,46 @@ func (c *Config) validateFormat() error {
 func (c *Config) validateEmbedder() error {
 	switch c.Embedder.Provider {
 	case "ollama":
-		if c.Embedder.Ollama == nil {
-			return errors.New("embedder.ollama block is required when embedder.provider is \"ollama\"")
-		}
-		if err := requireNonEmptyString("embedder.ollama.url", c.Embedder.Ollama.URL); err != nil {
-			return err
-		}
-		if err := requireNonEmptyString("embedder.ollama.model", c.Embedder.Ollama.Model); err != nil {
-			return err
-		}
+		return validateOllamaEmbedder(c.Embedder.Ollama)
 	case "local":
-		if c.Embedder.Local == nil {
-			return errors.New("embedder.local block is required when embedder.provider is \"local\"")
-		}
-		if err := requirePositiveInt("embedder.local.dim", c.Embedder.Local.Dim); err != nil {
-			return err
-		}
+		return validateLocalEmbedder(c.Embedder.Local)
 	case "openai_compatible":
-		if c.Embedder.OpenAICompatible == nil {
-			return errors.New("embedder.openai_compatible block is required when embedder.provider is \"openai_compatible\"")
-		}
-		if err := requireNonEmptyString("embedder.openai_compatible.base_url", c.Embedder.OpenAICompatible.BaseURL); err != nil {
-			return err
-		}
-		parsed, err := url.Parse(c.Embedder.OpenAICompatible.BaseURL)
-		if err != nil {
-			return fmt.Errorf("embedder.openai_compatible.base_url must be a valid URL: %w", err)
-		}
-		if parsed.Scheme == "" || parsed.Host == "" {
-			return fmt.Errorf("embedder.openai_compatible.base_url must include a scheme and host (got %q)", c.Embedder.OpenAICompatible.BaseURL)
-		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" {
-			return fmt.Errorf("embedder.openai_compatible.base_url scheme must be http or https (got %q)", parsed.Scheme)
-		}
-		if err := requireNonEmptyString("embedder.openai_compatible.model", c.Embedder.OpenAICompatible.Model); err != nil {
-			return err
-		}
-		if c.Embedder.OpenAICompatible.Dimensions < 0 {
-			return fmt.Errorf("embedder.openai_compatible.dimensions must be >= 0 when set, got %d", c.Embedder.OpenAICompatible.Dimensions)
-		}
+		return validateOpenAICompatibleEmbedder(c.Embedder.OpenAICompatible)
 	default:
 		return fmt.Errorf("embedder.provider %q is not supported (expected \"ollama\", \"local\", or \"openai_compatible\")", c.Embedder.Provider)
+	}
+}
+
+func validateOllamaEmbedder(cfg *OllamaEmbedderConfig) error {
+	if cfg == nil {
+		return errors.New("embedder.ollama block is required when embedder.provider is \"ollama\"")
+	}
+	return firstErr(
+		requireNonEmptyString("embedder.ollama.url", cfg.URL),
+		requireNonEmptyString("embedder.ollama.model", cfg.Model),
+	)
+}
+
+func validateLocalEmbedder(cfg *LocalEmbedderConfig) error {
+	if cfg == nil {
+		return errors.New("embedder.local block is required when embedder.provider is \"local\"")
+	}
+	return requirePositiveInt("embedder.local.dim", cfg.Dim)
+}
+
+func validateOpenAICompatibleEmbedder(cfg *OpenAICompatibleEmbedderConfig) error {
+	if cfg == nil {
+		return errors.New("embedder.openai_compatible block is required when embedder.provider is \"openai_compatible\"")
+	}
+	if err := firstErr(
+		requireNonEmptyString("embedder.openai_compatible.base_url", cfg.BaseURL),
+		validateHTTPURL("embedder.openai_compatible.base_url", cfg.BaseURL),
+		requireNonEmptyString("embedder.openai_compatible.model", cfg.Model),
+	); err != nil {
+		return err
+	}
+	if cfg.Dimensions < 0 {
+		return fmt.Errorf("embedder.openai_compatible.dimensions must be >= 0 when set, got %d", cfg.Dimensions)
 	}
 	return nil
 }
@@ -258,14 +281,8 @@ func (c *Config) validateMongo() error {
 }
 
 func (c *Config) validateWorkers() error {
-	if c.Workers.Defaults.MaxAttempts <= 0 {
-		return errors.New("workers.defaults.max_attempts must be > 0")
-	}
-	if c.Workers.Defaults.PollInterval <= 0 {
-		return errors.New("workers.defaults.poll_interval must be > 0")
-	}
-	if c.Workers.Defaults.VisibilityTimeout <= 0 {
-		return errors.New("workers.defaults.visibility_timeout must be > 0")
+	if err := validateWorkerDefaults(c.Workers.Defaults); err != nil {
+		return err
 	}
 	pools := map[string]WorkerPool{
 		"document_upsert":  c.Workers.DocumentUpsert,
@@ -274,18 +291,47 @@ func (c *Config) validateWorkers() error {
 		"media_upload":     c.Workers.MediaUpload,
 	}
 	for name, p := range pools {
-		if p.Concurrency <= 0 {
-			return fmt.Errorf("workers.%s.concurrency must be > 0", name)
+		if err := validateWorkerPool(name, p); err != nil {
+			return err
 		}
-		if p.MaxAttempts != nil && *p.MaxAttempts <= 0 {
-			return fmt.Errorf("workers.%s.max_attempts must be > 0 when set", name)
-		}
-		if p.PollInterval != nil && *p.PollInterval <= 0 {
-			return fmt.Errorf("workers.%s.poll_interval must be > 0 when set", name)
-		}
-		if p.VisibilityTimeout != nil && *p.VisibilityTimeout <= 0 {
-			return fmt.Errorf("workers.%s.visibility_timeout must be > 0 when set", name)
-		}
+	}
+	return nil
+}
+
+func validateWorkerDefaults(defaults WorkerDefaults) error {
+	if defaults.MaxAttempts <= 0 {
+		return errors.New("workers.defaults.max_attempts must be > 0")
+	}
+	if defaults.PollInterval <= 0 {
+		return errors.New("workers.defaults.poll_interval must be > 0")
+	}
+	if defaults.VisibilityTimeout <= 0 {
+		return errors.New("workers.defaults.visibility_timeout must be > 0")
+	}
+	return nil
+}
+
+func validateWorkerPool(name string, p WorkerPool) error {
+	if p.Concurrency <= 0 {
+		return fmt.Errorf("workers.%s.concurrency must be > 0", name)
+	}
+	return firstErr(
+		requirePositiveOptionalInt(fmt.Sprintf("workers.%s.max_attempts", name), p.MaxAttempts),
+		requirePositiveOptionalDuration(fmt.Sprintf("workers.%s.poll_interval", name), p.PollInterval),
+		requirePositiveOptionalDuration(fmt.Sprintf("workers.%s.visibility_timeout", name), p.VisibilityTimeout),
+	)
+}
+
+func requirePositiveOptionalInt(name string, value *int) error {
+	if value != nil && *value <= 0 {
+		return fmt.Errorf("%s must be > 0 when set", name)
+	}
+	return nil
+}
+
+func requirePositiveOptionalDuration(name string, value *Duration) error {
+	if value != nil && *value <= 0 {
+		return fmt.Errorf("%s must be > 0 when set", name)
 	}
 	return nil
 }
@@ -348,47 +394,42 @@ func (c *Config) validateCodeIndex() error {
 // query_shard_fanout but not adaptive max) is still validated end-to-end.
 func (c *Config) validateSharding() error {
 	resolved := c.Sharding.resolve()
+	return firstErr(
+		validateShardingPositiveFields(c.Sharding),
+		validateCompactionTombstoneRatio(c.Sharding.CompactionTombstoneRatio),
+		validateResolvedShardingFanout(c.Sharding, resolved),
+	)
+}
 
+func validateShardingPositiveFields(cfg ShardingConfig) error {
+	return firstErr(
+		checkPositive64("shard_trigger_bytes", cfg.ShardTriggerBytes),
+		checkPositive("shard_trigger_vector_rows", cfg.ShardTriggerVectorRows),
+		checkPositive64("target_shard_bytes", cfg.TargetShardBytes),
+		checkPositive("max_vector_rows_per_shard", cfg.MaxVectorRowsPerShard),
+		checkPositive("query_shard_fanout", cfg.QueryShardFanout),
+		checkPositive("query_shard_fanout_adaptive_max", cfg.QueryShardFanoutAdaptiveMax),
+		checkPositive("query_shard_parallelism", cfg.QueryShardParallelism),
+		checkPositive("query_shard_local_topk_multiplier", cfg.QueryShardLocalTopKMult),
+		checkPositive("small_kb_max_shards", cfg.SmallKBMaxShards),
+		checkPositive("compaction_min_shard_count", cfg.CompactionMinShardCount),
+	)
+}
+
+func validateCompactionTombstoneRatio(ratio *float64) error {
+	if ratio == nil {
+		return nil
+	}
+	r := *ratio
+	if r <= 0 || r > 1 {
+		return fmt.Errorf("sharding.compaction_tombstone_ratio must be in (0, 1], got %g", r)
+	}
+	return nil
+}
+
+func validateResolvedShardingFanout(cfg ShardingConfig, resolved kb.ShardingPolicy) error {
 	const maxSafeFanout = 64
 	const maxTopKMult = 16
-
-	if err := checkPositive64("shard_trigger_bytes", c.Sharding.ShardTriggerBytes); err != nil {
-		return err
-	}
-	if err := checkPositive("shard_trigger_vector_rows", c.Sharding.ShardTriggerVectorRows); err != nil {
-		return err
-	}
-	if err := checkPositive64("target_shard_bytes", c.Sharding.TargetShardBytes); err != nil {
-		return err
-	}
-	if err := checkPositive("max_vector_rows_per_shard", c.Sharding.MaxVectorRowsPerShard); err != nil {
-		return err
-	}
-	if err := checkPositive("query_shard_fanout", c.Sharding.QueryShardFanout); err != nil {
-		return err
-	}
-	if err := checkPositive("query_shard_fanout_adaptive_max", c.Sharding.QueryShardFanoutAdaptiveMax); err != nil {
-		return err
-	}
-	if err := checkPositive("query_shard_parallelism", c.Sharding.QueryShardParallelism); err != nil {
-		return err
-	}
-	if err := checkPositive("query_shard_local_topk_multiplier", c.Sharding.QueryShardLocalTopKMult); err != nil {
-		return err
-	}
-	if err := checkPositive("small_kb_max_shards", c.Sharding.SmallKBMaxShards); err != nil {
-		return err
-	}
-	if err := checkPositive("compaction_min_shard_count", c.Sharding.CompactionMinShardCount); err != nil {
-		return err
-	}
-	if c.Sharding.CompactionTombstoneRatio != nil {
-		r := *c.Sharding.CompactionTombstoneRatio
-		if r <= 0 || r > 1 {
-			return fmt.Errorf("sharding.compaction_tombstone_ratio must be in (0, 1], got %g", r)
-		}
-	}
-
 	if resolved.QueryShardFanout > maxSafeFanout {
 		return fmt.Errorf("sharding.query_shard_fanout must be <= %d", maxSafeFanout)
 	}
@@ -396,11 +437,7 @@ func (c *Config) validateSharding() error {
 		return fmt.Errorf("sharding.query_shard_fanout_adaptive_max must be <= %d", maxSafeFanout)
 	}
 	if resolved.QueryShardFanoutAdaptiveMax < resolved.QueryShardFanout {
-		fanoutProv := provenance(c.Sharding.QueryShardFanout != nil)
-		adaptiveProv := provenance(c.Sharding.QueryShardFanoutAdaptiveMax != nil)
-		return fmt.Errorf("sharding: query_shard_fanout_adaptive_max (%d, %s) must be >= query_shard_fanout (%d, %s)",
-			resolved.QueryShardFanoutAdaptiveMax, adaptiveProv,
-			resolved.QueryShardFanout, fanoutProv)
+		return fmt.Errorf("sharding: query_shard_fanout_adaptive_max (%d, %s) must be >= query_shard_fanout (%d, %s)", resolved.QueryShardFanoutAdaptiveMax, provenance(cfg.QueryShardFanoutAdaptiveMax != nil), resolved.QueryShardFanout, provenance(cfg.QueryShardFanout != nil))
 	}
 	if resolved.QueryShardLocalTopKMult > maxTopKMult {
 		return fmt.Errorf("sharding.query_shard_local_topk_multiplier must be <= %d", maxTopKMult)
@@ -529,42 +566,38 @@ func requireNonNegativeDurationValue(name string, value Duration, note string) e
 // kb.DefaultShardingPolicy.
 func (s ShardingConfig) resolve() kb.ShardingPolicy {
 	p := kb.DefaultShardingPolicy()
-	if s.ShardTriggerBytes != nil {
-		p.ShardTriggerBytes = *s.ShardTriggerBytes
-	}
-	if s.ShardTriggerVectorRows != nil {
-		p.ShardTriggerVectorRows = *s.ShardTriggerVectorRows
-	}
-	if s.TargetShardBytes != nil {
-		p.TargetShardBytes = *s.TargetShardBytes
-	}
-	if s.MaxVectorRowsPerShard != nil {
-		p.MaxVectorRowsPerShard = *s.MaxVectorRowsPerShard
-	}
-	if s.QueryShardFanout != nil {
-		p.QueryShardFanout = *s.QueryShardFanout
-	}
-	if s.QueryShardFanoutAdaptiveMax != nil {
-		p.QueryShardFanoutAdaptiveMax = *s.QueryShardFanoutAdaptiveMax
-	}
-	if s.QueryShardParallelism != nil {
-		p.QueryShardParallelism = *s.QueryShardParallelism
-	}
-	if s.QueryShardLocalTopKMult != nil {
-		p.QueryShardLocalTopKMult = *s.QueryShardLocalTopKMult
-	}
-	if s.SmallKBMaxShards != nil {
-		p.SmallKBMaxShards = *s.SmallKBMaxShards
-	}
+	applyInt64Ptr(&p.ShardTriggerBytes, s.ShardTriggerBytes)
+	applyIntPtr(&p.ShardTriggerVectorRows, s.ShardTriggerVectorRows)
+	applyInt64Ptr(&p.TargetShardBytes, s.TargetShardBytes)
+	applyIntPtr(&p.MaxVectorRowsPerShard, s.MaxVectorRowsPerShard)
+	applyIntPtr(&p.QueryShardFanout, s.QueryShardFanout)
+	applyIntPtr(&p.QueryShardFanoutAdaptiveMax, s.QueryShardFanoutAdaptiveMax)
+	applyIntPtr(&p.QueryShardParallelism, s.QueryShardParallelism)
+	applyIntPtr(&p.QueryShardLocalTopKMult, s.QueryShardLocalTopKMult)
+	applyIntPtr(&p.SmallKBMaxShards, s.SmallKBMaxShards)
+	applyIntPtr(&p.CompactionMinShardCount, s.CompactionMinShardCount)
+	applyFloat64Ptr(&p.CompactionTombstoneRatio, s.CompactionTombstoneRatio)
 	if s.CompactionEnabled != nil {
 		p.CompactionEnabled = *s.CompactionEnabled
 		p.CompactionEnabledSet = true
 	}
-	if s.CompactionMinShardCount != nil {
-		p.CompactionMinShardCount = *s.CompactionMinShardCount
-	}
-	if s.CompactionTombstoneRatio != nil {
-		p.CompactionTombstoneRatio = *s.CompactionTombstoneRatio
-	}
 	return p
+}
+
+func applyIntPtr(target *int, value *int) {
+	if value != nil {
+		*target = *value
+	}
+}
+
+func applyInt64Ptr(target *int64, value *int64) {
+	if value != nil {
+		*target = *value
+	}
+}
+
+func applyFloat64Ptr(target *float64, value *float64) {
+	if value != nil {
+		*target = *value
+	}
 }

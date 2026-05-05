@@ -9,7 +9,7 @@ import (
 )
 
 // envVarRE matches ${VAR} style references. ${VAR:-default} is intentionally
-// not supported; defaults live in the schema, not in substitution syntax.
+// not supported. defaults live in the schema, not in substitution syntax.
 var envVarRE = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 type EnvResolver struct {
@@ -25,7 +25,7 @@ func OSResolver() EnvResolver {
 // missing name, so operators see the full set rather than one at a time.
 //
 // The substitution is purely textual. A literal ${X} inside a YAML comment will
-// also be expanded; operators should not put unresolved ${X} patterns in
+// also be expanded. operators should not put unresolved ${X} patterns in
 // comments.
 func (r EnvResolver) ResolveBytes(data []byte) ([]byte, error) {
 	lookup := r.Lookup

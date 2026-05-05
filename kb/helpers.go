@@ -1,6 +1,7 @@
 package kb
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -64,13 +65,19 @@ func replaceFileWithCopy(src, dest string) error {
 	return nil
 }
 
-func FileContentSHA256(path string) (string, error) {
+func FileContentSHA256(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	h := sha256.New()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}

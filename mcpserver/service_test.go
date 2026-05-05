@@ -176,7 +176,7 @@ func TestService(t *testing.T) {
 	})
 
 	t.Run("sync ingest polls past not found", func(t *testing.T) {
-		// Event takes a moment to materialize in the inbox; loop must keep
+		// Event takes a moment to materialize in the inbox. loop must keep
 		// polling on ErrEventNotFound and complete normally when it appears.
 		calls := 0
 		svc := newTestService(func(s *Service) {
@@ -394,7 +394,7 @@ func TestQueryInputSchema(t *testing.T) {
 	})
 }
 
-// newTestService returns a Service with happy-path closures; callers override
+// newTestService returns a Service with happy-path closures. callers override
 // what differs through the modify callback.
 func newTestService(modify func(*Service)) *Service {
 	svc := &Service{

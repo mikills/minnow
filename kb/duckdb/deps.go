@@ -1,10 +1,6 @@
 package duckdb
 
-import (
-	"context"
-
-	kb "github.com/mikills/minnow/kb"
-)
+import kb "github.com/mikills/minnow/kb"
 
 // DepOption configures DuckDB-specific fields on DuckDBArtifactDeps.
 type DepOption func(*DuckDBArtifactDeps)
@@ -29,21 +25,17 @@ func WithOfflineExt(offline bool) DepOption {
 // are applied via functional options.
 func NewDepsFromKB(k *kb.KB, opts ...DepOption) DuckDBArtifactDeps {
 	deps := DuckDBArtifactDeps{
-		BlobStore:      k.BlobStore,
-		ManifestStore:  k.ManifestStore,
-		CacheDir:       k.CacheDir,
-		ExtensionDir:   ResolveExtensionDir(),
-		OfflineExt:     true,
-		ShardingPolicy: k.ShardingPolicy,
-		Embed:          k.Embed,
-		GraphBuilder:   func() *kb.GraphBuilder { return k.GraphBuilder },
-		EvictCacheIfNeeded: func(ctx context.Context, protectKBID string) error {
-			return k.EvictCacheIfNeeded(ctx, protectKBID)
-		},
-		LockFor: k.LockFor,
-		AcquireWriteLease: func(ctx context.Context, kbID string) (kb.WriteLeaseManager, *kb.WriteLease, error) {
-			return k.AcquireWriteLease(ctx, kbID)
-		},
+		BlobStore:                  k.BlobStore,
+		ManifestStore:              k.ManifestStore,
+		CacheDir:                   k.CacheDir,
+		ExtensionDir:               ResolveExtensionDir(),
+		OfflineExt:                 true,
+		ShardingPolicy:             k.ShardingPolicy,
+		Embed:                      k.Embed,
+		GraphBuilder:               graphBuilderFromKB(k),
+		EvictCacheIfNeeded:         k.EvictCacheIfNeeded,
+		LockFor:                    k.LockFor,
+		AcquireWriteLease:          k.AcquireWriteLease,
 		EnqueueReplacedShardsForGC: k.EnqueueReplacedShardsForGC,
 		Metrics:                    k,
 	}
@@ -51,4 +43,8 @@ func NewDepsFromKB(k *kb.KB, opts ...DepOption) DuckDBArtifactDeps {
 		opt(&deps)
 	}
 	return deps
+}
+
+func graphBuilderFromKB(k *kb.KB) func() *kb.GraphBuilder {
+	return func() *kb.GraphBuilder { return k.GraphBuilder }
 }

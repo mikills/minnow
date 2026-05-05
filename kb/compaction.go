@@ -18,7 +18,7 @@
 // Selection algorithm:
 //
 //   - Shards are grouped into size tiers using log2(size / targetSize).
-//   - The densest tier (most shards) is selected; up to maxCompactionCandidates
+//   - The densest tier (most shards) is selected. up to maxCompactionCandidates
 //     shards from that tier are merged per pass.
 //   - Alternatively, shards with high tombstone ratios can trigger compaction
 //     even if the tier density is low ("tombstone pressure").
@@ -26,9 +26,9 @@
 // Failure modes:
 //
 //   - Network/blob errors abort compaction and return an error.
-//   - Manifest CAS conflicts (ErrBlobVersionMismatch) abort compaction; the
+//   - Manifest CAS conflicts (ErrBlobVersionMismatch) abort compaction. the
 //     caller can retry on a subsequent pass.
-//   - Compaction is I/O and CPU intensive; temp files and HNSW index rebuilds
+//   - Compaction is I/O and CPU intensive. temp files and HNSW index rebuilds
 //     can be expensive for large shards.
 
 package kb
@@ -36,7 +36,6 @@ package kb
 import (
 	"math"
 	"sort"
-	"time"
 )
 
 // maxCompactionCandidates is the upper bound on shards merged in one pass.
@@ -55,50 +54,6 @@ type CompactionPublishResult struct {
 	ReplacementShards  []SnapshotShardMetadata
 	ManifestVersionOld string
 	ManifestVersionNew string
-}
-
-// buildCompactedManifest produces a new manifest with the replaced shards
-// removed and the replacement shard inserted in their place.
-//
-// The replacement is inserted at the position of the first replaced shard to
-// preserve approximate ordering. TotalSizeBytes is recalculated.
-func buildCompactedManifest(kbID string, current *SnapshotShardManifest, replaced []SnapshotShardMetadata, replacement SnapshotShardMetadata) SnapshotShardManifest {
-	replacedByID := make(map[string]struct{}, len(replaced))
-	for _, shard := range replaced {
-		replacedByID[shard.ShardID] = struct{}{}
-	}
-
-	nextShards := make([]SnapshotShardMetadata, 0, len(current.Shards)-len(replaced)+1)
-	inserted := false
-	for _, shard := range current.Shards {
-		if _, drop := replacedByID[shard.ShardID]; drop {
-			if !inserted {
-				nextShards = append(nextShards, replacement)
-				inserted = true
-			}
-			continue
-		}
-		nextShards = append(nextShards, shard)
-	}
-	if !inserted {
-		nextShards = append(nextShards, replacement)
-	}
-
-	total := int64(0)
-	for _, shard := range nextShards {
-		total += shard.SizeBytes
-	}
-
-	return SnapshotShardManifest{
-		SchemaVersion:  current.SchemaVersion,
-		Layout:         current.Layout,
-		FormatKind:     current.FormatKind,
-		FormatVersion:  current.FormatVersion,
-		KBID:           kbID,
-		CreatedAt:      time.Now().UTC(),
-		TotalSizeBytes: total,
-		Shards:         nextShards,
-	}
 }
 
 // selectCompactionCandidatesWithReason evaluates the manifest and returns a

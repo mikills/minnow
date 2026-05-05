@@ -53,35 +53,14 @@ type extractedFileDocument struct {
 const MaxFilesPerIngest = 1000
 
 func (l *KB) AppendFileIngestDetailed(ctx context.Context, input FileIngestInput, maxBytes int64, idempotencyKey, correlationID string) (string, string, error) {
-	if l.BlobStore == nil {
-		return "", "", errors.New("ingest: BlobStore not configured")
+	if err := l.validateFileIngestInput(input); err != nil {
+		return "", "", err
 	}
-	if len(input.Files) == 0 && len(input.Documents) == 0 {
-		return "", "", errors.New("ingest: at least one file or document is required")
+	staged, cleanupAll, err := l.stageFileIngestUploads(ctx, input, maxBytes)
+	if err != nil {
+		return "", "", err
 	}
-	if total := len(input.Files) + len(input.Documents); total > MaxFilesPerIngest {
-		return "", "", fmt.Errorf("ingest: too many items (%d): max %d per request", total, MaxFilesPerIngest)
-	}
-	staged := make([]stagedFileUpload, 0, len(input.Files))
-	cleanupAll := func() {
-		for _, s := range staged {
-			if s.cleanup != nil {
-				s.cleanup(ctx)
-			}
-		}
-	}
-	for i, file := range input.Files {
-		s, err := l.stageFileIngestUpload(ctx, input.KBID, file, maxBytes, i)
-		if err != nil {
-			cleanupAll()
-			return "", "", err
-		}
-		staged = append(staged, s)
-	}
-	payload := DocumentUpsertPayload{KBID: input.KBID, Documents: input.Documents, ChunkSize: input.ChunkSize, Options: input.Options}
-	for _, s := range staged {
-		payload.FileSources = append(payload.FileSources, s.FileIngestSource)
-	}
+	payload := fileIngestUpsertPayload(input, staged)
 	eventID, effectiveIdem, err := l.AppendDocumentUpsertDetailed(ctx, payload, idempotencyKey, correlationID)
 	if err != nil {
 		cleanupAll()
@@ -90,28 +69,53 @@ func (l *KB) AppendFileIngestDetailed(ctx context.Context, input FileIngestInput
 	return eventID, effectiveIdem, nil
 }
 
-func (l *KB) stageFileIngestUpload(ctx context.Context, kbID string, file FileIngestUpload, maxBytes int64, index int) (stagedFileUpload, error) {
-	if strings.TrimSpace(kbID) == "" {
-		return stagedFileUpload{}, errors.New("ingest: kb_id required")
+func (l *KB) validateFileIngestInput(input FileIngestInput) error {
+	if l.BlobStore == nil {
+		return errors.New("ingest: BlobStore not configured")
 	}
-	if file.Body == nil {
-		return stagedFileUpload{}, errors.New("ingest: file body required")
+	if len(input.Files) == 0 && len(input.Documents) == 0 {
+		return errors.New("ingest: at least one file or document is required")
 	}
-	if maxBytes <= 0 {
-		maxBytes = DefaultMaxUploadBytes
+	if total := len(input.Files) + len(input.Documents); total > MaxFilesPerIngest {
+		return fmt.Errorf("ingest: too many items (%d): max %d per request", total, MaxFilesPerIngest)
 	}
-	cleanName, err := SanitizeMediaFilename(file.Filename)
-	if err != nil {
-		return stagedFileUpload{}, err
+	return nil
+}
+
+func (l *KB) stageFileIngestUploads(ctx context.Context, input FileIngestInput, maxBytes int64) ([]stagedFileUpload, func(), error) {
+	staged := make([]stagedFileUpload, 0, len(input.Files))
+	cleanupAll := func() { cleanupStagedFileUploads(ctx, staged) }
+	for i, file := range input.Files {
+		s, err := l.stageFileIngestUpload(ctx, input.KBID, file, maxBytes, i)
+		if err != nil {
+			cleanupAll()
+			return nil, nil, err
+		}
+		staged = append(staged, s)
 	}
-	ct := normaliseContentType(file.ContentType)
-	if ct == "application/octet-stream" {
-		if guessed := mime.TypeByExtension(strings.ToLower(filepath.Ext(cleanName))); guessed != "" {
-			ct = normaliseContentType(guessed)
+	return staged, cleanupAll, nil
+}
+
+func cleanupStagedFileUploads(ctx context.Context, staged []stagedFileUpload) {
+	for _, s := range staged {
+		if s.cleanup != nil {
+			s.cleanup(ctx)
 		}
 	}
-	if !isSupportedIngestFileContentType(ct, cleanName) {
-		return stagedFileUpload{}, fmt.Errorf("ingest: content type %q for %q is not supported", ct, cleanName)
+}
+
+func fileIngestUpsertPayload(input FileIngestInput, staged []stagedFileUpload) DocumentUpsertPayload {
+	payload := DocumentUpsertPayload{KBID: input.KBID, Documents: input.Documents, ChunkSize: input.ChunkSize, Options: input.Options}
+	for _, s := range staged {
+		payload.FileSources = append(payload.FileSources, s.FileIngestSource)
+	}
+	return payload
+}
+
+func (l *KB) stageFileIngestUpload(ctx context.Context, kbID string, file FileIngestUpload, maxBytes int64, index int) (stagedFileUpload, error) {
+	cleanName, ct, maxBytes, err := validateFileIngestUpload(kbID, file, maxBytes)
+	if err != nil {
+		return stagedFileUpload{}, err
 	}
 	tmp, err := writeTempCapped(file.Body, maxBytes)
 	if err != nil {
@@ -121,11 +125,10 @@ func (l *KB) stageFileIngestUpload(ctx context.Context, kbID string, file FileIn
 		tmp.cleanup()
 		return stagedFileUpload{}, errors.New("ingest: empty file rejected")
 	}
-	fileID := strings.TrimSpace(file.FileID)
-	if fileID == "" {
-		fileID = fmt.Sprintf("file-%03d-%s", index, randomHexString(3))
-	} else if !fileIDPattern.MatchString(fileID) {
-		return stagedFileUpload{}, fmt.Errorf("ingest: file_id %q must match [A-Za-z0-9_.-]+", fileID)
+	fileID, err := fileIngestID(file.FileID, index)
+	if err != nil {
+		tmp.cleanup()
+		return stagedFileUpload{}, err
 	}
 	mediaID := l.newMediaID()
 	documentID := strings.TrimSpace(file.DocumentID)
@@ -138,7 +141,68 @@ func (l *KB) stageFileIngestUpload(ctx context.Context, kbID string, file FileIn
 		return stagedFileUpload{}, fmt.Errorf("ingest: stage file upload: %w", err)
 	}
 	tmp.cleanup()
-	return stagedFileUpload{FileIngestSource: FileIngestSource{FileID: fileID, DocumentID: documentID, MediaID: mediaID, Filename: cleanName, ContentType: ct, StagedBlobKey: stagedBlobKey, SizeBytes: tmp.size, Checksum: tmp.sha256, Metadata: cloneMap(file.Metadata)}, cleanup: func(ctx context.Context) { _ = l.BlobStore.Delete(ctx, stagedBlobKey) }}, nil
+	return newStagedFileUpload(stagedFileUploadInput{store: l.BlobStore, file: file, fileID: fileID, documentID: documentID, mediaID: mediaID, cleanName: cleanName, contentType: ct, stagedBlobKey: stagedBlobKey, tmp: tmp}), nil
+}
+
+func validateFileIngestUpload(kbID string, file FileIngestUpload, maxBytes int64) (string, string, int64, error) {
+	if strings.TrimSpace(kbID) == "" {
+		return "", "", 0, errors.New("ingest: kb_id required")
+	}
+	if file.Body == nil {
+		return "", "", 0, errors.New("ingest: file body required")
+	}
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxUploadBytes
+	}
+	cleanName, err := SanitizeMediaFilename(file.Filename)
+	if err != nil {
+		return "", "", 0, err
+	}
+	ct := inferFileIngestContentType(file.ContentType, cleanName)
+	if !isSupportedIngestFileContentType(ct, cleanName) {
+		return "", "", 0, fmt.Errorf("ingest: content type %q for %q is not supported", ct, cleanName)
+	}
+	return cleanName, ct, maxBytes, nil
+}
+
+func inferFileIngestContentType(contentType string, cleanName string) string {
+	ct := normaliseContentType(contentType)
+	if ct != "application/octet-stream" {
+		return ct
+	}
+	if guessed := mime.TypeByExtension(strings.ToLower(filepath.Ext(cleanName))); guessed != "" {
+		return normaliseContentType(guessed)
+	}
+	return ct
+}
+
+func fileIngestID(raw string, index int) (string, error) {
+	fileID := strings.TrimSpace(raw)
+	if fileID == "" {
+		return fmt.Sprintf("file-%03d-%s", index, randomHexString(3)), nil
+	}
+	if !fileIDPattern.MatchString(fileID) {
+		return "", fmt.Errorf("ingest: file_id %q must match [A-Za-z0-9_.-]+", fileID)
+	}
+	return fileID, nil
+}
+
+type stagedFileUploadInput struct {
+	store         BlobStore
+	file          FileIngestUpload
+	fileID        string
+	documentID    string
+	mediaID       string
+	cleanName     string
+	contentType   string
+	stagedBlobKey string
+	tmp           *tempUpload
+}
+
+func newStagedFileUpload(input stagedFileUploadInput) stagedFileUpload {
+	return stagedFileUpload{FileIngestSource: FileIngestSource{FileID: input.fileID, DocumentID: input.documentID, MediaID: input.mediaID, Filename: input.cleanName, ContentType: input.contentType, StagedBlobKey: input.stagedBlobKey, SizeBytes: input.tmp.size, Checksum: input.tmp.sha256, Metadata: cloneMap(input.file.Metadata)}, cleanup: func(ctx context.Context) {
+		bestEffortDeleteStagedBlob(ctx, input.store, input.stagedBlobKey, "file ingest cleanup")
+	}}
 }
 
 func generateSourceDocumentID(filename string) string {
@@ -242,8 +306,8 @@ func (l *KB) persistStagedMediaObject(ctx context.Context, stagedBlobKey string,
 	}
 	defer cleanup()
 	finalBlobKey := MediaBlobKey(rec.KBID, rec.ID, rec.Filename)
-	// Create-if-absent via UploadIfMatch(""); a version-mismatch response
-	// means another actor uploaded concurrently; accept as success. Avoids
+	// Create-if-absent via UploadIfMatch(""). a version-mismatch response
+	// means another actor uploaded concurrently. accept as success. Avoids
 	// a TOCTOU between Head() and UploadIfMatch().
 	if _, err := l.BlobStore.UploadIfMatch(ctx, finalBlobKey, tmpPath, ""); err != nil && !errors.Is(err, ErrBlobVersionMismatch) {
 		return fmt.Errorf("upload final media: %w", err)

@@ -127,7 +127,7 @@ func TestInMemoryEventStore(t *testing.T) {
 		c1, err := s.Claim(ctx, EventDocumentEmbedded, "w1", 10*time.Millisecond)
 		require.NoError(t, err)
 
-		// Reaper comes in and requeues; another worker re-claims, advancing attempt.
+		// Reaper comes in and requeues. another worker re-claims, advancing attempt.
 		_, err = s.Requeue(ctx, time.Now().Add(time.Hour))
 		require.NoError(t, err)
 		_, err = s.Claim(ctx, EventDocumentEmbedded, "w2", time.Minute)
@@ -144,7 +144,7 @@ func TestInMemoryEventStore(t *testing.T) {
 		require.NoError(t, s.Append(ctx, mkEvent("e-old", "kb", EventDocumentUpsert, "k1")))
 		require.NoError(t, s.Append(ctx, mkEvent("e-new", "kb", EventDocumentUpsert, "k2")))
 
-		// mark old as done; backdate it so Cleanup's cutoff matches
+		// mark old as done. backdate it so Cleanup's cutoff matches
 		require.NoError(t, s.Ack(ctx, "e-old"))
 		s.mu.Lock()
 		s.events["e-old"].CreatedAt = time.Now().Add(-48 * time.Hour)
@@ -306,7 +306,7 @@ func (a *appendFailSpy) InTransaction(ctx context.Context, fn func(context.Conte
 	return a.inner.InTransaction(ctx, fn)
 }
 
-// stubWorker accepts all events; can be configured to fail or panic.
+// stubWorker accepts all events. can be configured to fail or panic.
 type stubWorker struct {
 	kind      EventKind
 	id        string
@@ -475,7 +475,7 @@ func TestWorkerPool(t *testing.T) {
 		_, err = pool.HandleOnce(ctx)
 		require.Error(t, err)
 
-		// First recorded call must be Append (for worker.failed); Fail
+		// First recorded call must be Append (for worker.failed). Fail
 		// comes after. If someone reverses the order the test flips.
 		require.GreaterOrEqual(t, len(calls), 2)
 		require.Equal(t, "Append:worker.failed", calls[0])
@@ -508,4 +508,3 @@ func TestWorkerPool(t *testing.T) {
 		require.NotEqual(t, EventStatusDead, got.Status)
 	})
 }
-

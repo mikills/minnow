@@ -145,7 +145,7 @@ func TestMongoEventStore(t *testing.T) {
 			return s.Ack(ctx, "src")
 		})
 		if err != nil {
-			// Standalone (non-replica-set) Mongo returns a clear error here;
+			// Standalone (non-replica-set) Mongo returns a clear error here.
 			// integration tests against a real replica set succeed. Accept
 			// both outcomes so the test is useful across deployment shapes.
 			require.Contains(t, err.Error(), "transaction")

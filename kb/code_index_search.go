@@ -32,9 +32,7 @@ func (k *KB) SearchCode(ctx context.Context, kbID, query string, opts CodeSearch
 	if strings.TrimSpace(query) == "" {
 		return nil, fmt.Errorf("query is required")
 	}
-	if opts.TopK <= 0 {
-		opts.TopK = 10
-	}
+	opts = normalizeCodeSearchOptions(opts)
 	manifest, _, err := k.loadCodeIndexManifest(ctx, kbID)
 	if err != nil {
 		return nil, err
@@ -43,32 +41,62 @@ func (k *KB) SearchCode(ctx context.Context, kbID, query string, opts CodeSearch
 	if err != nil {
 		return nil, err
 	}
-	searchK := opts.TopK * 20
-	if searchK < 200 {
-		searchK = 200
-	}
-	results, err := k.Search(ctx, kbID, vec, &SearchOptions{TopK: searchK})
+	results, err := k.Search(ctx, kbID, vec, &SearchOptions{TopK: codeSearchFanout(opts.TopK)})
 	if err != nil {
 		return nil, err
 	}
+	return filterCodeSearchResults(results, manifest, opts), nil
+}
+
+func normalizeCodeSearchOptions(opts CodeSearchOptions) CodeSearchOptions {
+	if opts.TopK <= 0 {
+		opts.TopK = 10
+	}
+	return opts
+}
+
+func codeSearchFanout(topK int) int {
+	searchK := topK * 20
+	if searchK < 200 {
+		return 200
+	}
+	return searchK
+}
+
+func filterCodeSearchResults(results []ExpandedResult, manifest codeIndexManifest, opts CodeSearchOptions) []CodeSearchResult {
 	out := make([]CodeSearchResult, 0, opts.TopK)
 	pathFilter := strings.TrimSpace(opts.Path)
 	langFilter := strings.ToLower(strings.TrimSpace(opts.Language))
-	for _, r := range results {
-		meta, ok := manifest.Chunks[r.ID]
-		if !ok {
-			continue
-		}
-		if pathFilter != "" && !strings.Contains(meta.Path, pathFilter) {
-			continue
-		}
-		if langFilter != "" && strings.ToLower(meta.Language) != langFilter {
-			continue
-		}
-		out = append(out, CodeSearchResult{ID: r.ID, Content: r.Content, Distance: r.Distance, Path: meta.Path, Language: meta.Language, Symbol: meta.Symbol, Kind: meta.Kind, StartLine: meta.StartLine, EndLine: meta.EndLine})
-		if len(out) >= opts.TopK {
+	for _, result := range results {
+		if appendCodeSearchResult(&out, result, codeSearchFilter{manifest: manifest, path: pathFilter, language: langFilter, topK: opts.TopK}) {
 			break
 		}
 	}
-	return out, nil
+	return out
+}
+
+type codeSearchFilter struct {
+	manifest codeIndexManifest
+	path     string
+	language string
+	topK     int
+}
+
+func appendCodeSearchResult(out *[]CodeSearchResult, result ExpandedResult, filter codeSearchFilter) bool {
+	meta, ok := filter.manifest.Chunks[result.ID]
+	if !ok || !codeSearchMetaMatches(meta, filter.path, filter.language) {
+		return false
+	}
+	*out = append(*out, CodeSearchResult{ID: result.ID, Content: result.Content, Distance: result.Distance, Path: meta.Path, Language: meta.Language, Symbol: meta.Symbol, Kind: meta.Kind, StartLine: meta.StartLine, EndLine: meta.EndLine})
+	return len(*out) >= filter.topK
+}
+
+func codeSearchMetaMatches(meta CodeChunkMetadata, pathFilter string, langFilter string) bool {
+	if pathFilter != "" && !strings.Contains(meta.Path, pathFilter) {
+		return false
+	}
+	if langFilter != "" && strings.ToLower(meta.Language) != langFilter {
+		return false
+	}
+	return true
 }

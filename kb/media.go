@@ -16,7 +16,7 @@ const (
 )
 
 // MediaLocator narrows a chunk's reference to a region within a media object.
-// All fields are optional; presence depends on the media type.
+// All fields are optional. presence depends on the media type.
 type MediaLocator struct {
 	Page        int    `json:"page,omitempty"`
 	ByteStart   int64  `json:"byte_start,omitempty"`
@@ -95,7 +95,7 @@ type MediaUploadInput struct {
 	// AllowedContentTypes optionally restricts accepted content types. An
 	// empty allowlist permits any normalised content type. A non-empty
 	// list rejects anything else (matched case-insensitively on the
-	// prefix-before-';').
+	// prefix-before-'.').
 	AllowedContentTypes []string
 }
 

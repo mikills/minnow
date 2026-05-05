@@ -34,52 +34,77 @@ func (l *KB) DeleteKnowledgeBase(ctx context.Context, kbID string) error {
 		return fmt.Errorf("delete manifest %q: %w", kbID, err)
 	}
 
-	var cleanupErrs []error
-	if manifest != nil {
-		for _, shard := range manifest.Manifest.Shards {
-			if shard.Key == "" {
-				continue
-			}
-			if err := l.BlobStore.Delete(ctx, shard.Key); err != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("delete shard %s: %w", shard.Key, err))
-			}
-		}
-	}
-
-	if l.CacheDir != "" {
-		if err := os.RemoveAll(filepath.Join(l.CacheDir, kbID)); err != nil && !os.IsNotExist(err) {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove cache dir for %q: %w", kbID, err))
-		}
-		// Recompute current cache bytes so the metric does not drift after
-		// removing this KB's cache subtree. We cannot just zero it (other KBs
-		// may still occupy space).
-		_, total := l.collectCacheEntries()
-		l.recordCacheBytesCurrent(total)
-	}
-
-	if l.MediaStore != nil {
-		for after := ""; ; {
-			page, listErr := l.MediaStore.List(ctx, kbID, "", after, 500)
-			if listErr != nil {
-				cleanupErrs = append(cleanupErrs, fmt.Errorf("list media for kb delete: %w", listErr))
-				break
-			}
-			for _, item := range page.Items {
-				if err := l.MediaStore.Delete(ctx, item.ID); err != nil {
-					cleanupErrs = append(cleanupErrs, fmt.Errorf("delete media %s: %w", item.ID, err))
-				}
-			}
-			if page.NextToken == "" {
-				break
-			}
-			after = page.NextToken
-		}
-	}
+	cleanupErrs := l.cleanupDeletedKB(ctx, kbID, manifest)
 
 	if len(cleanupErrs) > 0 {
 		return fmt.Errorf("knowledge base %q deleted with cleanup errors: %w", kbID, errors.Join(cleanupErrs...))
 	}
 	return nil
+}
+
+func (l *KB) cleanupDeletedKB(ctx context.Context, kbID string, manifest *ManifestDocument) []error {
+	var cleanupErrs []error
+	cleanupErrs = append(cleanupErrs, l.deleteManifestShards(ctx, manifest)...)
+	cleanupErrs = append(cleanupErrs, l.deleteKBCache(kbID)...)
+	cleanupErrs = append(cleanupErrs, l.deleteKBMedia(ctx, kbID)...)
+	return cleanupErrs
+}
+
+func (l *KB) deleteManifestShards(ctx context.Context, manifest *ManifestDocument) []error {
+	if manifest == nil {
+		return nil
+	}
+	var errs []error
+	for _, shard := range manifest.Manifest.Shards {
+		if shard.Key == "" {
+			continue
+		}
+		if err := l.BlobStore.Delete(ctx, shard.Key); err != nil {
+			errs = append(errs, fmt.Errorf("delete shard %s: %w", shard.Key, err))
+		}
+	}
+	return errs
+}
+
+func (l *KB) deleteKBCache(kbID string) []error {
+	if l.CacheDir == "" {
+		return nil
+	}
+	var errs []error
+	if err := os.RemoveAll(filepath.Join(l.CacheDir, kbID)); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("remove cache dir for %q: %w", kbID, err))
+	}
+	_, total := l.collectCacheEntries()
+	l.recordCacheBytesCurrent(total)
+	return errs
+}
+
+func (l *KB) deleteKBMedia(ctx context.Context, kbID string) []error {
+	if l.MediaStore == nil {
+		return nil
+	}
+	var errs []error
+	for after := ""; ; {
+		page, listErr := l.MediaStore.List(ctx, kbID, "", after, 500)
+		if listErr != nil {
+			return append(errs, fmt.Errorf("list media for kb delete: %w", listErr))
+		}
+		errs = append(errs, l.deleteMediaPage(ctx, page.Items)...)
+		if page.NextToken == "" {
+			return errs
+		}
+		after = page.NextToken
+	}
+}
+
+func (l *KB) deleteMediaPage(ctx context.Context, items []MediaObject) []error {
+	var errs []error
+	for _, item := range items {
+		if err := l.MediaStore.Delete(ctx, item.ID); err != nil {
+			errs = append(errs, fmt.Errorf("delete media %s: %w", item.ID, err))
+		}
+	}
+	return errs
 }
 
 // TombstoneMedia marks a media object as deleted without removing its metadata.

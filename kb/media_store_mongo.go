@@ -201,7 +201,7 @@ func (s *MongoMediaStore) ListByState(ctx context.Context, kbID string, state Me
 }
 
 // findPage issues a single keyset-paginated query. Results are sorted by
-// _id ascending; the continuation token is the last _id on the page.
+// _id ascending. the continuation token is the last _id on the page.
 func (s *MongoMediaStore) findPage(ctx context.Context, filter bson.M, limit int, pageToken string) (MediaPage, error) {
 	lastID, err := decodeMediaPageToken(pageToken)
 	if err != nil {

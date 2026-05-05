@@ -18,6 +18,8 @@ import (
 	"github.com/mikills/minnow/kb"
 )
 
+var backgroundContext = context.Background()
+
 type company struct {
 	Ticker string
 	CIK    string
@@ -70,7 +72,7 @@ func main() {
 
 	client := &http.Client{Timeout: 60 * time.Second}
 	chunker := kb.TextChunker{ChunkSize: *chunkSize}
-	ctx := context.Background()
+	ctx := backgroundContext
 
 	totalChunks := 0
 	failures := 0

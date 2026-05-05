@@ -202,7 +202,7 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 }
 
 // collectEmbeddableDocs returns up to needed documents that the embedder
-// accepts. Short/empty chunks are rejected by a cheap heuristic first; the
+// accepts. Short/empty chunks are rejected by a cheap heuristic first. the
 // embedder is only called on the remainder. Returns early once `needed` good
 // docs have been found, so Ollama-backed embedders aren't asked to pre-embed
 // the entire corpus just to filter a handful of bad chunks.

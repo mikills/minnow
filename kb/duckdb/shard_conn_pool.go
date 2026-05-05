@@ -23,7 +23,7 @@ type shardConnPool struct {
 }
 
 // GetOrOpen returns a pooled connection for localPath, creating one via openFn
-// if not already cached. The returned shardConn is locked; the caller MUST
+// if not already cached. The returned shardConn is locked. the caller MUST
 // unlock shardConn.mu after finishing use of shardConn.db.
 func (p *shardConnPool) GetOrOpen(ctx context.Context, localPath string,
 	openFn func(ctx context.Context, path string) (*sql.DB, error)) (*shardConn, error) {

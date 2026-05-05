@@ -75,8 +75,8 @@ type GraphBuildResult struct {
 }
 
 // GraphBuilder coordinates chunking, graph extraction, and canonicalization.
-// BatchSize controls how many chunks are sent to Grapher.Extract per call;
-// it defaults to 500 when <= 0. Canonicalizer is optional; when nil, raw
+// BatchSize controls how many chunks are sent to Grapher.Extract per call.
+// it defaults to 500 when <= 0. Canonicalizer is optional. when nil, raw
 // entity names are used as IDs directly.
 type GraphBuilder struct {
 	Chunker       Chunker
@@ -278,7 +278,7 @@ func (a *graphBuildAccumulator) result() *GraphBuildResult {
 }
 
 // Build runs the full pipeline and returns the accumulated GraphBuildResult.
-// The entire result is held in memory; use BuildAndInsert for large document
+// The entire result is held in memory. use BuildAndInsert for large document
 // sets where incremental persistence is preferred.
 func (b *GraphBuilder) Build(ctx context.Context, docs []Document) (*GraphBuildResult, error) {
 	return b.buildGraph(ctx, docs, nil)

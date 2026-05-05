@@ -59,59 +59,53 @@ func (c TextChunker) Chunk(ctx context.Context, docID string, text string) ([]Ch
 	// perform recursive split
 	pieces := recursiveSplit(trimmed, defaultSeparators, chunkSize)
 
-	// build chunks with offsets
+	return buildTextChunks(ctx, docID, sourceText, pieces)
+}
+
+func buildTextChunks(ctx context.Context, docID string, sourceText string, pieces []string) ([]Chunk, error) {
 	chunks := make([]Chunk, 0, len(pieces))
 	pos := 0
-	sourceLen := len(sourceText)
 	for i, piece := range pieces {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-
-		if pos < 0 {
-			pos = 0
-		}
-		if pos > sourceLen {
-			pos = sourceLen
-		}
-
-		// find piece in original text starting from pos
-		idx := strings.Index(sourceText[pos:], piece)
-		if idx < 0 {
-			// fallback: best-effort search across full text; if still missing, anchor at pos
-			if absoluteIdx := strings.Index(sourceText, piece); absoluteIdx >= 0 {
-				idx = absoluteIdx - pos
-			} else {
-				idx = 0
-			}
-		}
-		start := pos + idx
-		if start < 0 {
-			start = 0
-		}
-		if start > sourceLen {
-			start = sourceLen
-		}
-		end := start + len(piece)
-		if end > sourceLen {
-			end = sourceLen
-		}
-		if end < start {
-			end = start
-		}
-
-		chunk := Chunk{
-			DocID:   docID,
-			ChunkID: fmt.Sprintf("%s-chunk-%03d", docID, i),
-			Text:    piece,
-			Start:   start,
-			End:     end,
-		}
-		chunks = append(chunks, chunk)
-		pos = end
+		span := findChunkSpan(sourceText, piece, pos)
+		chunks = append(chunks, Chunk{DocID: docID, ChunkID: fmt.Sprintf("%s-chunk-%03d", docID, i), Text: piece, Start: span.start, End: span.end})
+		pos = span.end
 	}
-
 	return chunks, nil
+}
+
+type chunkSpan struct{ start, end int }
+
+func findChunkSpan(sourceText string, piece string, pos int) chunkSpan {
+	sourceLen := len(sourceText)
+	pos = clampInt(pos, 0, sourceLen)
+	idx := strings.Index(sourceText[pos:], piece)
+	if idx < 0 {
+		idx = fallbackChunkIndex(sourceText, piece, pos)
+	}
+	start := clampInt(pos+idx, 0, sourceLen)
+	end := clampInt(start+len(piece), start, sourceLen)
+	return chunkSpan{start: start, end: end}
+}
+
+func fallbackChunkIndex(sourceText string, piece string, pos int) int {
+	absoluteIdx := strings.Index(sourceText, piece)
+	if absoluteIdx < 0 {
+		return 0
+	}
+	return absoluteIdx - pos
+}
+
+func clampInt(value int, minValue int, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
 }
 
 // recursiveSplit splits text using a hierarchy of separators.

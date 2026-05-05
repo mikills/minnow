@@ -198,7 +198,7 @@ func (f *DuckDBArtifactFormat) searchTopK(ctx context.Context, kbID string, quer
 	}
 	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
 	localTopK := shardLocalTopK(k, policy)
-	results, shardErr := f.queryTopKFromShards(ctx, kbID, queryVec, k, localTopK, selection.Plan)
+	results, shardErr := f.queryTopKFromShards(ctx, shardTopKQuery{kbID: kbID, queryVec: queryVec, k: k, localTopK: localTopK, plan: selection.Plan})
 	if shardErr != nil {
 		f.deps.Metrics.RecordShardExecutionFailure(kbID)
 		return nil, shardErr
@@ -221,41 +221,58 @@ func shardLocalTopK(k int, policy kb.ShardingPolicy) int {
 	return local
 }
 
-func (f *DuckDBArtifactFormat) queryTopKFromShards(ctx context.Context, kbID string, queryVec []float32, k, localTopK int, plan shardQueryPlan) ([]kb.QueryResult, error) {
-	if plan.Fanout <= 0 || len(plan.Shards) == 0 {
+type shardTopKQuery struct {
+	kbID      string
+	queryVec  []float32
+	k         int
+	localTopK int
+	plan      shardQueryPlan
+}
+
+func (f *DuckDBArtifactFormat) queryTopKFromShards(ctx context.Context, query shardTopKQuery) ([]kb.QueryResult, error) {
+	if query.plan.Fanout <= 0 || len(query.plan.Shards) == 0 {
 		return []kb.QueryResult{}, nil
 	}
-	f.deps.Metrics.RecordShardFanout(kbID, plan.Fanout, plan.Capped)
-	f.deps.Metrics.RecordShardExecution(kbID, plan.Fanout)
+	f.deps.Metrics.RecordShardFanout(query.kbID, query.plan.Fanout, query.plan.Capped)
+	f.deps.Metrics.RecordShardExecution(query.kbID, query.plan.Fanout)
 
-	shardResults, err := f.queryShardsTopK(ctx, kbID, plan.Shards, queryVec, localTopK, plan.Parallelism)
+	shardResults, err := f.queryShardsTopK(ctx, shardQueryWorkload{kbID: query.kbID, shards: query.plan.Shards, queryVec: query.queryVec, k: query.localTopK, parallelism: query.plan.Parallelism})
 	if err != nil {
 		return nil, err
 	}
-	return mergeShardTopKResults(shardResults, k), nil
+	return mergeShardTopKResults(shardResults, query.k), nil
 }
 
-func (f *DuckDBArtifactFormat) queryShardsTopK(ctx context.Context, kbID string, shards []kb.SnapshotShardMetadata, queryVec []float32, k, parallelism int) ([][]kb.QueryResult, error) {
-	if len(shards) == 0 || k <= 0 {
+type shardQueryWorkload struct {
+	kbID        string
+	shards      []kb.SnapshotShardMetadata
+	queryVec    []float32
+	k           int
+	parallelism int
+}
+
+func (f *DuckDBArtifactFormat) queryShardsTopK(ctx context.Context, workload shardQueryWorkload) ([][]kb.QueryResult, error) {
+	if len(workload.shards) == 0 || workload.k <= 0 {
 		return [][]kb.QueryResult{}, nil
 	}
+	parallelism := workload.parallelism
 	if parallelism <= 0 {
 		parallelism = 1
 	}
-	if parallelism > len(shards) {
-		parallelism = len(shards)
+	if parallelism > len(workload.shards) {
+		parallelism = len(workload.shards)
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	results := make([][]kb.QueryResult, len(shards))
+	results := make([][]kb.QueryResult, len(workload.shards))
 	sem := make(chan struct{}, parallelism)
 	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
 
-	for i := range shards {
-		f.startVectorShardQuery(ctx, vectorShardQueryWork{kbID: kbID, idx: i, shard: shards[i], queryVec: queryVec, k: k, sem: sem, errCh: errCh, results: results, cancel: cancel, wg: &wg})
+	for i := range workload.shards {
+		f.startVectorShardQuery(ctx, vectorShardQueryWork{kbID: workload.kbID, idx: i, shard: workload.shards[i], queryVec: workload.queryVec, k: workload.k, sem: sem, errCh: errCh, results: results, cancel: cancel, wg: &wg})
 	}
 
 	wg.Wait()
@@ -332,43 +349,18 @@ func (f *DuckDBArtifactFormat) ensureLocalShardFile(ctx context.Context, kbID st
 	}
 	cacheDir := filepath.Join(f.deps.CacheDir, kbID, "query-shards")
 	localPath := filepath.Join(cacheDir, shardCacheFileName(shard))
-	if _, err := os.Stat(localPath); err == nil {
-		if err := f.deps.EvictCacheIfNeeded(ctx, kbID); err != nil {
-			return "", true, err
-		}
-		return localPath, true, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", false, err
+	cached, err := f.useCachedShardIfPresent(ctx, kbID, localPath)
+	if err != nil || cached {
+		return localPathOrEmpty(localPath, cached), cached, err
 	}
-
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", false, err
 	}
-
-	tmpPath := fmt.Sprintf("%s.download-%d", localPath, time.Now().UnixNano())
-	defer os.Remove(tmpPath)
-	if err := f.deps.BlobStore.Download(ctx, shard.Key, tmpPath); err != nil {
+	tmpPath, err := f.downloadShardToTemp(ctx, shard, localPath)
+	if err != nil {
 		return "", false, err
 	}
-
-	if shard.SizeBytes > 0 {
-		stat, err := os.Stat(tmpPath)
-		if err != nil {
-			return "", false, err
-		}
-		if stat.Size() != shard.SizeBytes {
-			return "", false, fmt.Errorf("size mismatch for shard %s", shard.ShardID)
-		}
-	}
-	if shard.SHA256 != "" {
-		sha, err := kb.FileContentSHA256(tmpPath)
-		if err != nil {
-			return "", false, err
-		}
-		if sha != shard.SHA256 {
-			return "", false, fmt.Errorf("checksum mismatch for shard %s", shard.ShardID)
-		}
-	}
+	defer os.Remove(tmpPath)
 	if err := os.Rename(tmpPath, localPath); err != nil {
 		return "", false, err
 	}
@@ -378,28 +370,76 @@ func (f *DuckDBArtifactFormat) ensureLocalShardFile(ctx context.Context, kbID st
 	return localPath, false, nil
 }
 
+func localPathOrEmpty(localPath string, ok bool) string {
+	if ok {
+		return localPath
+	}
+	return ""
+}
+
+func (f *DuckDBArtifactFormat) useCachedShardIfPresent(ctx context.Context, kbID string, localPath string) (bool, error) {
+	if _, err := os.Stat(localPath); err == nil {
+		return true, f.deps.EvictCacheIfNeeded(ctx, kbID)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return false, nil
+}
+
+func (f *DuckDBArtifactFormat) downloadShardToTemp(ctx context.Context, shard kb.SnapshotShardMetadata, localPath string) (string, error) {
+	tmpPath := fmt.Sprintf("%s.download-%d", localPath, time.Now().UnixNano())
+	if err := f.deps.BlobStore.Download(ctx, shard.Key, tmpPath); err != nil {
+		return "", err
+	}
+	if err := verifyDownloadedShard(ctx, shard, tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	return tmpPath, nil
+}
+
+func verifyDownloadedShard(ctx context.Context, shard kb.SnapshotShardMetadata, tmpPath string) error {
+	if err := verifyShardSize(shard, tmpPath); err != nil {
+		return err
+	}
+	return verifyShardChecksum(ctx, shard, tmpPath)
+}
+
+func verifyShardSize(shard kb.SnapshotShardMetadata, tmpPath string) error {
+	if shard.SizeBytes <= 0 {
+		return nil
+	}
+	stat, err := os.Stat(tmpPath)
+	if err != nil {
+		return err
+	}
+	if stat.Size() != shard.SizeBytes {
+		return fmt.Errorf("size mismatch for shard %s", shard.ShardID)
+	}
+	return nil
+}
+
+func verifyShardChecksum(ctx context.Context, shard kb.SnapshotShardMetadata, tmpPath string) error {
+	if shard.SHA256 == "" {
+		return nil
+	}
+	sha, err := kb.FileContentSHA256(ctx, tmpPath)
+	if err != nil {
+		return err
+	}
+	if sha != shard.SHA256 {
+		return fmt.Errorf("checksum mismatch for shard %s", shard.ShardID)
+	}
+	return nil
+}
+
 func shardCacheFileName(shard kb.SnapshotShardMetadata) string {
 	token := shard.ShardID
 	if strings.TrimSpace(token) == "" {
 		token = "shard"
 	}
-	cleanToken := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z':
-			return r
-		case r >= 'A' && r <= 'Z':
-			return r
-		case r >= '0' && r <= '9':
-			return r
-		case r == '-' || r == '_':
-			return r
-		default:
-			return '_'
-		}
-	}, token)
-	if cleanToken == "" {
-		cleanToken = "shard"
-	}
+	cleanToken := strings.Map(cacheFileNameRune, token)
+	cleanToken = fallbackShardToken(cleanToken)
 	digest := sha256.Sum256([]byte(shard.Key + "|" + shard.Version))
 	return fmt.Sprintf("%s-%x.duckdb", cleanToken, digest[:8])
 }
@@ -409,51 +449,13 @@ func mergeShardTopKResults(shardResults [][]kb.QueryResult, k int) []kb.QueryRes
 		return []kb.QueryResult{}
 	}
 
-	type scoredResult struct {
-		result     kb.QueryResult
-		shardIndex int
-		localIndex int
-	}
-
-	total := 0
-	for _, shard := range shardResults {
-		total += len(shard)
-	}
-
-	flattened := make([]scoredResult, 0, total)
-	for shardIndex, shard := range shardResults {
-		for localIndex, result := range shard {
-			flattened = append(flattened, scoredResult{
-				result:     result,
-				shardIndex: shardIndex,
-				localIndex: localIndex,
-			})
-		}
-	}
+	flattened := flattenShardResults(shardResults)
 
 	if len(flattened) == 0 {
 		return []kb.QueryResult{}
 	}
 
-	sort.SliceStable(flattened, func(i, j int) bool {
-		left := flattened[i]
-		right := flattened[j]
-
-		if left.result.Distance != right.result.Distance {
-			return left.result.Distance < right.result.Distance
-		}
-		if left.result.ID != right.result.ID {
-			return left.result.ID < right.result.ID
-		}
-		if left.result.Content != right.result.Content {
-			return left.result.Content < right.result.Content
-		}
-		if left.shardIndex != right.shardIndex {
-			return left.shardIndex < right.shardIndex
-		}
-
-		return left.localIndex < right.localIndex
-	})
+	sort.SliceStable(flattened, func(i, j int) bool { return lessScoredResult(flattened[i], flattened[j]) })
 
 	if k > len(flattened) {
 		k = len(flattened)
@@ -465,4 +467,62 @@ func mergeShardTopKResults(shardResults [][]kb.QueryResult, k int) []kb.QueryRes
 	}
 
 	return merged
+}
+
+type scoredResult struct {
+	result     kb.QueryResult
+	shardIndex int
+	localIndex int
+}
+
+func cacheFileNameRune(r rune) rune {
+	if isCacheFileNameRune(r) {
+		return r
+	}
+	return '_'
+}
+
+func isCacheFileNameRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_'
+}
+
+func fallbackShardToken(token string) string {
+	if token == "" {
+		return "shard"
+	}
+	return token
+}
+
+func flattenShardResults(shardResults [][]kb.QueryResult) []scoredResult {
+	flattened := make([]scoredResult, 0, countShardResults(shardResults))
+	for shardIndex, shard := range shardResults {
+		for localIndex, result := range shard {
+			flattened = append(flattened, scoredResult{result: result, shardIndex: shardIndex, localIndex: localIndex})
+		}
+	}
+	return flattened
+}
+
+func countShardResults(shardResults [][]kb.QueryResult) int {
+	total := 0
+	for _, shard := range shardResults {
+		total += len(shard)
+	}
+	return total
+}
+
+func lessScoredResult(left scoredResult, right scoredResult) bool {
+	if left.result.Distance != right.result.Distance {
+		return left.result.Distance < right.result.Distance
+	}
+	if left.result.ID != right.result.ID {
+		return left.result.ID < right.result.ID
+	}
+	if left.result.Content != right.result.Content {
+		return left.result.Content < right.result.Content
+	}
+	if left.shardIndex != right.shardIndex {
+		return left.shardIndex < right.shardIndex
+	}
+	return left.localIndex < right.localIndex
 }

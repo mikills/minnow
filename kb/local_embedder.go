@@ -10,9 +10,8 @@ import (
 )
 
 const (
-	defaultLocalEmbedDim = 384
-	defaultMinNgram      = 3
-	defaultMaxNgram      = 6
+	defaultMinNgram = 3
+	defaultMaxNgram = 6
 )
 
 var (

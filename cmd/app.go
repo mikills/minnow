@@ -21,6 +21,8 @@ import (
 
 const cacheSweepTimeout = 150 * time.Millisecond
 
+var appRootContext = context.Background()
+
 // kbIDHeader is the header nginx uses to forward the consistent-hash routing key.
 const kbIDHeader = "X-KB-ID"
 
@@ -197,20 +199,26 @@ func (a *App) registerRoutes() {
 
 	// HTTP-only closures: media upload and file ingest are exposed on the
 	// REST surface but not via MCP.
-	if a.kb != nil && a.kb.MediaStore != nil && a.kb.EventStore != nil {
-		deps.AppendMediaUpload = func(ctx context.Context, in kb.MediaUploadInput, maxBytes int64, idem, corr string) (string, string, error) {
-			return a.kb.AppendMediaUploadDetailed(ctx, in, maxBytes, idem, corr)
-		}
-	}
-	if a.kb != nil && a.kb.EventStore != nil {
-		deps.AppendFileIngest = func(ctx context.Context, in kb.FileIngestInput, maxBytes int64, idem, corr string) (string, string, error) {
-			return a.kb.AppendFileIngestDetailed(ctx, in, maxBytes, idem, corr)
-		}
-	}
+	deps.AppendMediaUpload = appMediaUploadFn(a.kb)
+	deps.AppendFileIngest = appFileIngestFn(a.kb)
 
 	Register(a.echo, deps)
 	a.registerMCPRoutes(deps)
 	RegisterUI(a.echo)
+}
+
+func appMediaUploadFn(loader *kb.KB) func(context.Context, kb.MediaUploadInput, int64, string, string) (string, string, error) {
+	if loader == nil || loader.MediaStore == nil || loader.EventStore == nil {
+		return nil
+	}
+	return loader.AppendMediaUploadDetailed
+}
+
+func appFileIngestFn(loader *kb.KB) func(context.Context, kb.FileIngestInput, int64, string, string) (string, string, error) {
+	if loader == nil || loader.EventStore == nil {
+		return nil
+	}
+	return loader.AppendFileIngestDetailed
 }
 
 func (a *App) registerMCPRoutes(deps Dependencies) {
@@ -238,45 +246,20 @@ func buildKBDeps(loader *kb.KB, logger *slog.Logger) Dependencies {
 		logger = slog.Default()
 	}
 	deps := Dependencies{
-		Logger: logger,
-		Embed: func(ctx context.Context, input string) ([]float32, error) {
-			if loader == nil {
-				return nil, fmt.Errorf("kb unavailable")
-			}
-			return loader.Embed(ctx, input)
-		},
-		Search: func(ctx context.Context, kbID string, queryVec []float32, opts *kb.SearchOptions) ([]kb.ExpandedResult, error) {
-			if loader == nil {
-				return nil, fmt.Errorf("kb unavailable")
-			}
-			return loader.Search(ctx, kbID, queryVec, opts)
-		},
-		SweepCache: func(ctx context.Context) error {
-			if loader == nil {
-				return fmt.Errorf("kb unavailable")
-			}
-			return loader.SweepCache(ctx)
-		},
+		Logger:     logger,
+		Embed:      kbEmbedFn(loader),
+		Search:     kbSearchFn(loader),
+		SweepCache: kbSweepCacheFn(loader),
 	}
 	if loader == nil {
 		return deps
 	}
-	deps.ClearCache = func(context.Context) error { return loader.ClearCache() }
-	deps.ForceCompaction = func(ctx context.Context, kbID string) (*kb.CompactionPublishResult, error) {
-		return loader.CompactIfNeeded(ctx, kbID)
-	}
-	deps.DeleteKnowledgeBase = func(ctx context.Context, kbID string) error {
-		return loader.DeleteKnowledgeBase(ctx, kbID)
-	}
-	deps.IndexCodebase = func(ctx context.Context, opts kb.CodeIndexOptions) (kb.CodeIndexResult, error) {
-		return loader.IndexCodebase(ctx, opts)
-	}
-	deps.CodeIndexStatus = func(ctx context.Context, kbID string) (kb.CodeIndexStatus, error) {
-		return loader.CodeIndexStatus(ctx, kbID)
-	}
-	deps.SearchCode = func(ctx context.Context, kbID, query string, opts kb.CodeSearchOptions) ([]kb.CodeSearchResult, error) {
-		return loader.SearchCode(ctx, kbID, query, opts)
-	}
+	deps.ClearCache = kbClearCacheFn(loader)
+	deps.ForceCompaction = loader.CompactIfNeeded
+	deps.DeleteKnowledgeBase = loader.DeleteKnowledgeBase
+	deps.IndexCodebase = loader.IndexCodebase
+	deps.CodeIndexStatus = loader.CodeIndexStatus
+	deps.SearchCode = loader.SearchCode
 	deps.InstallCodeHooks = kb.InstallCodeIndexHooks
 	deps.UninstallCodeHooks = kb.UninstallCodeIndexHooks
 	deps.CodeHookStatus = kb.CodeIndexHookStatus
@@ -284,31 +267,48 @@ func buildKBDeps(loader *kb.KB, logger *slog.Logger) Dependencies {
 	// When media is disabled, MediaStore is nil and these closures stay nil,
 	// which makes cmd/actions.go return 503.
 	if loader.MediaStore != nil {
-		deps.GetMedia = func(ctx context.Context, id string) (*kb.MediaObject, error) {
-			return loader.MediaStore.Get(ctx, id)
-		}
-		deps.ListMedia = func(ctx context.Context, kbID, prefix, after string, limit int) (kb.MediaPage, error) {
-			return loader.MediaStore.List(ctx, kbID, prefix, after, limit)
-		}
-		deps.DeleteMedia = func(ctx context.Context, id string) error {
-			return loader.TombstoneMedia(ctx, id)
-		}
+		deps.GetMedia = loader.MediaStore.Get
+		deps.ListMedia = loader.MediaStore.List
+		deps.DeleteMedia = loader.TombstoneMedia
 	}
 	if loader.EventStore != nil {
-		deps.AppendDocumentUpsert = func(ctx context.Context, p kb.DocumentUpsertPayload, idem, corr string) (string, string, error) {
-			return loader.AppendDocumentUpsertDetailed(ctx, p, idem, corr)
-		}
-		deps.GetEvent = func(ctx context.Context, id string) (*kb.KBEvent, error) {
-			return loader.EventStore.Get(ctx, id)
-		}
-		deps.FindOperationTerminal = func(ctx context.Context, source string) (*kb.KBEvent, error) {
-			return loader.FindOperationTerminal(ctx, source)
-		}
-		deps.OperationStages = func(ctx context.Context, source string) ([]kb.OperationStageSnapshot, error) {
-			return loader.OperationStages(ctx, source)
-		}
+		deps.AppendDocumentUpsert = loader.AppendDocumentUpsertDetailed
+		deps.GetEvent = loader.EventStore.Get
+		deps.FindOperationTerminal = loader.FindOperationTerminal
+		deps.OperationStages = loader.OperationStages
 	}
 	return deps
+}
+
+func kbEmbedFn(loader *kb.KB) func(context.Context, string) ([]float32, error) {
+	return func(ctx context.Context, input string) ([]float32, error) {
+		if loader == nil {
+			return nil, fmt.Errorf("kb unavailable")
+		}
+		return loader.Embed(ctx, input)
+	}
+}
+
+func kbSearchFn(loader *kb.KB) func(context.Context, string, []float32, *kb.SearchOptions) ([]kb.ExpandedResult, error) {
+	return func(ctx context.Context, kbID string, queryVec []float32, opts *kb.SearchOptions) ([]kb.ExpandedResult, error) {
+		if loader == nil {
+			return nil, fmt.Errorf("kb unavailable")
+		}
+		return loader.Search(ctx, kbID, queryVec, opts)
+	}
+}
+
+func kbSweepCacheFn(loader *kb.KB) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if loader == nil {
+			return fmt.Errorf("kb unavailable")
+		}
+		return loader.SweepCache(ctx)
+	}
+}
+
+func kbClearCacheFn(loader *kb.KB) func(context.Context) error {
+	return func(context.Context) error { return loader.ClearCache() }
 }
 
 func mcpServiceFromDeps(cfg mcpserver.Config, deps Dependencies) mcpserver.Service {
@@ -411,7 +411,7 @@ func (a *App) Stop(ctx context.Context) error {
 	}
 
 	if ctx == nil {
-		c, cancel := context.WithTimeout(context.Background(), a.config.ShutdownTimeout)
+		c, cancel := context.WithTimeout(appRootContext, a.config.ShutdownTimeout)
 		defer cancel()
 		ctx = c
 	}
@@ -430,7 +430,7 @@ func (a *App) startCacheEvictionLoopLocked() {
 		return
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(appRootContext)
 	done := make(chan struct{})
 	a.cacheEvictCancel = cancel
 	a.cacheEvictDone = done
@@ -445,8 +445,10 @@ func (a *App) startCacheEvictionLoopLocked() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				sweepCtx, sweepCancel := context.WithTimeout(context.Background(), cacheSweepTimeout)
-				_ = a.kb.SweepCache(sweepCtx)
+				sweepCtx, sweepCancel := context.WithTimeout(ctx, cacheSweepTimeout)
+				if err := a.kb.SweepCache(sweepCtx); err != nil {
+					a.config.Logger.Warn("cache eviction sweep failed", "error", err)
+				}
 				sweepCancel()
 			}
 		}

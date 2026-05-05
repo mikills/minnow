@@ -72,71 +72,47 @@ func (k *KB) Search(ctx context.Context, kbID string, queryVec []float32, opts *
 
 	switch options.Mode {
 	case SearchModeGraph:
-		graphReq := GraphQueryRequest{
-			KBID:     kbID,
-			QueryVec: queryVec,
-			Options: GraphQueryOptions{
-				TopK:        options.TopK,
-				MaxDistance: options.MaxDistance,
-				Expansion:   options.Expansion,
-			},
-		}
-		if err := ValidateGraphQueryRequest(graphReq); err != nil {
-			return nil, err
-		}
-		return format.QueryGraph(ctx, graphReq)
-
+		return queryGraphSearch(ctx, format, kbID, queryVec, options)
 	case SearchModeAdaptive:
-		ragReq := RagQueryRequest{
-			KBID:     kbID,
-			QueryVec: queryVec,
-			Options: RagQueryOptions{
-				TopK:        options.TopK,
-				MaxDistance: options.MaxDistance,
-			},
-		}
-		if err := ValidateRagQueryRequest(ragReq); err != nil {
-			return nil, err
-		}
-		vectorResults, err := format.QueryRag(ctx, ragReq)
-		if err != nil {
-			return nil, err
-		}
-		if len(vectorResults) == 0 {
-			return []ExpandedResult{}, nil
-		}
-		sim := 1.0 / (1.0 + vectorResults[0].Distance)
-		if sim >= options.AdaptiveMinSim {
-			return vectorResults, nil
-		}
-		graphReq := GraphQueryRequest{
-			KBID:     kbID,
-			QueryVec: queryVec,
-			Options: GraphQueryOptions{
-				TopK:        options.TopK,
-				MaxDistance: options.MaxDistance,
-				Expansion:   options.Expansion,
-			},
-		}
-		if err := ValidateGraphQueryRequest(graphReq); err != nil {
-			return nil, err
-		}
-		return format.QueryGraph(ctx, graphReq)
-
+		return queryAdaptiveSearch(ctx, format, kbID, queryVec, options)
 	default:
-		ragReq := RagQueryRequest{
-			KBID:     kbID,
-			QueryVec: queryVec,
-			Options: RagQueryOptions{
-				TopK:        options.TopK,
-				MaxDistance: options.MaxDistance,
-			},
-		}
-		if err := ValidateRagQueryRequest(ragReq); err != nil {
-			return nil, err
-		}
-		return format.QueryRag(ctx, ragReq)
+		return queryVectorSearch(ctx, format, kbID, queryVec, options)
 	}
+}
+
+func queryGraphSearch(ctx context.Context, format ArtifactFormat, kbID string, queryVec []float32, options SearchOptions) ([]ExpandedResult, error) {
+	graphReq := graphQueryRequest(kbID, queryVec, options)
+	if err := ValidateGraphQueryRequest(graphReq); err != nil {
+		return nil, err
+	}
+	return format.QueryGraph(ctx, graphReq)
+}
+
+func queryAdaptiveSearch(ctx context.Context, format ArtifactFormat, kbID string, queryVec []float32, options SearchOptions) ([]ExpandedResult, error) {
+	vectorResults, err := queryVectorSearch(ctx, format, kbID, queryVec, options)
+	if err != nil || len(vectorResults) == 0 {
+		return vectorResults, err
+	}
+	if vectorResultSimilarity(vectorResults[0]) >= options.AdaptiveMinSim {
+		return vectorResults, nil
+	}
+	return queryGraphSearch(ctx, format, kbID, queryVec, options)
+}
+
+func queryVectorSearch(ctx context.Context, format ArtifactFormat, kbID string, queryVec []float32, options SearchOptions) ([]ExpandedResult, error) {
+	ragReq := RagQueryRequest{KBID: kbID, QueryVec: queryVec, Options: RagQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance}}
+	if err := ValidateRagQueryRequest(ragReq); err != nil {
+		return nil, err
+	}
+	return format.QueryRag(ctx, ragReq)
+}
+
+func graphQueryRequest(kbID string, queryVec []float32, options SearchOptions) GraphQueryRequest {
+	return GraphQueryRequest{KBID: kbID, QueryVec: queryVec, Options: GraphQueryOptions{TopK: options.TopK, MaxDistance: options.MaxDistance, Expansion: options.Expansion}}
+}
+
+func vectorResultSimilarity(result ExpandedResult) float64 {
+	return 1.0 / (1.0 + result.Distance)
 }
 
 func NormalizeExpansionOptions(topK int, opts *ExpansionOptions) ExpansionOptions {

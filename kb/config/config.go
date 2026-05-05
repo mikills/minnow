@@ -53,7 +53,7 @@ type BlobConfig struct {
 }
 
 // CacheConfig tunes the local shard cache. EntryTTL is non-pointer because
-// 0 has a meaning (no TTL); EvictInterval is a pointer so explicit-zero is
+// 0 has a meaning (no TTL). EvictInterval is a pointer so explicit-zero is
 // rejected by the validator.
 type CacheConfig struct {
 	Dir           string    `yaml:"dir" json:"dir"`
@@ -150,7 +150,7 @@ type WorkerDefaults struct {
 }
 
 // WorkerPool describes one worker pool. The timeout/retry overrides are
-// optional; when nil the pool inherits WorkerDefaults.
+// optional. when nil the pool inherits WorkerDefaults.
 type WorkerPool struct {
 	Concurrency       int       `yaml:"concurrency" json:"concurrency"`
 	MaxAttempts       *int      `yaml:"max_attempts,omitempty" json:"max_attempts,omitempty"`
@@ -332,7 +332,7 @@ func (c *Config) applyGraphDefaults() {
 		c.Graph.Model = "llama3"
 	}
 	// Parallelism is a pointer: keep nil so validator catches explicit
-	// non-positive values; GraphParallelism() resolves at call time.
+	// non-positive values. GraphParallelism() resolves at call time.
 }
 
 func (c *Config) applyMongoDefaults() {
@@ -396,38 +396,52 @@ func (c *Config) applyMediaDefaults() {
 }
 
 func (c *Config) applyCodeIndexDefaults() {
+	c.applyCodeIndexPatternDefaults()
+	c.applyCodeIndexSizeDefaults()
+}
+
+func (c *Config) applyCodeIndexPatternDefaults() {
 	if len(c.CodeIndex.Include) == 0 {
 		c.CodeIndex.Include = []string{"**/*.go", "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mjs", "**/*.cjs", "**/*.py", "**/*.rs", "**/*.java", "**/*.rb", "**/*.php", "**/*.c", "**/*.cc", "**/*.cpp", "**/*.h", "**/*.hpp", "**/*.cs", "**/*.swift", "**/*.kt", "**/*.kts", "**/*.sh", "**/*.bash", "**/*.zsh", "**/*.md", "**/*.mdx", "**/*.yaml", "**/*.yml", "**/*.json", "**/*.toml", "**/*.xml", "**/Dockerfile"}
 	}
 	if len(c.CodeIndex.Exclude) == 0 {
 		c.CodeIndex.Exclude = []string{".git/**", ".minnow/**", "node_modules/**", "vendor/**", "**/vendor/**", "dist/**", "build/**", "coverage/**", "fixtures/**", "**/fixtures/**", "data/**", "**/data/**", ".next/**", ".turbo/**", "target/**", "extensions/**", "examples/extensions/**", "**/*.duckdb", "**/*.duckdb_extension", "**/*.parquet", "**/*.min.js", "**/*.min.css", "**/*.map", "*.lock", ".gitignore"}
 	}
-	if c.CodeIndex.MaxFileBytes == 0 {
-		c.CodeIndex.MaxFileBytes = 1024 * 1024
+}
+
+func (c *Config) applyCodeIndexSizeDefaults() {
+	applyDefaultInt64(&c.CodeIndex.MaxFileBytes, 1024*1024)
+	applyDefaultInt(&c.CodeIndex.ChunkSize, 1200)
+	applyDefaultInt(&c.CodeIndex.ChunkOverlap, 120)
+	applyDefaultInt(&c.CodeIndex.EmbedBatchSize, 32)
+	applyDefaultInt(&c.CodeIndex.MaxBatchBytes, 256*1024)
+	applyDefaultDuration(&c.CodeIndex.Throttle, Duration(100*time.Millisecond))
+	applyDefaultUint64(&c.CodeIndex.MaxHeapBytes, 1024*1024*1024)
+	applyDefaultUint64(&c.CodeIndex.MaxRSSBytes, 1024*1024*1024)
+	applyDefaultInt(&c.CodeIndex.LargeRepoFiles, 1000)
+}
+
+func applyDefaultInt(target *int, value int) {
+	if *target == 0 {
+		*target = value
 	}
-	if c.CodeIndex.ChunkSize == 0 {
-		c.CodeIndex.ChunkSize = 1200
+}
+
+func applyDefaultInt64(target *int64, value int64) {
+	if *target == 0 {
+		*target = value
 	}
-	if c.CodeIndex.ChunkOverlap == 0 {
-		c.CodeIndex.ChunkOverlap = 120
+}
+
+func applyDefaultUint64(target *uint64, value uint64) {
+	if *target == 0 {
+		*target = value
 	}
-	if c.CodeIndex.EmbedBatchSize == 0 {
-		c.CodeIndex.EmbedBatchSize = 32
-	}
-	if c.CodeIndex.MaxBatchBytes == 0 {
-		c.CodeIndex.MaxBatchBytes = 256 * 1024
-	}
-	if c.CodeIndex.Throttle == 0 {
-		c.CodeIndex.Throttle = Duration(100 * time.Millisecond)
-	}
-	if c.CodeIndex.MaxHeapBytes == 0 {
-		c.CodeIndex.MaxHeapBytes = 1024 * 1024 * 1024
-	}
-	if c.CodeIndex.MaxRSSBytes == 0 {
-		c.CodeIndex.MaxRSSBytes = 1024 * 1024 * 1024
-	}
-	if c.CodeIndex.LargeRepoFiles == 0 {
-		c.CodeIndex.LargeRepoFiles = 1000
+}
+
+func applyDefaultDuration(target *Duration, value Duration) {
+	if *target == 0 {
+		*target = value
 	}
 }
 

@@ -136,18 +136,23 @@ func (m *RedisWriteLeaseManager) Renew(ctx context.Context, lease *WriteLease, t
 // Release deletes an existing lease only if the token still owns the key.
 //
 // Release is idempotent for missing/invalid leases and does not return conflict
-// if another writer owns the key; ownership is enforced by token matching.
+// if another writer owns the key. ownership is enforced by token matching.
 //
 // Release always attempts the Redis call regardless of the caller's context
 // state. A cancelled or deadline-exceeded context must not prevent the lock
-// from being freed; failing to release would block all subsequent writers until
+// from being freed. failing to release would block all subsequent writers until
 // the TTL expires.
-func (m *RedisWriteLeaseManager) Release(_ context.Context, lease *WriteLease) error {
+var redisReleaseRootContext = context.Background()
+
+func (m *RedisWriteLeaseManager) Release(ctx context.Context, lease *WriteLease) error {
 	if lease == nil || strings.TrimSpace(lease.KBID) == "" || strings.TrimSpace(lease.Token) == "" {
 		return nil
 	}
 
-	releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if ctx == nil {
+		ctx = redisReleaseRootContext
+	}
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 
 	_, err := releaseLeaseScript.Run(releaseCtx, m.Client, []string{m.key(lease.KBID)}, lease.Token).Int()

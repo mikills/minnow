@@ -45,7 +45,8 @@ type cacheSweepResult struct {
 // The protectKBID parameter specifies a KB that should not be evicted (typically
 // the KB currently being loaded).
 //
-// TODO(j):Capacity should be QPS-based instead of correctness-based
+// Capacity is currently correctness-based. QPS-based retry tuning can be added
+// if eviction becomes a throughput bottleneck.
 func (l *KB) evictCacheIfNeeded(ctx context.Context, protectKBID string) error {
 	deadline := l.Clock.Now().Add(defaultCacheEvictionRetryWindow)
 	for {
@@ -104,44 +105,40 @@ func (l *KB) evictCacheSweepOnce(protectKBID string) cacheSweepResult {
 		return entries[i].lastTouch.Before(entries[j].lastTouch)
 	})
 
-	// total is derived from a point-in-time filesystem scan; concurrent writes
+	// total is derived from a point-in-time filesystem scan. concurrent writes
 	// may cause it to drift slightly from actual disk usage between scans.
-	var removed map[string]bool
-	if entryTTL > 0 {
-		now := l.Clock.Now()
-		removed = make(map[string]bool)
-		for _, entry := range entries {
-			if protected[entry.kbID] {
-				continue
-			}
-			if entry.lastTouch.IsZero() || now.Sub(entry.lastTouch) < entryTTL {
-				continue
-			}
-			if l.removeCacheEntry(entry) {
-				l.recordCacheEvictionTTL()
-				removed[entry.kbID] = true
-				total -= entry.bytes
-			}
+	removed, total := l.evictExpiredCacheEntries(entries, protected, entryTTL, total)
+	if maxBytes > 0 {
+		total = l.evictOverBudgetCacheEntries(entries, protected, removed, maxBytes, total)
+	}
+	return cacheSweepResult{currentBytes: total, maxBytes: maxBytes, protectedKBCount: len(protected), overBudget: maxBytes > 0 && total > maxBytes}
+}
+
+func (l *KB) evictExpiredCacheEntries(entries []cacheKBEntry, protected map[string]bool, entryTTL time.Duration, total int64) (map[string]bool, int64) {
+	removed := make(map[string]bool)
+	if entryTTL <= 0 {
+		return removed, total
+	}
+	now := l.Clock.Now()
+	for _, entry := range entries {
+		if protected[entry.kbID] || entry.lastTouch.IsZero() || now.Sub(entry.lastTouch) < entryTTL {
+			continue
+		}
+		if l.removeCacheEntry(entry) {
+			l.recordCacheEvictionTTL()
+			removed[entry.kbID] = true
+			total -= entry.bytes
 		}
 	}
+	return removed, total
+}
 
-	if maxBytes <= 0 {
-		return cacheSweepResult{
-			currentBytes:     total,
-			maxBytes:         maxBytes,
-			protectedKBCount: len(protected),
-			overBudget:       false,
-		}
-	}
-
+func (l *KB) evictOverBudgetCacheEntries(entries []cacheKBEntry, protected map[string]bool, removed map[string]bool, maxBytes int64, total int64) int64 {
 	for _, entry := range entries {
 		if total <= maxBytes {
 			break
 		}
-		if removed != nil && removed[entry.kbID] {
-			continue
-		}
-		if protected[entry.kbID] {
+		if protected[entry.kbID] || removed[entry.kbID] {
 			continue
 		}
 		if l.removeCacheEntry(entry) {
@@ -149,13 +146,7 @@ func (l *KB) evictCacheSweepOnce(protectKBID string) cacheSweepResult {
 			total -= entry.bytes
 		}
 	}
-
-	return cacheSweepResult{
-		currentBytes:     total,
-		maxBytes:         maxBytes,
-		protectedKBCount: len(protected),
-		overBudget:       total > maxBytes,
-	}
+	return total
 }
 
 // PooledConnCloser is an optional interface that ArtifactFormat implementations
@@ -264,9 +255,9 @@ func cacheDirStats(root string) (int64, time.Time, bool) {
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if path == root {
-				return err // cannot read root directory; abort
+				return err // cannot read root directory, so abort
 			}
-			return nil // skip individual entry errors; continue walking
+			return nil // skip individual entry errors and continue walking
 		}
 		info, err := d.Info()
 		if err != nil {

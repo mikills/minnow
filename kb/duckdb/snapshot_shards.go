@@ -19,7 +19,7 @@ func (f *DuckDBArtifactFormat) BuildArtifacts(ctx context.Context, kbID, srcPath
 	if targetBytes <= 0 {
 		targetBytes = kb.DefaultSnapshotShardSize
 	}
-	dbHash, err := kb.FileContentSHA256(srcPath)
+	dbHash, err := kb.FileContentSHA256(ctx, srcPath)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +58,7 @@ func (f *DuckDBArtifactFormat) uploadQueryableSnapshotShards(ctx context.Context
 	lastDocID := ""
 	for shardIndex := 0; processedRows < activeRows; shardIndex++ {
 		shardPath := filepath.Join(tmpDir, fmt.Sprintf("shard-%05d.duckdb", shardIndex))
-		part, vectorRows, nextDocID, err := f.buildAndUploadOneSnapshotShard(ctx, prefix, localDBPath, hasTombstones, shardPath, shardIndex, rowsPerShard, lastDocID)
+		part, vectorRows, nextDocID, err := f.buildAndUploadOneSnapshotShard(ctx, snapshotShardBuildInput{prefix: prefix, localDBPath: localDBPath, hasTombstones: hasTombstones, shardPath: shardPath, shardIndex: shardIndex, rowsPerShard: rowsPerShard, lastDocID: lastDocID})
 		if err != nil {
 			return nil, 0, err
 		}
@@ -115,8 +115,18 @@ func planShardRowCount(localDBPath string, activeRows, partSize int64) (int, err
 	return rowsPerShard, nil
 }
 
-func (f *DuckDBArtifactFormat) buildAndUploadOneSnapshotShard(ctx context.Context, prefix, localDBPath string, hasTombstones bool, shardPath string, shardIndex, rowsPerShard int, lastDocID string) (kb.SnapshotShardMetadata, int64, string, error) {
-	vectorRows, graphAvailable, nextDocID, centroid, err := f.buildShardDBFromSourceRange(ctx, localDBPath, hasTombstones, shardPath, rowsPerShard, lastDocID)
+type snapshotShardBuildInput struct {
+	prefix        string
+	localDBPath   string
+	hasTombstones bool
+	shardPath     string
+	shardIndex    int
+	rowsPerShard  int
+	lastDocID     string
+}
+
+func (f *DuckDBArtifactFormat) buildAndUploadOneSnapshotShard(ctx context.Context, input snapshotShardBuildInput) (kb.SnapshotShardMetadata, int64, string, error) {
+	vectorRows, graphAvailable, nextDocID, centroid, err := f.buildShardDBFromSourceRange(ctx, shardSourceRange{sourceDBPath: input.localDBPath, hasTombstones: input.hasTombstones, shardPath: input.shardPath, limit: input.rowsPerShard, lastDocID: input.lastDocID})
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, 0, "", err
 	}
@@ -124,27 +134,27 @@ func (f *DuckDBArtifactFormat) buildAndUploadOneSnapshotShard(ctx context.Contex
 		return kb.SnapshotShardMetadata{}, 0, nextDocID, nil
 	}
 
-	sha, err := kb.FileContentSHA256(shardPath)
+	sha, err := kb.FileContentSHA256(ctx, input.shardPath)
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, 0, "", err
 	}
-	info, err := os.Stat(shardPath)
+	info, err := os.Stat(input.shardPath)
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, 0, "", err
 	}
-	partKey := fmt.Sprintf("%s/shard-%05d.duckdb", prefix, shardIndex)
-	uploadInfo, err := f.deps.BlobStore.UploadIfMatch(ctx, partKey, shardPath, "")
+	partKey := fmt.Sprintf("%s/shard-%05d.duckdb", input.prefix, input.shardIndex)
+	uploadInfo, err := f.deps.BlobStore.UploadIfMatch(ctx, partKey, input.shardPath, "")
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, 0, "", err
 	}
 
 	now := time.Now().UTC()
-	mediaIDs, mediaErr := collectShardMediaIDs(ctx, shardPath, f.openConfiguredDB)
+	mediaIDs, mediaErr := collectShardMediaIDs(ctx, input.shardPath, f.openConfiguredDB)
 	if mediaErr != nil {
 		return kb.SnapshotShardMetadata{}, 0, "", fmt.Errorf("collect shard media ids: %w", mediaErr)
 	}
 	return kb.SnapshotShardMetadata{
-		ShardID:        fmt.Sprintf("shard-%05d", shardIndex),
+		ShardID:        fmt.Sprintf("shard-%05d", input.shardIndex),
 		Key:            partKey,
 		Version:        uploadInfo.Version,
 		SizeBytes:      info.Size(),
@@ -159,29 +169,30 @@ func (f *DuckDBArtifactFormat) buildAndUploadOneSnapshotShard(ctx context.Contex
 	}, vectorRows, nextDocID, nil
 }
 
-func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(ctx context.Context, sourceDBPath string, hasTombstones bool, shardPath string, limit int, lastDocID string) (int64, bool, string, []float32, error) {
-	if limit <= 0 {
-		return 0, false, "", nil, fmt.Errorf("limit must be > 0")
-	}
+type shardSourceRange struct {
+	sourceDBPath  string
+	hasTombstones bool
+	shardPath     string
+	limit         int
+	lastDocID     string
+}
 
-	shardDB, err := f.openConfiguredDB(ctx, shardPath)
+func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(ctx context.Context, source shardSourceRange) (int64, bool, string, []float32, error) {
+	if err := validateShardBuildLimit(source.limit); err != nil {
+		return 0, false, "", nil, err
+	}
+	shardDB, err := f.openAttachedShardDB(ctx, source.sourceDBPath, source.shardPath)
 	if err != nil {
 		return 0, false, "", nil, err
 	}
 	defer shardDB.Close()
+	defer detachSourceDB(ctx, shardDB)
 
-	if _, err := shardDB.ExecContext(ctx, fmt.Sprintf("ATTACH '%s' AS src (READ_ONLY)", quoteSQLString(sourceDBPath))); err != nil {
-		return 0, false, "", nil, err
-	}
-	defer func() {
-		_, _ = shardDB.ExecContext(context.Background(), "DETACH src")
-	}()
-
-	if err := copyShardRowRange(ctx, shardDB, hasTombstones, limit, lastDocID); err != nil {
+	if err := copyShardRowRange(ctx, shardDB, source.hasTombstones, source.limit, source.lastDocID); err != nil {
 		return 0, false, "", nil, err
 	}
 
-	if _, err := shardDB.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`); err != nil {
+	if err := createDocsVectorIndex(ctx, shardDB); err != nil {
 		return 0, false, "", nil, err
 	}
 
@@ -189,32 +200,72 @@ func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(ctx context.Context, 
 		return 0, false, "", nil, err
 	}
 
-	var rowCount int64
-	if err := shardDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs`).Scan(&rowCount); err != nil {
-		return 0, false, "", nil, err
+	rowCount, empty, err := shardRowCountOrClose(ctx, shardDB)
+	if err != nil || empty {
+		return rowCount, false, source.lastDocID, nil, err
 	}
-	if rowCount <= 0 {
-		if err := CheckpointAndCloseDB(ctx, shardDB, "close empty shard db"); err != nil {
-			return 0, false, "", nil, err
-		}
-		return 0, false, lastDocID, nil, nil
-	}
-
-	var maxDocID string
-	if err := shardDB.QueryRowContext(ctx, `SELECT MAX(id) FROM docs`).Scan(&maxDocID); err != nil {
-		return 0, false, "", nil, err
-	}
-	centroid, err := computeShardCentroid(ctx, shardDB)
+	maxDocID, err := maxShardDocID(ctx, shardDB)
 	if err != nil {
 		return 0, false, "", nil, err
 	}
-	graphAvailable := hasGraphQueryData(ctx, shardDB)
-	// NOTE: SnapshotShardMetadata.MediaIDs is populated at manifest-publish
-	// time by walking docs.media_refs; see collectShardMediaIDs.
-	if err := CheckpointAndCloseDB(ctx, shardDB, "close shard db"); err != nil {
+	graphAvailable, centroid, err := finalizeBuiltShardDB(ctx, shardDB)
+	if err != nil {
 		return 0, false, "", nil, err
 	}
 	return rowCount, graphAvailable, maxDocID, centroid, nil
+}
+
+func finalizeBuiltShardDB(ctx context.Context, db *sql.DB) (bool, []float32, error) {
+	centroid, err := computeShardCentroid(ctx, db)
+	if err != nil {
+		return false, nil, err
+	}
+	graphAvailable := hasGraphQueryData(ctx, db)
+	// NOTE: SnapshotShardMetadata.MediaIDs is populated at manifest-publish
+	// time by walking docs.media_refs. See collectShardMediaIDs.
+	if err := CheckpointAndCloseDB(ctx, db, "close shard db"); err != nil {
+		return false, nil, err
+	}
+	return graphAvailable, centroid, nil
+}
+
+func shardRowCountOrClose(ctx context.Context, db *sql.DB) (int64, bool, error) {
+	rowCount, err := countCompactedDocs(ctx, db)
+	if err != nil || rowCount > 0 {
+		return rowCount, false, err
+	}
+	return 0, true, CheckpointAndCloseDB(ctx, db, "close empty shard db")
+}
+
+func maxShardDocID(ctx context.Context, db *sql.DB) (string, error) {
+	var maxDocID string
+	if err := db.QueryRowContext(ctx, `SELECT MAX(id) FROM docs`).Scan(&maxDocID); err != nil {
+		return "", err
+	}
+	return maxDocID, nil
+}
+
+func validateShardBuildLimit(limit int) error {
+	if limit <= 0 {
+		return fmt.Errorf("limit must be > 0")
+	}
+	return nil
+}
+
+func (f *DuckDBArtifactFormat) openAttachedShardDB(ctx context.Context, sourceDBPath string, shardPath string) (*sql.DB, error) {
+	shardDB, err := f.openConfiguredDB(ctx, shardPath)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := shardDB.ExecContext(ctx, fmt.Sprintf("ATTACH '%s' AS src (READ_ONLY)", quoteSQLString(sourceDBPath))); err != nil {
+		_ = shardDB.Close()
+		return nil, err
+	}
+	return shardDB, nil
+}
+
+func detachSourceDB(ctx context.Context, db *sql.DB) {
+	_, _ = db.ExecContext(context.WithoutCancel(ctx), "DETACH src")
 }
 
 func copyShardRowRange(ctx context.Context, shardDB *sql.DB, hasTombstones bool, limit int, lastDocID string) error {
@@ -323,24 +374,13 @@ func collectShardMediaIDs(ctx context.Context, shardPath string, openDB func(con
 }
 
 func (f *DuckDBArtifactFormat) downloadSnapshotFromShards(ctx context.Context, kbID, dest string) (*kb.SnapshotShardManifest, error) {
-	if kbID == "" {
-		return nil, fmt.Errorf("kbID cannot be empty")
-	}
-	if dest == "" {
-		return nil, fmt.Errorf("dest cannot be empty")
+	if err := validateSnapshotDownload(kbID, dest); err != nil {
+		return nil, err
 	}
 
-	doc, err := f.deps.ManifestStore.Get(ctx, kbID)
+	manifest, err := f.downloadSourceManifest(ctx, kbID)
 	if err != nil {
 		return nil, err
-	}
-	manifest := doc.Manifest
-	if err := f.validateManifestFormat(&manifest); err != nil {
-		return nil, err
-	}
-	f.deps.Metrics.RecordShardCount(kbID, len(manifest.Shards))
-	if len(manifest.Shards) == 0 {
-		return nil, fmt.Errorf("manifest has no shards")
 	}
 
 	tmpDir, err := os.MkdirTemp("", "minnow-shard-download-*")
@@ -349,14 +389,11 @@ func (f *DuckDBArtifactFormat) downloadSnapshotFromShards(ctx context.Context, k
 	}
 	defer os.RemoveAll(tmpDir)
 
-	tmpFile, err := os.CreateTemp(filepath.Dir(dest), "minnow-reconstruct-*.duckdb")
+	tmpDest, cleanupTmpDest, err := tempReconstructPath(dest)
 	if err != nil {
 		return nil, err
 	}
-	tmpDest := tmpFile.Name()
-	tmpFile.Close()
-	_ = os.Remove(tmpDest)
-	defer os.Remove(tmpDest)
+	defer cleanupTmpDest()
 
 	db, err := f.openConfiguredDB(ctx, tmpDest)
 	if err != nil {
@@ -364,40 +401,10 @@ func (f *DuckDBArtifactFormat) downloadSnapshotFromShards(ctx context.Context, k
 	}
 	defer db.Close()
 
-	for i, shard := range manifest.Shards {
-		partPath := filepath.Join(tmpDir, fmt.Sprintf("part-%05d.duckdb", i))
-		if err := f.deps.BlobStore.Download(ctx, shard.Key, partPath); err != nil {
-			return nil, err
-		}
-		info, err := os.Stat(partPath)
-		if err != nil {
-			return nil, err
-		}
-		if shard.SizeBytes > 0 && info.Size() != shard.SizeBytes {
-			return nil, fmt.Errorf("shard %s size mismatch", shard.ShardID)
-		}
-		if shard.SHA256 != "" {
-			sha, err := kb.FileContentSHA256(partPath)
-			if err != nil {
-				return nil, err
-			}
-			if sha != shard.SHA256 {
-				return nil, fmt.Errorf("shard %s checksum mismatch", shard.ShardID)
-			}
-		}
-
-		alias := fmt.Sprintf("s%d", i)
-		if err := mergeShardIntoDB(ctx, db, alias, partPath, i == 0); err != nil {
-			return nil, err
-		}
-	}
-	if err := ensureDocTombstonesTable(ctx, db); err != nil {
+	if err := f.mergeManifestShards(ctx, db, tmpDir, manifest.Shards); err != nil {
 		return nil, err
 	}
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`); err != nil {
-		return nil, err
-	}
-	if err := CheckpointAndCloseDB(ctx, db, "close reconstructed shard snapshot"); err != nil {
+	if err := finalizeReconstructedSnapshot(ctx, db); err != nil {
 		return nil, err
 	}
 	if err := os.Rename(tmpDest, dest); err != nil {
@@ -407,6 +414,90 @@ func (f *DuckDBArtifactFormat) downloadSnapshotFromShards(ctx context.Context, k
 	return &manifest, nil
 }
 
+func validateSnapshotDownload(kbID string, dest string) error {
+	if kbID == "" {
+		return fmt.Errorf("kbID cannot be empty")
+	}
+	if dest == "" {
+		return fmt.Errorf("dest cannot be empty")
+	}
+	return nil
+}
+
+func (f *DuckDBArtifactFormat) downloadSourceManifest(ctx context.Context, kbID string) (kb.SnapshotShardManifest, error) {
+	doc, err := f.deps.ManifestStore.Get(ctx, kbID)
+	if err != nil {
+		return kb.SnapshotShardManifest{}, err
+	}
+	manifest := doc.Manifest
+	if err := f.validateManifestFormat(&manifest); err != nil {
+		return kb.SnapshotShardManifest{}, err
+	}
+	f.deps.Metrics.RecordShardCount(kbID, len(manifest.Shards))
+	if len(manifest.Shards) == 0 {
+		return kb.SnapshotShardManifest{}, fmt.Errorf("manifest has no shards")
+	}
+	return manifest, nil
+}
+
+func tempReconstructPath(dest string) (string, func(), error) {
+	tmpFile, err := os.CreateTemp(filepath.Dir(dest), "minnow-reconstruct-*.duckdb")
+	if err != nil {
+		return "", nil, err
+	}
+	tmpDest := tmpFile.Name()
+	_ = tmpFile.Close()
+	_ = os.Remove(tmpDest)
+	return tmpDest, func() { _ = os.Remove(tmpDest) }, nil
+}
+
+func (f *DuckDBArtifactFormat) mergeManifestShards(ctx context.Context, db *sql.DB, tmpDir string, shards []kb.SnapshotShardMetadata) error {
+	for i, shard := range shards {
+		partPath := filepath.Join(tmpDir, fmt.Sprintf("part-%05d.duckdb", i))
+		if err := f.downloadAndVerifyShardPart(ctx, shard, partPath); err != nil {
+			return err
+		}
+		if err := mergeShardIntoDB(ctx, db, fmt.Sprintf("s%d", i), partPath, i == 0); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *DuckDBArtifactFormat) downloadAndVerifyShardPart(ctx context.Context, shard kb.SnapshotShardMetadata, partPath string) error {
+	if err := f.deps.BlobStore.Download(ctx, shard.Key, partPath); err != nil {
+		return err
+	}
+	info, err := os.Stat(partPath)
+	if err != nil {
+		return err
+	}
+	if shard.SizeBytes > 0 && info.Size() != shard.SizeBytes {
+		return fmt.Errorf("shard %s size mismatch", shard.ShardID)
+	}
+	if shard.SHA256 == "" {
+		return nil
+	}
+	sha, err := kb.FileContentSHA256(ctx, partPath)
+	if err != nil {
+		return err
+	}
+	if sha != shard.SHA256 {
+		return fmt.Errorf("shard %s checksum mismatch", shard.ShardID)
+	}
+	return nil
+}
+
+func finalizeReconstructedSnapshot(ctx context.Context, db *sql.DB) error {
+	if err := ensureDocTombstonesTable(ctx, db); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`); err != nil {
+		return err
+	}
+	return CheckpointAndCloseDB(ctx, db, "close reconstructed shard snapshot")
+}
+
 // DownloadSnapshotFromShards downloads and reconstructs a sharded snapshot into a single DB file.
 func (f *DuckDBArtifactFormat) DownloadSnapshotFromShards(ctx context.Context, kbID, dest string) (*kb.SnapshotShardManifest, error) {
 	return f.downloadSnapshotFromShards(ctx, kbID, dest)
@@ -414,7 +505,7 @@ func (f *DuckDBArtifactFormat) DownloadSnapshotFromShards(ctx context.Context, k
 
 // cleanupPreShardSnapshotObjectsBestEffort deletes the monolithic snapshot
 // objects from the pre-sharded layout that may still exist in long-running
-// deployments. Failures only log; the upload path must succeed regardless.
+// deployments. Failures only log. the upload path must succeed regardless.
 func (f *DuckDBArtifactFormat) cleanupPreShardSnapshotObjectsBestEffort(ctx context.Context, kbID string) error {
 	preShardSnapshotKeys := []string{
 		kbID + ".duckdb",
@@ -434,51 +525,56 @@ func (f *DuckDBArtifactFormat) cleanupPreShardSnapshotObjectsBestEffort(ctx cont
 // tables into db, then DETACHes via defer. isFirst signals that the target
 // tables must be created before inserting.
 func mergeShardIntoDB(ctx context.Context, db *sql.DB, alias, partPath string, isFirst bool) error {
-	// Safe: alias is an internal-only constant; never accept from user input.
-	// If this changes, switch to a sanitized allowlist.
+	if err := attachShardDB(ctx, db, alias, partPath); err != nil {
+		return err
+	}
+	defer func() { _, _ = db.ExecContext(context.WithoutCancel(ctx), fmt.Sprintf("DETACH %s", alias)) }()
+	if isFirst {
+		if err := initializeMergedShardTables(ctx, db, alias); err != nil {
+			return err
+		}
+	}
+	return copyShardTables(ctx, db, alias)
+}
+
+func attachShardDB(ctx context.Context, db *sql.DB, alias, partPath string) error {
 	if err := ValidateSafeIdentifier(alias); err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, fmt.Sprintf("ATTACH '%s' AS %s (READ_ONLY)", quoteSQLString(partPath), alias)); err != nil {
+	_, err := db.ExecContext(ctx, fmt.Sprintf("ATTACH '%s' AS %s (READ_ONLY)", quoteSQLString(partPath), alias))
+	return err
+}
+
+func initializeMergedShardTables(ctx context.Context, db *sql.DB, alias string) error {
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE TABLE docs AS SELECT id, content, embedding, media_refs FROM %s.docs WHERE 1=0", alias)); err != nil {
 		return err
 	}
-	defer func() { _, _ = db.ExecContext(context.Background(), fmt.Sprintf("DETACH %s", alias)) }()
+	return EnsureGraphTables(ctx, db)
+}
 
-	if isFirst {
-		// Safe: alias + fixed column list interpolation only.
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE TABLE docs AS SELECT id, content, embedding, media_refs FROM %s.docs WHERE 1=0", alias)); err != nil {
-			return err
-		}
-		if err := EnsureGraphTables(ctx, db); err != nil {
-			return err
-		}
-	}
-	// Safe: alias + fixed column list interpolation only.
+func copyShardTables(ctx context.Context, db *sql.DB, alias string) error {
 	if _, err := db.ExecContext(ctx, fmt.Sprintf("INSERT INTO docs (id, content, embedding, media_refs) SELECT id, content, embedding, media_refs FROM %s.docs", alias)); err != nil {
 		return err
 	}
-	if ok, err := attachedTableExists(ctx, db, alias, "doc_entities"); err != nil {
-		return err
-	} else if ok {
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("INSERT INTO doc_entities SELECT * FROM %s.doc_entities", alias)); err != nil {
+	for _, table := range []string{"doc_entities", "edges"} {
+		if err := copyAttachedTableIfExists(ctx, db, alias, table, false); err != nil {
 			return err
 		}
 	}
-	if ok, err := attachedTableExists(ctx, db, alias, "entities"); err != nil {
+	return copyAttachedTableIfExists(ctx, db, alias, "entities", true)
+}
+
+func copyAttachedTableIfExists(ctx context.Context, db *sql.DB, alias string, table string, ignoreConflicts bool) error {
+	ok, err := attachedTableExists(ctx, db, alias, table)
+	if err != nil || !ok {
 		return err
-	} else if ok {
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("INSERT OR IGNORE INTO entities SELECT * FROM %s.entities", alias)); err != nil {
-			return err
-		}
 	}
-	if ok, err := attachedTableExists(ctx, db, alias, "edges"); err != nil {
-		return err
-	} else if ok {
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("INSERT INTO edges SELECT * FROM %s.edges", alias)); err != nil {
-			return err
-		}
+	verb := "INSERT INTO"
+	if ignoreConflicts {
+		verb = "INSERT OR IGNORE INTO"
 	}
-	return nil
+	_, err = db.ExecContext(ctx, fmt.Sprintf("%s %s SELECT * FROM %s.%s", verb, table, alias, table))
+	return err
 }
 
 func countActiveDocs(ctx context.Context, db *sql.DB, hasTombstones bool) (int64, error) {
@@ -514,7 +610,7 @@ func sourceGraphTablesReady(ctx context.Context, db *sql.DB) (bool, error) {
 }
 
 func attachedTableExists(ctx context.Context, db *sql.DB, alias, table string) (bool, error) {
-	// Safe: alias and table are internal-only constants; never accept from
+	// Safe: alias and table are internal-only constants. never accept from
 	// user input. If this changes, switch to a sanitized allowlist.
 	if err := ValidateSafeIdentifier(alias); err != nil {
 		return false, err
@@ -541,30 +637,9 @@ func computeShardCentroid(ctx context.Context, db *sql.DB) ([]float32, error) {
 	}
 	defer rows.Close()
 
-	var sums []float64
-	count := 0
-	for rows.Next() {
-		var vecStr string
-		if err := rows.Scan(&vecStr); err != nil {
-			return nil, err
-		}
-		vec, err := parseDuckDBVectorString(vecStr)
-		if err != nil {
-			return nil, err
-		}
-		if len(vec) == 0 {
-			continue
-		}
-		if sums == nil {
-			sums = make([]float64, len(vec))
-		}
-		if len(vec) != len(sums) {
-			return nil, fmt.Errorf("inconsistent embedding dimensions while computing centroid")
-		}
-		for i := range vec {
-			sums[i] += float64(vec[i])
-		}
-		count++
+	sums, count, err := scanCentroidSums(rows)
+	if err != nil {
+		return nil, err
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -572,11 +647,55 @@ func computeShardCentroid(ctx context.Context, db *sql.DB) ([]float32, error) {
 	if count == 0 || len(sums) == 0 {
 		return nil, nil
 	}
+	return centroidFromSums(sums, count), nil
+}
+
+func scanCentroidSums(rows *sql.Rows) ([]float64, int, error) {
+	var sums []float64
+	count := 0
+	for rows.Next() {
+		vec, err := scanCentroidVector(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(vec) == 0 {
+			continue
+		}
+		if err := addCentroidVector(&sums, vec); err != nil {
+			return nil, 0, err
+		}
+		count++
+	}
+	return sums, count, nil
+}
+
+func scanCentroidVector(rows *sql.Rows) ([]float32, error) {
+	var vecStr string
+	if err := rows.Scan(&vecStr); err != nil {
+		return nil, err
+	}
+	return parseDuckDBVectorString(vecStr)
+}
+
+func addCentroidVector(sums *[]float64, vec []float32) error {
+	if *sums == nil {
+		*sums = make([]float64, len(vec))
+	}
+	if len(vec) != len(*sums) {
+		return fmt.Errorf("inconsistent embedding dimensions while computing centroid")
+	}
+	for i := range vec {
+		(*sums)[i] += float64(vec[i])
+	}
+	return nil
+}
+
+func centroidFromSums(sums []float64, count int) []float32 {
 	centroid := make([]float32, len(sums))
 	for i := range sums {
 		centroid[i] = float32(sums[i] / float64(count))
 	}
-	return centroid, nil
+	return centroid
 }
 
 func parseDuckDBVectorString(raw string) ([]float32, error) {

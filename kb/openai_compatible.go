@@ -16,7 +16,7 @@ const (
 	defaultOpenAICompatibleBaseURL = "https://api.openai.com/v1"
 	// defaultOpenAICompatibleTimeout caps a single embedding request when the
 	// caller does not pass its own deadline. Workers that always plumb a
-	// context deadline get the smaller of the two; callers without one get a
+	// context deadline get the smaller of the two. callers without one get a
 	// finite ceiling instead of hanging forever.
 	defaultOpenAICompatibleTimeout = 30 * time.Second
 )
