@@ -39,16 +39,14 @@ type Service struct {
 	CodeHookStatus        func(context.Context, string) (kb.CodeHookStatus, error)
 }
 
-// mustQueryInputSchema returns the queryInput JSONSchema with explicit bounds
+// queryInputSchema returns the queryInput JSONSchema with explicit bounds
 // on K. Agents reading `tools/list` see the constraint up front instead of
 // only learning of it via a runtime error. Handler still validates K > 0 as
 // defense-in-depth.
-func mustQueryInputSchema() *jsonschema.Schema {
+func queryInputSchema() (*jsonschema.Schema, error) {
 	schema, err := jsonschema.For[queryInput](nil)
 	if err != nil {
-		// jsonschema.For only fails on programmer error (unsupported types);
-		// queryInput is plain string/int. Panic so misuse is caught at startup.
-		panic(fmt.Sprintf("build queryInput schema: %v", err))
+		return nil, fmt.Errorf("build queryInput schema: %w", err)
 	}
 	if k, ok := schema.Properties["k"]; ok {
 		min := float64(1)
@@ -56,7 +54,15 @@ func mustQueryInputSchema() *jsonschema.Schema {
 		k.Minimum = &min
 		k.Maximum = &max
 	}
-	return schema
+	return schema, nil
+}
+
+func queryToolSchemaOrDefault() *jsonschema.Schema {
+	schema, err := queryInputSchema()
+	if err == nil {
+		return schema
+	}
+	return &jsonschema.Schema{}
 }
 
 func New(s Service) *mcp.Server {
@@ -85,7 +91,7 @@ func registerTools(server *mcp.Server, s *Service) {
 	queryTool := &mcp.Tool{
 		Name:        "minnow_query",
 		Description: "Query a Minnow knowledge base using vector, graph, or adaptive search.",
-		InputSchema: mustQueryInputSchema(),
+		InputSchema: queryToolSchemaOrDefault(),
 	}
 	mcp.AddTool(server, queryTool, s.query)
 	mcp.AddTool(server, &mcp.Tool{Name: "minnow_operation_status", Description: "Read the status, stages, and terminal event for an async Minnow operation."}, s.operationStatus)

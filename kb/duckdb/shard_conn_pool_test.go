@@ -28,7 +28,7 @@ func TestShardConnPoolCloseByPrefix(t *testing.T) {
 
 	select {
 	case <-done:
-		t.Fatal("CloseByPrefix returned before borrowed connection was released")
+		require.Fail(t, "CloseByPrefix returned before borrowed connection was released")
 	case <-time.After(50 * time.Millisecond):
 	}
 
@@ -37,6 +37,6 @@ func TestShardConnPoolCloseByPrefix(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("CloseByPrefix did not complete after borrowed connection release")
+		require.Fail(t, "CloseByPrefix did not complete after borrowed connection release")
 	}
 }

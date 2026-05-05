@@ -9,6 +9,7 @@ package cron
 import (
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"sync"
 	"time"
@@ -57,7 +58,7 @@ func (c *Cron) SetTimezone(l *time.Location) {
 // MustAdd is similar to Add() but panic on failure.
 func (c *Cron) MustAdd(jobId string, cronExpr string, run func()) {
 	if err := c.Add(jobId, cronExpr, run); err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 }
 
@@ -189,9 +190,13 @@ func (c *Cron) runDue(t time.Time) {
 
 	for _, j := range jobs {
 		if j.schedule.IsDue(moment) {
-			go j.Run()
+			startCronJob(j)
 		}
 	}
+}
+
+func startCronJob(j *Job) {
+	go j.Run()
 }
 
 func (c *Cron) runLoop(interval time.Duration, stopCh <-chan struct{}) {

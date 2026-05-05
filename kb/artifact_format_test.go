@@ -2,9 +2,10 @@ package kb
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestResolveFormat(t *testing.T) {
@@ -103,12 +104,8 @@ func TestResolveFormat(t *testing.T) {
 			)
 
 			resolved, err := kb.resolveFormat(context.Background(), tc.kbID)
-			if err != nil {
-				t.Fatalf("resolveFormat(%q): %v", tc.kbID, err)
-			}
-			if resolved != tc.wantFormat {
-				t.Fatalf("format mismatch: got %T %v, want %T %v", resolved, resolved, tc.wantFormat, tc.wantFormat)
-			}
+			require.NoError(t, err, "resolveFormat(%q)", tc.kbID)
+			require.Same(t, tc.wantFormat, resolved)
 		})
 	}
 }
@@ -123,31 +120,21 @@ func TestArtifactFormatRegistration(t *testing.T) {
 		)
 
 		_, err := kb.resolveFormatByKind("format-b")
-		if !errors.Is(err, ErrFormatNotRegistered) {
-			t.Fatalf("expected ErrFormatNotRegistered, got %v", err)
-		}
+		require.ErrorIs(t, err, ErrFormatNotRegistered)
 	})
 
 	t.Run("rejects nil format", func(t *testing.T) {
 		kb := NewKB(&LocalBlobStore{Root: t.TempDir()}, t.TempDir())
 		err := kb.RegisterFormat(nil)
-		if !errors.Is(err, ErrInvalidArtifactFormat) {
-			t.Fatalf("expected ErrInvalidArtifactFormat, got %v", err)
-		}
-		if kb.HasFormat() {
-			t.Fatal("expected registry to remain empty")
-		}
+		require.ErrorIs(t, err, ErrInvalidArtifactFormat)
+		require.False(t, kb.HasFormat(), "expected registry to remain empty")
 	})
 
 	t.Run("rejects format with empty kind", func(t *testing.T) {
 		kb := NewKB(&LocalBlobStore{Root: t.TempDir()}, t.TempDir())
 		err := kb.RegisterFormat(&stubArtifactFormat{})
-		if !errors.Is(err, ErrInvalidArtifactFormat) {
-			t.Fatalf("expected ErrInvalidArtifactFormat, got %v", err)
-		}
-		if kb.HasFormat() {
-			t.Fatal("expected registry to remain empty")
-		}
+		require.ErrorIs(t, err, ErrInvalidArtifactFormat)
+		require.False(t, kb.HasFormat(), "expected registry to remain empty")
 	})
 
 	t.Run("option registration errors surface at resolve time", func(t *testing.T) {
@@ -157,9 +144,7 @@ func TestArtifactFormatRegistration(t *testing.T) {
 			WithArtifactFormat(nil),
 		)
 		_, err := kb.resolveFormat(context.Background(), "missing")
-		if !errors.Is(err, ErrInvalidArtifactFormat) {
-			t.Fatalf("expected ErrInvalidArtifactFormat, got %v", err)
-		}
+		require.ErrorIs(t, err, ErrInvalidArtifactFormat)
 	})
 }
 

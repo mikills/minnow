@@ -35,12 +35,12 @@ func RepeatedSmallIngests(h *sim.Harness) {
 		if err != nil {
 			h.Fatalf("embed sample %d (seed=%d): %v", idx, h.Seed(), err)
 		}
-		results, err := h.Query(kbID, probe, 50)
+		matches, err := h.Search(kbID, probe, 50)
 		if err != nil {
 			h.Fatalf("query sample %d (seed=%d): %v", idx, h.Seed(), err)
 		}
 		found := false
-		for _, r := range results {
+		for _, r := range matches {
 			if r.ID == id {
 				found = true
 				break

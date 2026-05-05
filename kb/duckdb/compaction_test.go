@@ -20,6 +20,14 @@ import (
 	kb "github.com/mikills/minnow/kb"
 )
 
+func startCompactionAttempt(wg *sync.WaitGroup, af *DuckDBArtifactFormat, kbID string, i int, results []*kb.CompactionPublishResult, errs []error) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		results[i], errs[i] = af.CompactIfNeeded(context.Background(), kbID)
+	}()
+}
+
 func TestDuckDBCompaction(t *testing.T) {
 	t.Run("kb_uninitialized", func(t *testing.T) {
 		h := kb.NewTestHarness(t, "kb-compact-missing").Setup()
@@ -143,12 +151,7 @@ func TestDuckDBCompaction(t *testing.T) {
 		errs := make([]error, 2)
 		results := make([]*kb.CompactionPublishResult, 2)
 		for i := 0; i < 2; i++ {
-			i := i
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				results[i], errs[i] = af.CompactIfNeeded(context.Background(), kbID)
-			}()
+			startCompactionAttempt(&wg, af, kbID, i, results, errs)
 		}
 		wg.Wait()
 

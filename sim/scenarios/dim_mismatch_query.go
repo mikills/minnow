@@ -25,7 +25,7 @@ func DimMismatchQuery(h *sim.Harness) {
 	for i := range badVec {
 		badVec[i] = 0.1
 	}
-	_, err := h.Query(kbID, badVec, 5)
+	_, err := h.Search(kbID, badVec, 5)
 	if err == nil {
 		h.Errorf("expected error on dim mismatch, got nil (seed=%d)", h.Seed())
 		return

@@ -164,13 +164,11 @@ func testEmbeddingDimensionValidation(t *testing.T) {
 }
 
 func testAssertSafeIdentifier(t *testing.T) {
-	// Valid identifiers.
 	for _, good := range []string{"alias", "s0", "tbl_name", "ABC123"} {
-		require.NotPanics(t, func() { AssertSafeIdentifier(good) }, "should not panic on %q", good)
+		require.NoError(t, ValidateSafeIdentifier(good), "should accept %q", good)
 	}
-	// Invalid identifiers.
 	for _, bad := range []string{"", "has space", "tbl;--", "tbl`x", "'inj'", "dotted.name"} {
-		require.Panics(t, func() { AssertSafeIdentifier(bad) }, "should panic on %q", bad)
+		require.Error(t, ValidateSafeIdentifier(bad), "should reject %q", bad)
 	}
 }
 
@@ -245,7 +243,7 @@ func TestOfflineExtensionLoadAll(t *testing.T) {
 
 			db, err := sql.Open("duckdb", dbPath)
 			require.NoError(t, err)
-			defer db.Close()
+			t.Cleanup(func() { _ = db.Close() })
 
 			_, err = db.Exec(fmt.Sprintf(`SET extension_directory = '%s'`, quoteSQLString(localExtDir)))
 			require.NoError(t, err)
@@ -331,7 +329,7 @@ func TestOfflineExtensionLoad(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			defer db.Close()
+			t.Cleanup(func() { _ = db.Close() })
 
 			var loaded bool
 			err = db.QueryRow(`SELECT installed FROM duckdb_extensions() WHERE extension_name = 'vss'`).Scan(&loaded)

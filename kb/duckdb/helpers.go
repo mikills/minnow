@@ -193,21 +193,20 @@ func ensureDocTombstonesTable(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// AssertSafeIdentifier panics if s contains anything outside [A-Za-z0-9_].
+// ValidateSafeIdentifier rejects strings outside [A-Za-z0-9_].
 // Used as defense in depth at every call site that interpolates SQL
-// identifiers via fmt.Sprintf. Callers today pass internal constants only;
-// this guard catches regressions where a future change routes user input
-// through the interpolation path.
-func AssertSafeIdentifier(s string) {
+// identifiers via fmt.Sprintf.
+func ValidateSafeIdentifier(s string) error {
 	if s == "" {
-		panic(fmt.Sprintf("unsafe empty SQL identifier"))
+		return fmt.Errorf("unsafe empty SQL identifier")
 	}
 	for _, r := range s {
 		ok := (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_'
 		if !ok {
-			panic(fmt.Sprintf("unsafe SQL identifier: %q", s))
+			return fmt.Errorf("unsafe SQL identifier: %q", s)
 		}
 	}
+	return nil
 }
 
 func CheckpointDB(ctx context.Context, db *sql.DB) error {

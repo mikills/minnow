@@ -140,15 +140,15 @@ func fetch(ctx context.Context, client *http.Client, ua, url string) ([]byte, er
 		return nil, err
 	}
 	req.Header.Set("User-Agent", ua)
-	resp, err := client.Do(req)
+	reply, err := closeableHTTPDo(client, req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, url)
+	defer reply.Close()
+	if reply.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d: %s", reply.StatusCode, url)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(reply.Body)
 }
 
 func htmlToText(data []byte) (string, error) {

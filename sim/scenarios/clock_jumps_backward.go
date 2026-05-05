@@ -38,15 +38,15 @@ func ClockJumpsBackward(h *sim.Harness) {
 	if err != nil {
 		h.Fatalf("embed (seed=%d): %v", h.Seed(), err)
 	}
-	results, err := h.Query(kbID, probe, 50)
+	matches, err := h.Search(kbID, probe, 50)
 	if err != nil {
 		h.Fatalf("query after clock jump (seed=%d): %v", h.Seed(), err)
 	}
 
 	// Every doc from both ingests should still be reachable; a monotonic-
 	// time assumption elsewhere could silently drop rows on the rewind.
-	seen := make(map[string]struct{}, len(results))
-	for _, r := range results {
+	seen := make(map[string]struct{}, len(matches))
+	for _, r := range matches {
 		seen[r.ID] = struct{}{}
 	}
 	for _, doc := range first {

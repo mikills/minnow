@@ -358,6 +358,15 @@ func safeRun(ctx context.Context, fn SchedulerJob) (err error) {
 
 // startObserverDispatcher spins the background goroutine that drains the
 // observer channel. Safe to call under s.mu.
+func notifySchedulerObserver(obs SchedulerObserver, tick schedulerTick) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Default().Warn("scheduler observer panicked", "job_id", tick.jobID, "panic", fmt.Sprint(r))
+		}
+	}()
+	obs.OnSchedulerTick(tick.jobID, tick.outcome, tick.duration, tick.err)
+}
+
 func (s *Scheduler) startObserverDispatcher() {
 	if s.observer == nil {
 		return
@@ -367,15 +376,7 @@ func (s *Scheduler) startObserverDispatcher() {
 	go func(obs SchedulerObserver, in <-chan schedulerTick, done chan<- struct{}) {
 		defer close(done)
 		for tick := range in {
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						slog.Default().Warn("scheduler observer panicked",
-							"job_id", tick.jobID, "panic", fmt.Sprint(r))
-					}
-				}()
-				obs.OnSchedulerTick(tick.jobID, tick.outcome, tick.duration, tick.err)
-			}()
+			notifySchedulerObserver(obs, tick)
 		}
 	}(s.observer, s.observerCh, s.observerDone)
 }

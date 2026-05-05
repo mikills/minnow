@@ -54,7 +54,7 @@ func ConcurrentIngestAndQuery(h *sim.Harness) {
 	go func() {
 		defer wg.Done()
 		for _, vec := range probes {
-			_, err := h.Query(kbID, vec, 5)
+			_, err := h.Search(kbID, vec, 5)
 			if err == nil {
 				continue
 			}

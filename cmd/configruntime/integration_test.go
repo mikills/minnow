@@ -100,11 +100,11 @@ media:
 						return
 					}
 					if kind, _ := terminal["kind"].(string); kind == "worker.failed" {
-						t.Fatalf("operation reached worker.failed terminal state; body=%s", lastBody)
+						require.Failf(t, "operation reached worker.failed terminal state", "body=%s", lastBody)
 					}
 				}
 				if status, _ := payload["status"].(string); status == "dead" {
-					t.Fatalf("operation reached dead state; body=%s", lastBody)
+					require.Failf(t, "operation reached dead state", "body=%s", lastBody)
 				}
 			}
 		}
@@ -113,7 +113,7 @@ media:
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("operation did not reach terminal state within deadline; last body=%s", lastBody)
+	require.Failf(t, "operation did not reach terminal state within deadline", "last body=%s", lastBody)
 }
 
 func TestLocalMode(t *testing.T) {

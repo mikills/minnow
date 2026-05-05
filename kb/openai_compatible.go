@@ -82,12 +82,42 @@ func (e *OpenAICompatibleEmbedder) Embed(ctx context.Context, input string) ([]f
 }
 
 // EmbedBatch requests embeddings for multiple inputs in one provider call.
+type openAIEmbeddingResponse struct {
+	Data []struct {
+		Index     *int      `json:"index"`
+		Embedding []float64 `json:"embedding"`
+	} `json:"data"`
+}
+
 func (e *OpenAICompatibleEmbedder) EmbedBatch(ctx context.Context, inputs []string) ([][]float32, error) {
+	cleanInputs, err := e.validateBatchInputs(inputs)
+	if err != nil {
+		return nil, err
+	}
+	reply, err := e.doEmbeddingRequest(ctx, cleanInputs)
+	if err != nil {
+		return nil, err
+	}
+	defer reply.Close()
+	parsed, err := decodeOpenAIEmbeddingResponse(reply, len(cleanInputs))
+	if err != nil {
+		return nil, err
+	}
+	return openAIEmbeddingVectors(parsed, len(cleanInputs))
+}
+
+func (e *OpenAICompatibleEmbedder) validateBatchInputs(inputs []string) ([]string, error) {
 	if e == nil {
 		return nil, fmt.Errorf("openai compatible embedder is nil")
 	}
 	if len(inputs) == 0 {
 		return nil, fmt.Errorf("inputs cannot be empty")
+	}
+	if strings.TrimSpace(e.Model) == "" {
+		return nil, fmt.Errorf("openai compatible embedder model cannot be empty")
+	}
+	if e.Dimensions < 0 {
+		return nil, fmt.Errorf("%w: got %d", ErrInvalidEmbeddingDimension, e.Dimensions)
 	}
 	cleanInputs := make([]string, len(inputs))
 	for i, input := range inputs {
@@ -96,27 +126,15 @@ func (e *OpenAICompatibleEmbedder) EmbedBatch(ctx context.Context, inputs []stri
 		}
 		cleanInputs[i] = input
 	}
-	if strings.TrimSpace(e.Model) == "" {
-		return nil, fmt.Errorf("openai compatible embedder model cannot be empty")
-	}
-	if e.Dimensions < 0 {
-		return nil, fmt.Errorf("%w: got %d", ErrInvalidEmbeddingDimension, e.Dimensions)
-	}
+	return cleanInputs, nil
+}
 
-	body := map[string]any{
-		"model": e.Model,
-		"input": cleanInputs,
-	}
-	if e.Dimensions > 0 {
-		body["dimensions"] = e.Dimensions
-	}
-	requestBody, err := json.Marshal(body)
+func (e *OpenAICompatibleEmbedder) doEmbeddingRequest(ctx context.Context, inputs []string) (*closeableHTTPResponse, error) {
+	requestBody, err := json.Marshal(e.embeddingRequestBody(inputs))
 	if err != nil {
 		return nil, fmt.Errorf("marshal openai compatible embed request: %w", err)
 	}
-
-	endpoint := strings.TrimRight(e.BaseURL, "/") + "/embeddings"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(requestBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(e.BaseURL, "/")+"/embeddings", bytes.NewReader(requestBody))
 	if err != nil {
 		return nil, fmt.Errorf("create openai compatible embed request: %w", err)
 	}
@@ -124,52 +142,70 @@ func (e *OpenAICompatibleEmbedder) EmbedBatch(ctx context.Context, inputs []stri
 	if token := strings.TrimSpace(e.Token); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-
-	client := e.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: defaultOpenAICompatibleTimeout}
-	}
-	resp, err := client.Do(req)
+	reply, err := closeableHTTPDo(e.httpClient(), req)
 	if err != nil {
 		return nil, fmt.Errorf("request embeddings from openai compatible API: %w", err)
 	}
-	defer resp.Body.Close()
+	return reply, nil
+}
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+func (e *OpenAICompatibleEmbedder) embeddingRequestBody(inputs []string) map[string]any {
+	body := map[string]any{"model": e.Model, "input": inputs}
+	if e.Dimensions > 0 {
+		body["dimensions"] = e.Dimensions
+	}
+	return body
+}
+
+func (e *OpenAICompatibleEmbedder) httpClient() *http.Client {
+	if e.HTTPClient != nil {
+		return e.HTTPClient
+	}
+	return &http.Client{Timeout: defaultOpenAICompatibleTimeout}
+}
+
+func decodeOpenAIEmbeddingResponse(reply *closeableHTTPResponse, want int) (openAIEmbeddingResponse, error) {
+	if reply.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(reply.Body)
 		if len(body) == 0 {
-			return nil, fmt.Errorf("openai compatible embed request failed with status %d", resp.StatusCode)
+			return openAIEmbeddingResponse{}, fmt.Errorf("openai compatible embed request failed with status %d", reply.StatusCode)
 		}
-		return nil, fmt.Errorf("openai compatible embed request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return openAIEmbeddingResponse{}, fmt.Errorf("openai compatible embed request failed with status %d: %s", reply.StatusCode, strings.TrimSpace(string(body)))
 	}
+	var parsed openAIEmbeddingResponse
+	if err := json.NewDecoder(reply.Body).Decode(&parsed); err != nil {
+		return parsed, fmt.Errorf("decode openai compatible embed response: %w", err)
+	}
+	if len(parsed.Data) != want {
+		return parsed, fmt.Errorf("openai compatible embed response contained %d embeddings for %d inputs", len(parsed.Data), want)
+	}
+	return parsed, nil
+}
 
-	var parsed struct {
-		Data []struct {
-			Index     *int      `json:"index"`
-			Embedding []float64 `json:"embedding"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("decode openai compatible embed response: %w", err)
-	}
-	if len(parsed.Data) != len(cleanInputs) {
-		return nil, fmt.Errorf("openai compatible embed response contained %d embeddings for %d inputs", len(parsed.Data), len(cleanInputs))
-	}
-	vectors := make([][]float32, len(cleanInputs))
+func openAIEmbeddingVectors(parsed openAIEmbeddingResponse, want int) ([][]float32, error) {
+	vectors := make([][]float32, want)
 	for fallbackIndex, item := range parsed.Data {
 		idx := fallbackIndex
-		if item.Index != nil && *item.Index >= 0 && *item.Index < len(cleanInputs) {
+		if item.Index != nil && *item.Index >= 0 && *item.Index < want {
 			idx = *item.Index
 		}
 		if len(item.Embedding) == 0 {
 			return nil, fmt.Errorf("openai compatible embed response contained empty embedding at index %d", idx)
 		}
-		vector := make([]float32, len(item.Embedding))
-		for i, v := range item.Embedding {
-			vector[i] = float32(v)
-		}
-		vectors[idx] = vector
+		vectors[idx] = float64sToFloat32s(item.Embedding)
 	}
+	return requireAllOpenAIVectors(vectors)
+}
+
+func float64sToFloat32s(values []float64) []float32 {
+	vector := make([]float32, len(values))
+	for i, v := range values {
+		vector[i] = float32(v)
+	}
+	return vector
+}
+
+func requireAllOpenAIVectors(vectors [][]float32) ([][]float32, error) {
 	for i, vector := range vectors {
 		if len(vector) == 0 {
 			return nil, fmt.Errorf("openai compatible embed response missing embedding at index %d", i)

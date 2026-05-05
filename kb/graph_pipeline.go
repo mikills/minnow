@@ -96,169 +96,185 @@ type GraphBuilder struct {
 // incremental result so the caller can persist without accumulating the full
 // result in memory. pendingEntities is reset after each sink call to avoid
 // re-inserting entities that were already flushed.
+type graphBuildAccumulator struct {
+	builder                    *GraphBuilder
+	ctx                        context.Context
+	sink                       func(context.Context, *GraphBuildResult) error
+	entityMap                  map[string]GraphEntity
+	allEdges                   []GraphEdge
+	allChunks                  []Chunk
+	entityChunkMappings        []EntityChunkMapping
+	pendingEntities            []GraphEntity
+	pendingEntityChunkMappings []EntityChunkMapping
+}
+
 func (b *GraphBuilder) buildGraph(ctx context.Context, docs []Document, sink func(context.Context, *GraphBuildResult) error) (*GraphBuildResult, error) {
+	if err := b.validate(); err != nil {
+		return nil, err
+	}
+	acc := newGraphBuildAccumulator(ctx, b, sink)
+	if err := acc.processDocuments(docs); err != nil {
+		return nil, err
+	}
+	return acc.result(), nil
+}
+
+func (b *GraphBuilder) validate() error {
 	if b.Chunker == nil {
-		return nil, fmt.Errorf("chunker is required")
+		return fmt.Errorf("chunker is required")
 	}
 	if b.Grapher == nil {
-		return nil, fmt.Errorf("grapher is required")
+		return fmt.Errorf("grapher is required")
 	}
+	return nil
+}
 
-	canonicalize := func(name string) (string, error) {
-		if b.Canonicalizer == nil {
-			return name, nil
-		}
-		return b.Canonicalizer.Canonicalize(ctx, name)
-	}
+func newGraphBuildAccumulator(ctx context.Context, builder *GraphBuilder, sink func(context.Context, *GraphBuildResult) error) *graphBuildAccumulator {
+	return &graphBuildAccumulator{builder: builder, ctx: ctx, sink: sink, entityMap: map[string]GraphEntity{}}
+}
 
-	batchSize := b.BatchSize
-	if batchSize <= 0 {
-		batchSize = 500
-	}
-
-	entityMap := make(map[string]GraphEntity)
-	allEdges := make([]GraphEdge, 0)
-	allChunks := make([]Chunk, 0)
-	entityChunkMappings := make([]EntityChunkMapping, 0)
-	pendingEntities := make([]GraphEntity, 0)
-	pendingEntityChunkMappings := make([]EntityChunkMapping, 0)
-
-	flush := func(chunks []Chunk, extraction *GraphExtraction) error {
-		if extraction == nil {
-			return nil
-		}
-
-		batchEdges := make([]GraphEdge, 0, len(extraction.Edges))
-
-		for _, ent := range extraction.Entities {
-			if ent.Name == "" {
-				continue
-			}
-
-			id, err := canonicalize(ent.Name)
-			if err != nil {
-				return err
-			}
-
-			if id == "" {
-				continue
-			}
-
-			if _, ok := entityMap[id]; !ok {
-				entity := GraphEntity{ID: id, Name: ent.Name}
-				entityMap[id] = entity
-				pendingEntities = append(pendingEntities, entity)
-			}
-
-			if ent.ChunkID != "" {
-				mapping := EntityChunkMapping{
-					EntityID: id,
-					ChunkID:  ent.ChunkID,
-				}
-				entityChunkMappings = append(entityChunkMappings, mapping)
-				pendingEntityChunkMappings = append(pendingEntityChunkMappings, mapping)
-			}
-		}
-
-		for _, edge := range extraction.Edges {
-			if edge.Src == "" || edge.Dst == "" {
-				continue
-			}
-
-			srcID, err := canonicalize(edge.Src)
-			if err != nil {
-				return err
-			}
-
-			dstID, err := canonicalize(edge.Dst)
-			if err != nil {
-				return err
-			}
-
-			if srcID == "" || dstID == "" {
-				continue
-			}
-
-			weight := edge.Weight
-			if weight <= 0 {
-				weight = 1.0
-			}
-
-			batchEdges = append(batchEdges, GraphEdge{
-				SrcID:   srcID,
-				DstID:   dstID,
-				RelType: edge.RelType,
-				Weight:  weight,
-				ChunkID: edge.ChunkID,
-			})
-		}
-
-		allChunks = append(allChunks, chunks...)
-		allEdges = append(allEdges, batchEdges...)
-
-		if sink != nil {
-			batchResult := &GraphBuildResult{
-				Chunks:              chunks,
-				Entities:            pendingEntities,
-				Edges:               batchEdges,
-				EntityChunkMappings: pendingEntityChunkMappings,
-			}
-
-			if err := sink(ctx, batchResult); err != nil {
-				return err
-			}
-		}
-		pendingEntities = pendingEntities[:0]
-		pendingEntityChunkMappings = pendingEntityChunkMappings[:0]
-
-		return nil
-	}
-
-	chunkBatch := make([]Chunk, 0, batchSize)
+func (a *graphBuildAccumulator) processDocuments(docs []Document) error {
+	batch := make([]Chunk, 0, a.batchSize())
 	for _, doc := range docs {
-		chunks, err := b.Chunker.Chunk(ctx, doc.ID, doc.Text)
+		chunks, err := a.builder.Chunker.Chunk(a.ctx, doc.ID, doc.Text)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for _, chunk := range chunks {
-			chunkBatch = append(chunkBatch, chunk)
-			if len(chunkBatch) >= batchSize {
-				extraction, err := b.Grapher.Extract(ctx, chunkBatch)
-				if err != nil {
-					return nil, err
+			batch = append(batch, chunk)
+			if len(batch) >= a.batchSize() {
+				if err := a.extractAndFlush(batch); err != nil {
+					return err
 				}
-
-				if err := flush(chunkBatch, extraction); err != nil {
-					return nil, err
-				}
-
-				chunkBatch = chunkBatch[:0]
+				batch = batch[:0]
 			}
 		}
 	}
+	if len(batch) > 0 {
+		return a.extractAndFlush(batch)
+	}
+	return nil
+}
 
-	if len(chunkBatch) > 0 {
-		extraction, err := b.Grapher.Extract(ctx, chunkBatch)
+func (a *graphBuildAccumulator) batchSize() int {
+	if a.builder.BatchSize > 0 {
+		return a.builder.BatchSize
+	}
+	return 500
+}
+
+func (a *graphBuildAccumulator) extractAndFlush(chunks []Chunk) error {
+	extraction, err := a.builder.Grapher.Extract(a.ctx, chunks)
+	if err != nil {
+		return err
+	}
+	return a.flush(chunks, extraction)
+}
+
+func (a *graphBuildAccumulator) flush(chunks []Chunk, extraction *GraphExtraction) error {
+	if extraction == nil {
+		return nil
+	}
+	batchEdges, err := a.graphEdges(extraction.Edges)
+	if err != nil {
+		return err
+	}
+	if err := a.recordEntities(extraction.Entities); err != nil {
+		return err
+	}
+	a.allChunks = append(a.allChunks, chunks...)
+	a.allEdges = append(a.allEdges, batchEdges...)
+	if err := a.flushSink(chunks, batchEdges); err != nil {
+		return err
+	}
+	a.pendingEntities = a.pendingEntities[:0]
+	a.pendingEntityChunkMappings = a.pendingEntityChunkMappings[:0]
+	return nil
+}
+
+func (a *graphBuildAccumulator) recordEntities(entities []EntityCandidate) error {
+	for _, ent := range entities {
+		if err := a.recordEntity(ent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *graphBuildAccumulator) recordEntity(ent EntityCandidate) error {
+	if ent.Name == "" {
+		return nil
+	}
+	id, err := a.canonicalize(ent.Name)
+	if err != nil || id == "" {
+		return err
+	}
+	if _, ok := a.entityMap[id]; !ok {
+		entity := GraphEntity{ID: id, Name: ent.Name}
+		a.entityMap[id] = entity
+		a.pendingEntities = append(a.pendingEntities, entity)
+	}
+	if ent.ChunkID != "" {
+		mapping := EntityChunkMapping{EntityID: id, ChunkID: ent.ChunkID}
+		a.entityChunkMappings = append(a.entityChunkMappings, mapping)
+		a.pendingEntityChunkMappings = append(a.pendingEntityChunkMappings, mapping)
+	}
+	return nil
+}
+
+func (a *graphBuildAccumulator) graphEdges(candidates []EdgeCandidate) ([]GraphEdge, error) {
+	edges := make([]GraphEdge, 0, len(candidates))
+	for _, edge := range candidates {
+		graphEdge, ok, err := a.graphEdge(edge)
 		if err != nil {
 			return nil, err
 		}
-
-		if err := flush(chunkBatch, extraction); err != nil {
-			return nil, err
+		if ok {
+			edges = append(edges, graphEdge)
 		}
 	}
+	return edges, nil
+}
 
-	entities := make([]GraphEntity, 0, len(entityMap))
-	for _, ent := range entityMap {
+func (a *graphBuildAccumulator) graphEdge(edge EdgeCandidate) (GraphEdge, bool, error) {
+	if edge.Src == "" || edge.Dst == "" {
+		return GraphEdge{}, false, nil
+	}
+	srcID, err := a.canonicalize(edge.Src)
+	if err != nil {
+		return GraphEdge{}, false, err
+	}
+	dstID, err := a.canonicalize(edge.Dst)
+	if err != nil || srcID == "" || dstID == "" {
+		return GraphEdge{}, false, err
+	}
+	weight := edge.Weight
+	if weight <= 0 {
+		weight = 1.0
+	}
+	return GraphEdge{SrcID: srcID, DstID: dstID, RelType: edge.RelType, Weight: weight, ChunkID: edge.ChunkID}, true, nil
+}
+
+func (a *graphBuildAccumulator) canonicalize(name string) (string, error) {
+	if a.builder.Canonicalizer == nil {
+		return name, nil
+	}
+	return a.builder.Canonicalizer.Canonicalize(a.ctx, name)
+}
+
+func (a *graphBuildAccumulator) flushSink(chunks []Chunk, edges []GraphEdge) error {
+	if a.sink == nil {
+		return nil
+	}
+	return a.sink(a.ctx, &GraphBuildResult{Chunks: chunks, Entities: a.pendingEntities, Edges: edges, EntityChunkMappings: a.pendingEntityChunkMappings})
+}
+
+func (a *graphBuildAccumulator) result() *GraphBuildResult {
+	entities := make([]GraphEntity, 0, len(a.entityMap))
+	for _, ent := range a.entityMap {
 		entities = append(entities, ent)
 	}
-
-	return &GraphBuildResult{
-		Chunks:              allChunks,
-		Entities:            entities,
-		Edges:               allEdges,
-		EntityChunkMappings: entityChunkMappings,
-	}, nil
+	return &GraphBuildResult{Chunks: a.allChunks, Entities: entities, Edges: a.allEdges, EntityChunkMappings: a.entityChunkMappings}
 }
 
 // Build runs the full pipeline and returns the accumulated GraphBuildResult.

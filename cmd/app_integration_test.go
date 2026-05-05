@@ -159,10 +159,10 @@ func testAppMultipartFileIngestPartialSuccess(t *testing.T) {
 		return partErr
 	})
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	if resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("unexpected status %d: %s", resp.StatusCode, string(body))
+		require.Failf(t, "unexpected status", "status %d: %s", resp.StatusCode, string(body))
 	}
 	require.Equal(t, http.StatusAccepted, resp.StatusCode)
 	var payload ingestAcceptedPayload
@@ -245,7 +245,7 @@ func testAppMediaUploadAsync(t *testing.T) {
 		return partErr
 	})
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	require.Equal(t, http.StatusAccepted, resp.StatusCode)
 	var payload ingestAcceptedPayload
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
@@ -292,7 +292,7 @@ func testAppMediaUploadTooLarge(t *testing.T) {
 		return partErr
 	})
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	require.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
 }
 
@@ -448,7 +448,7 @@ func testAppRAGS3Redis(t *testing.T) {
 				"k":     5,
 			})
 			require.NoError(t, err)
-			defer resp.Body.Close()
+			t.Cleanup(func() { _ = resp.Body.Close() })
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 
 			var payload queryResultPayload
@@ -517,7 +517,7 @@ func testAppRAGOllama(t *testing.T) {
 		"k":     5,
 	})
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var payload queryResultPayload
@@ -631,7 +631,7 @@ func testAppRAGValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			resp, postErr := postJSON(baseURL+tc.path, tc.body)
 			require.NoError(t, postErr)
-			defer resp.Body.Close()
+			t.Cleanup(func() { _ = resp.Body.Close() })
 
 			require.Equal(t, tc.expectedStatus, resp.StatusCode)
 
@@ -688,7 +688,7 @@ func testAppRAGModesSharded(t *testing.T) {
 
 			resp, err := postJSON(baseURL+"/rag/query", body)
 			require.NoError(t, err)
-			defer resp.Body.Close()
+			t.Cleanup(func() { _ = resp.Body.Close() })
 			require.Equal(t, tc.expectedStatus, resp.StatusCode)
 
 			if tc.expectedError != "" {
@@ -761,7 +761,7 @@ func testAppQueryFieldsGraph(t *testing.T) {
 				"search_mode": tc.searchMode,
 			})
 			require.NoError(t, err)
-			defer resp.Body.Close()
+			t.Cleanup(func() { _ = resp.Body.Close() })
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 
 			var payload queryResultWithScoresPayload

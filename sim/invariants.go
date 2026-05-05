@@ -87,12 +87,12 @@ func (n noDocLoss) Check(h *Harness) error {
 		if k < len(expected) {
 			k = len(expected)
 		}
-		results, err := h.Query(kbID, vec, k)
+		matches, err := h.Search(kbID, vec, k)
 		if err != nil {
 			return fmt.Errorf("probe query %s: %w", kbID, err)
 		}
-		seen := make(map[string]struct{}, len(results))
-		for _, r := range results {
+		seen := make(map[string]struct{}, len(matches))
+		for _, r := range matches {
 			seen[r.ID] = struct{}{}
 		}
 		missing := make([]string, 0)

@@ -132,10 +132,14 @@ func (p *WorkerPool) Start(parentCtx context.Context) error {
 	p.cancel = cancel
 
 	for i := 0; i < p.cfg.Concurrency; i++ {
-		p.wg.Add(1)
-		go p.loop(ctx)
+		p.startWorker(ctx)
 	}
 	return nil
+}
+
+func (p *WorkerPool) startWorker(ctx context.Context) {
+	p.wg.Add(1)
+	go p.loop(ctx)
 }
 
 // Stop signals workers to exit and waits for them. After Stop returns, the

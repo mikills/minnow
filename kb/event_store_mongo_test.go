@@ -19,6 +19,21 @@ func newTestMongoEventStore(t *testing.T) (*MongoEventStore, *mongo.Client) {
 	return s, client
 }
 
+func startConcurrentClaim(ctx context.Context, s *MongoEventStore, wg *sync.WaitGroup, winners, noneAvailable *atomic.Int32) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := s.Claim(ctx, EventDocumentChunked, "w", time.Minute)
+		if err == nil {
+			winners.Add(1)
+			return
+		}
+		if err == ErrEventNoneAvailable {
+			noneAvailable.Add(1)
+		}
+	}()
+}
+
 func TestMongoEventStore(t *testing.T) {
 	t.Run("append enforces unique (kb_id, kind, idempotency_key)", func(t *testing.T) {
 		s, _ := newTestMongoEventStore(t)
@@ -62,18 +77,7 @@ func TestMongoEventStore(t *testing.T) {
 		var noneAvailable atomic.Int32
 		var wg sync.WaitGroup
 		for i := 0; i < 10; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				_, err := s.Claim(ctx, EventDocumentChunked, "w", time.Minute)
-				if err == nil {
-					winners.Add(1)
-					return
-				}
-				if err == ErrEventNoneAvailable {
-					noneAvailable.Add(1)
-				}
-			}()
+			startConcurrentClaim(ctx, s, &wg, &winners, &noneAvailable)
 		}
 		wg.Wait()
 		require.EqualValues(t, 1, winners.Load(), "findOneAndUpdate must award the claim to exactly one caller")

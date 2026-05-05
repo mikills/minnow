@@ -254,10 +254,25 @@ func (d Duration) MarshalYAML() (interface{}, error) {
 //
 // Called by Load after strict decoding, before validation.
 func (c *Config) applyDefaults() {
+	c.applyHTTPDefaults()
+	c.applyStorageDefaults()
+	c.applyFormatDefaults()
+	c.applyEmbedderDefaults()
+	c.applyGraphDefaults()
+	c.applyMongoDefaults()
+	c.applyWorkerDefaults()
+	c.applyMediaDefaults()
+	c.applyCodeIndexDefaults()
+	c.applyMCPDefaults()
+}
+
+func (c *Config) applyHTTPDefaults() {
 	if c.HTTP.Address == "" {
 		c.HTTP.Address = "127.0.0.1:8080"
 	}
+}
 
+func (c *Config) applyStorageDefaults() {
 	if c.Storage.Blob.Kind == "" {
 		c.Storage.Blob.Kind = "local"
 	}
@@ -267,7 +282,9 @@ func (c *Config) applyDefaults() {
 	if c.Storage.Cache.Dir == "" {
 		c.Storage.Cache.Dir = "./.temp/cache"
 	}
+}
 
+func (c *Config) applyFormatDefaults() {
 	if c.Format.Kind == "" {
 		c.Format.Kind = "duckdb"
 	}
@@ -277,7 +294,9 @@ func (c *Config) applyDefaults() {
 	if c.Format.DuckDB.ExtensionDir == "" {
 		c.Format.DuckDB.ExtensionDir = "./extensions"
 	}
+}
 
+func (c *Config) applyEmbedderDefaults() {
 	if c.Embedder.Provider == "" {
 		c.Embedder.Provider = "ollama"
 	}
@@ -297,41 +316,47 @@ func (c *Config) applyDefaults() {
 	if c.Embedder.Local != nil && c.Embedder.Local.Dim == 0 {
 		c.Embedder.Local.Dim = 384
 	}
-	if c.Embedder.OpenAICompatible != nil {
-		if c.Embedder.OpenAICompatible.BaseURL == "" {
-			c.Embedder.OpenAICompatible.BaseURL = "https://api.openai.com/v1"
-		}
+	if c.Embedder.OpenAICompatible != nil && c.Embedder.OpenAICompatible.BaseURL == "" {
+		c.Embedder.OpenAICompatible.BaseURL = "https://api.openai.com/v1"
 	}
+}
 
-	if c.Graph.Enabled {
-		if c.Graph.URL == "" {
-			c.Graph.URL = "http://localhost:11434"
-		}
-		if c.Graph.Model == "" {
-			c.Graph.Model = "llama3"
-		}
-		// Parallelism is a pointer: keep nil so validator catches explicit
-		// non-positive values; GraphParallelism() resolves at call time.
+func (c *Config) applyGraphDefaults() {
+	if !c.Graph.Enabled {
+		return
 	}
-
-	if c.Mongo != nil {
-		if c.Mongo.Database == "" {
-			c.Mongo.Database = "minnow"
-		}
-		if c.Mongo.Collections.Manifests == "" {
-			c.Mongo.Collections.Manifests = "manifests"
-		}
-		if c.Mongo.Collections.Events == "" {
-			c.Mongo.Collections.Events = "kb_events"
-		}
-		if c.Mongo.Collections.Inbox == "" {
-			c.Mongo.Collections.Inbox = "kb_event_inbox"
-		}
-		if c.Mongo.Collections.Media == "" {
-			c.Mongo.Collections.Media = "media"
-		}
+	if c.Graph.URL == "" {
+		c.Graph.URL = "http://localhost:11434"
 	}
+	if c.Graph.Model == "" {
+		c.Graph.Model = "llama3"
+	}
+	// Parallelism is a pointer: keep nil so validator catches explicit
+	// non-positive values; GraphParallelism() resolves at call time.
+}
 
+func (c *Config) applyMongoDefaults() {
+	if c.Mongo == nil {
+		return
+	}
+	if c.Mongo.Database == "" {
+		c.Mongo.Database = "minnow"
+	}
+	if c.Mongo.Collections.Manifests == "" {
+		c.Mongo.Collections.Manifests = "manifests"
+	}
+	if c.Mongo.Collections.Events == "" {
+		c.Mongo.Collections.Events = "kb_events"
+	}
+	if c.Mongo.Collections.Inbox == "" {
+		c.Mongo.Collections.Inbox = "kb_event_inbox"
+	}
+	if c.Mongo.Collections.Media == "" {
+		c.Mongo.Collections.Media = "media"
+	}
+}
+
+func (c *Config) applyWorkerDefaults() {
 	if c.Workers.Defaults.MaxAttempts == 0 {
 		c.Workers.Defaults.MaxAttempts = 5
 	}
@@ -353,7 +378,9 @@ func (c *Config) applyDefaults() {
 	if c.Workers.MediaUpload.Concurrency == 0 {
 		c.Workers.MediaUpload.Concurrency = 2
 	}
+}
 
+func (c *Config) applyMediaDefaults() {
 	if c.Media.MaxBytes == 0 {
 		c.Media.MaxBytes = 10 * 1024 * 1024
 	}
@@ -366,6 +393,9 @@ func (c *Config) applyDefaults() {
 	if c.Media.UploadCompletionTTL == 0 {
 		c.Media.UploadCompletionTTL = Duration(15 * time.Minute)
 	}
+}
+
+func (c *Config) applyCodeIndexDefaults() {
 	if len(c.CodeIndex.Include) == 0 {
 		c.CodeIndex.Include = []string{"**/*.go", "**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mjs", "**/*.cjs", "**/*.py", "**/*.rs", "**/*.java", "**/*.rb", "**/*.php", "**/*.c", "**/*.cc", "**/*.cpp", "**/*.h", "**/*.hpp", "**/*.cs", "**/*.swift", "**/*.kt", "**/*.kts", "**/*.sh", "**/*.bash", "**/*.zsh", "**/*.md", "**/*.mdx", "**/*.yaml", "**/*.yml", "**/*.json", "**/*.toml", "**/*.xml", "**/Dockerfile"}
 	}
@@ -399,19 +429,22 @@ func (c *Config) applyDefaults() {
 	if c.CodeIndex.LargeRepoFiles == 0 {
 		c.CodeIndex.LargeRepoFiles = 1000
 	}
+}
 
-	if c.MCP.Enabled {
-		if len(c.MCP.Transports) == 0 {
-			c.MCP.Transports = []string{"stdio", "http"}
-		}
-		if c.MCP.HTTPPath == "" {
-			c.MCP.HTTPPath = "/mcp"
-		}
-		if c.MCP.DefaultSyncTimeout == 0 {
-			c.MCP.DefaultSyncTimeout = Duration(30 * time.Second)
-		}
-		if c.MCP.MaxSyncTimeout == 0 {
-			c.MCP.MaxSyncTimeout = Duration(2 * time.Minute)
-		}
+func (c *Config) applyMCPDefaults() {
+	if !c.MCP.Enabled {
+		return
+	}
+	if len(c.MCP.Transports) == 0 {
+		c.MCP.Transports = []string{"stdio", "http"}
+	}
+	if c.MCP.HTTPPath == "" {
+		c.MCP.HTTPPath = "/mcp"
+	}
+	if c.MCP.DefaultSyncTimeout == 0 {
+		c.MCP.DefaultSyncTimeout = Duration(30 * time.Second)
+	}
+	if c.MCP.MaxSyncTimeout == 0 {
+		c.MCP.MaxSyncTimeout = Duration(2 * time.Minute)
 	}
 }

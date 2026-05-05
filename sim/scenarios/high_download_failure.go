@@ -22,7 +22,7 @@ func HighDownloadFailure(h *sim.Harness) {
 	if err != nil {
 		h.Fatalf("embed (seed=%d): %v", h.Seed(), err)
 	}
-	if _, err := h.Query(kbID, probe, 5); err != nil {
+	if _, err := h.Search(kbID, probe, 5); err != nil {
 		h.Fatalf("warm query (seed=%d): %v", h.Seed(), err)
 	}
 
@@ -35,9 +35,9 @@ func HighDownloadFailure(h *sim.Harness) {
 
 	ok, injected := 0, 0
 	for i := 0; i < 20; i++ {
-		results, err := h.Query(kbID, probe, 5)
+		matches, err := h.Search(kbID, probe, 5)
 		if err == nil {
-			if len(results) == 0 {
+			if len(matches) == 0 {
 				h.Errorf("query returned empty results with %d docs present (seed=%d)",
 					len(docs), h.Seed())
 			}

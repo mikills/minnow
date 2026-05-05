@@ -255,29 +255,7 @@ func (f *DuckDBArtifactFormat) queryShardsTopK(ctx context.Context, kbID string,
 	var wg sync.WaitGroup
 
 	for i := range shards {
-		idx := i
-		shard := shards[i]
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-sem }()
-
-			rows, err := f.querySingleShardTopK(ctx, kbID, shard, queryVec, k)
-			if err != nil {
-				select {
-				case errCh <- err:
-				default:
-				}
-				cancel()
-				return
-			}
-			results[idx] = rows
-		}()
+		f.startVectorShardQuery(ctx, vectorShardQueryWork{kbID: kbID, idx: i, shard: shards[i], queryVec: queryVec, k: k, sem: sem, errCh: errCh, results: results, cancel: cancel, wg: &wg})
 	}
 
 	wg.Wait()
@@ -288,6 +266,44 @@ func (f *DuckDBArtifactFormat) queryShardsTopK(ctx context.Context, kbID string,
 	}
 
 	return results, nil
+}
+
+type vectorShardQueryWork struct {
+	kbID     string
+	idx      int
+	shard    kb.SnapshotShardMetadata
+	queryVec []float32
+	k        int
+	sem      chan struct{}
+	errCh    chan error
+	results  [][]kb.QueryResult
+	cancel   context.CancelFunc
+	wg       *sync.WaitGroup
+}
+
+func (f *DuckDBArtifactFormat) startVectorShardQuery(ctx context.Context, work vectorShardQueryWork) {
+	work.wg.Add(1)
+	go f.runVectorShardQuery(ctx, work)
+}
+
+func (f *DuckDBArtifactFormat) runVectorShardQuery(ctx context.Context, work vectorShardQueryWork) {
+	defer work.wg.Done()
+	select {
+	case work.sem <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	defer func() { <-work.sem }()
+	rows, err := f.querySingleShardTopK(ctx, work.kbID, work.shard, work.queryVec, work.k)
+	if err != nil {
+		select {
+		case work.errCh <- err:
+		default:
+		}
+		work.cancel()
+		return
+	}
+	work.results[work.idx] = rows
 }
 
 func (f *DuckDBArtifactFormat) querySingleShardTopK(ctx context.Context, kbID string, shard kb.SnapshotShardMetadata, queryVec []float32, k int) ([]kb.QueryResult, error) {

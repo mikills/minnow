@@ -273,6 +273,19 @@ func testAppMetricsSnapshotCopies(t *testing.T) {
 	assert.Equal(t, "/x", snap2.RecentRequests[0].Path)
 }
 
+func startMetricsRecorder(wg *sync.WaitGroup, m *InMemAppMetrics, id, loops int) {
+	go func() {
+		defer wg.Done()
+		for j := 0; j < loops; j++ {
+			path := fmt.Sprintf("/p/%d", id%3)
+			m.RecordRequest("GET", path, 200, int64(j))
+			m.RecordEmbed("kb-concurrent", int64(j), nil)
+			m.RecordQuery("kb-concurrent", int64(j), 1, 0.1, nil)
+			m.RecordIngest("kb-concurrent", int64(j), 1, 2, nil)
+		}
+	}()
+}
+
 func testAppMetricsConcurrentRecord(t *testing.T) {
 	m := NewInMemAppMetrics()
 	const workers = 20
@@ -281,16 +294,7 @@ func testAppMetricsConcurrentRecord(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
-		go func(id int) {
-			defer wg.Done()
-			for j := 0; j < loops; j++ {
-				path := fmt.Sprintf("/p/%d", id%3)
-				m.RecordRequest("GET", path, 200, int64(j))
-				m.RecordEmbed("kb-concurrent", int64(j), nil)
-				m.RecordQuery("kb-concurrent", int64(j), 1, 0.1, nil)
-				m.RecordIngest("kb-concurrent", int64(j), 1, 2, nil)
-			}
-		}(i)
+		startMetricsRecorder(&wg, m, i, loops)
 	}
 	wg.Wait()
 

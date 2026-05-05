@@ -102,114 +102,132 @@ func InsertGraphBuildResult(ctx context.Context, db *sql.DB, result *kb.GraphBui
 
 // InsertGraphBuildResultTx writes entities, edges, and doc-entity links into
 // the given transaction.
+type docEntityKey struct {
+	docID    string
+	entityID string
+	chunkID  string
+}
+
 func InsertGraphBuildResultTx(ctx context.Context, tx *sql.Tx, result *kb.GraphBuildResult) error {
 	if result == nil {
 		return nil
 	}
-
-	if len(result.Entities) > 0 {
-		var err error
-		stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)`)
-		if err != nil {
-			return fmt.Errorf("prepare entity insert: %w", err)
-		}
-		for _, ent := range result.Entities {
-			if ent.ID == "" {
-				continue
-			}
-			if _, err := stmt.ExecContext(ctx, ent.ID, ent.Name); err != nil {
-				stmt.Close()
-				return fmt.Errorf("insert entity %s: %w", ent.ID, err)
-			}
-		}
-		if err := stmt.Close(); err != nil {
-			return fmt.Errorf("close entity stmt: %w", err)
-		}
+	if err := insertGraphEntities(ctx, tx, result.Entities); err != nil {
+		return err
 	}
-
-	if len(result.Edges) > 0 {
-		var err error
-		stmt, err := tx.PrepareContext(ctx, `INSERT INTO edges (src, dst, weight, rel_type, chunk_id) VALUES (?, ?, ?, ?, ?)`)
-		if err != nil {
-			return fmt.Errorf("prepare edge insert: %w", err)
-		}
-		for _, edge := range result.Edges {
-			if edge.SrcID == "" || edge.DstID == "" {
-				continue
-			}
-			weight := edge.Weight
-			if weight <= 0 {
-				weight = 1.0
-			}
-			if _, err := stmt.ExecContext(ctx, edge.SrcID, edge.DstID, weight, edge.RelType, edge.ChunkID); err != nil {
-				stmt.Close()
-				return fmt.Errorf("insert edge %s->%s: %w", edge.SrcID, edge.DstID, err)
-			}
-		}
-		if err := stmt.Close(); err != nil {
-			return fmt.Errorf("close edge stmt: %w", err)
-		}
+	if err := insertGraphEdges(ctx, tx, result.Edges); err != nil {
+		return err
 	}
+	return insertDocEntityWeights(ctx, tx, docEntityWeights(result))
+}
 
-	chunkToDoc := make(map[string]string, len(result.Chunks))
-	for _, chunk := range result.Chunks {
-		if chunk.ChunkID == "" || chunk.DocID == "" {
+func insertGraphEntities(ctx context.Context, tx *sql.Tx, entities []kb.GraphEntity) error {
+	if len(entities) == 0 {
+		return nil
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare entity insert: %w", err)
+	}
+	defer stmt.Close()
+	for _, ent := range entities {
+		if ent.ID == "" {
 			continue
 		}
-		chunkToDoc[chunk.ChunkID] = chunk.DocID
+		if _, err := stmt.ExecContext(ctx, ent.ID, ent.Name); err != nil {
+			return fmt.Errorf("insert entity %s: %w", ent.ID, err)
+		}
 	}
+	return nil
+}
 
-	type docEntityKey struct {
-		docID    string
-		entityID string
-		chunkID  string
+func insertGraphEdges(ctx context.Context, tx *sql.Tx, edges []kb.GraphEdge) error {
+	if len(edges) == 0 {
+		return nil
 	}
-	docEntityWeights := make(map[docEntityKey]float64)
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO edges (src, dst, weight, rel_type, chunk_id) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare edge insert: %w", err)
+	}
+	defer stmt.Close()
+	for _, edge := range edges {
+		if edge.SrcID == "" || edge.DstID == "" {
+			continue
+		}
+		if _, err := stmt.ExecContext(ctx, edge.SrcID, edge.DstID, graphEdgeWeight(edge), edge.RelType, edge.ChunkID); err != nil {
+			return fmt.Errorf("insert edge %s->%s: %w", edge.SrcID, edge.DstID, err)
+		}
+	}
+	return nil
+}
 
-	for _, edge := range result.Edges {
+func graphEdgeWeight(edge kb.GraphEdge) float64 {
+	if edge.Weight <= 0 {
+		return 1.0
+	}
+	return edge.Weight
+}
+
+func docEntityWeights(result *kb.GraphBuildResult) map[docEntityKey]float64 {
+	chunkToDoc := graphChunkDocMap(result.Chunks)
+	weights := make(map[docEntityKey]float64)
+	addEdgeDocEntityWeights(weights, chunkToDoc, result.Edges)
+	addMappedDocEntityWeights(weights, chunkToDoc, result.EntityChunkMappings)
+	return weights
+}
+
+func graphChunkDocMap(chunks []kb.Chunk) map[string]string {
+	chunkToDoc := make(map[string]string, len(chunks))
+	for _, chunk := range chunks {
+		if chunk.ChunkID != "" && chunk.DocID != "" {
+			chunkToDoc[chunk.ChunkID] = chunk.DocID
+		}
+	}
+	return chunkToDoc
+}
+
+func addEdgeDocEntityWeights(weights map[docEntityKey]float64, chunkToDoc map[string]string, edges []kb.GraphEdge) {
+	for _, edge := range edges {
 		docID := chunkToDoc[edge.ChunkID]
 		if docID == "" {
 			continue
 		}
-		weight := edge.Weight
-		if weight <= 0 {
-			weight = 1.0
-		}
-		docEntityWeights[docEntityKey{docID: docID, entityID: edge.SrcID, chunkID: edge.ChunkID}] += weight
-		docEntityWeights[docEntityKey{docID: docID, entityID: edge.DstID, chunkID: edge.ChunkID}] += weight
+		weight := graphEdgeWeight(edge)
+		weights[docEntityKey{docID: docID, entityID: edge.SrcID, chunkID: edge.ChunkID}] += weight
+		weights[docEntityKey{docID: docID, entityID: edge.DstID, chunkID: edge.ChunkID}] += weight
 	}
+}
 
-	for _, m := range result.EntityChunkMappings {
-		if m.EntityID == "" || m.ChunkID == "" {
+func addMappedDocEntityWeights(weights map[docEntityKey]float64, chunkToDoc map[string]string, mappings []kb.EntityChunkMapping) {
+	for _, mapping := range mappings {
+		if mapping.EntityID == "" || mapping.ChunkID == "" {
 			continue
 		}
-		docID := chunkToDoc[m.ChunkID]
+		docID := chunkToDoc[mapping.ChunkID]
 		if docID == "" {
 			continue
 		}
-		key := docEntityKey{docID: docID, entityID: m.EntityID, chunkID: m.ChunkID}
-		if _, ok := docEntityWeights[key]; !ok {
-			docEntityWeights[key] = 1.0
+		key := docEntityKey{docID: docID, entityID: mapping.EntityID, chunkID: mapping.ChunkID}
+		if _, ok := weights[key]; !ok {
+			weights[key] = 1.0
 		}
 	}
+}
 
-	if len(docEntityWeights) > 0 {
-		var err error
-		stmt, err := tx.PrepareContext(ctx, `INSERT INTO doc_entities (doc_id, entity_id, weight, chunk_id) VALUES (?, ?, ?, ?)`)
-		if err != nil {
-			return fmt.Errorf("prepare doc_entity insert: %w", err)
-		}
-		for key, weight := range docEntityWeights {
-			if _, err := stmt.ExecContext(ctx, key.docID, key.entityID, weight, key.chunkID); err != nil {
-				stmt.Close()
-				return fmt.Errorf("insert doc_entity %s->%s: %w", key.docID, key.entityID, err)
-			}
-		}
-		if err := stmt.Close(); err != nil {
-			return fmt.Errorf("close doc_entity stmt: %w", err)
+func insertDocEntityWeights(ctx context.Context, tx *sql.Tx, weights map[docEntityKey]float64) error {
+	if len(weights) == 0 {
+		return nil
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO doc_entities (doc_id, entity_id, weight, chunk_id) VALUES (?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare doc_entity insert: %w", err)
+	}
+	defer stmt.Close()
+	for key, weight := range weights {
+		if _, err := stmt.ExecContext(ctx, key.docID, key.entityID, weight, key.chunkID); err != nil {
+			return fmt.Errorf("insert doc_entity %s->%s: %w", key.docID, key.entityID, err)
 		}
 	}
-
 	return nil
 }
 

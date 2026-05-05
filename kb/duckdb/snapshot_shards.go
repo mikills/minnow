@@ -436,7 +436,9 @@ func (f *DuckDBArtifactFormat) cleanupPreShardSnapshotObjectsBestEffort(ctx cont
 func mergeShardIntoDB(ctx context.Context, db *sql.DB, alias, partPath string, isFirst bool) error {
 	// Safe: alias is an internal-only constant; never accept from user input.
 	// If this changes, switch to a sanitized allowlist.
-	AssertSafeIdentifier(alias)
+	if err := ValidateSafeIdentifier(alias); err != nil {
+		return err
+	}
 	if _, err := db.ExecContext(ctx, fmt.Sprintf("ATTACH '%s' AS %s (READ_ONLY)", quoteSQLString(partPath), alias)); err != nil {
 		return err
 	}
@@ -514,8 +516,12 @@ func sourceGraphTablesReady(ctx context.Context, db *sql.DB) (bool, error) {
 func attachedTableExists(ctx context.Context, db *sql.DB, alias, table string) (bool, error) {
 	// Safe: alias and table are internal-only constants; never accept from
 	// user input. If this changes, switch to a sanitized allowlist.
-	AssertSafeIdentifier(alias)
-	AssertSafeIdentifier(table)
+	if err := ValidateSafeIdentifier(alias); err != nil {
+		return false, err
+	}
+	if err := ValidateSafeIdentifier(table); err != nil {
+		return false, err
+	}
 	query := fmt.Sprintf("SELECT 1 FROM %s.%s LIMIT 1", alias, table)
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {

@@ -87,24 +87,24 @@ func (o *OllamaEmbedder) Embed(ctx context.Context, input string) ([]float32, er
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	reply, err := closeableHTTPDo(http.DefaultClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("request embeddings from ollama: %w", err)
 	}
-	defer resp.Body.Close()
+	defer reply.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+	if reply.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(reply.Body)
 		if len(body) == 0 {
-			return nil, fmt.Errorf("ollama embed request failed with status %d", resp.StatusCode)
+			return nil, fmt.Errorf("ollama embed request failed with status %d", reply.StatusCode)
 		}
-		return nil, fmt.Errorf("ollama embed request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("ollama embed request failed with status %d: %s", reply.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var parsed struct {
 		Embeddings [][]float64 `json:"embeddings"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.NewDecoder(reply.Body).Decode(&parsed); err != nil {
 		return nil, fmt.Errorf("decode ollama embed response: %w", err)
 	}
 
@@ -168,6 +168,12 @@ type ollamaGrapherResult struct {
 	Edges    []ollamaGrapherEdge `json:"edges"`
 }
 
+type chunkResult struct {
+	entities []EntityCandidate
+	edges    []EdgeCandidate
+	err      error
+}
+
 type ollamaGrapherEdge struct {
 	Src    string  `json:"src"`
 	Dst    string  `json:"dst"`
@@ -196,22 +202,22 @@ func (o *OllamaGrapher) extractChunk(ctx context.Context, chunk Chunk) ([]Entity
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	reply, err := closeableHTTPDo(http.DefaultClient, req)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer resp.Body.Close()
+	defer reply.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if reply.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(io.LimitReader(reply.Body, 512))
 		if readErr != nil {
-			return nil, nil, fmt.Errorf("ollama grapher request failed with status %d", resp.StatusCode)
+			return nil, nil, fmt.Errorf("ollama grapher request failed with status %d", reply.StatusCode)
 		}
-		return nil, nil, fmt.Errorf("ollama grapher request failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, nil, fmt.Errorf("ollama grapher request failed with status %d: %s", reply.StatusCode, string(body))
 	}
 
 	var response ollamaGenerateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+	if err := json.NewDecoder(reply.Body).Decode(&response); err != nil {
 		return nil, nil, err
 	}
 
@@ -279,12 +285,6 @@ func (o *OllamaGrapher) Extract(ctx context.Context, chunks []Chunk) (*GraphExtr
 		return &GraphExtraction{Entities: allEntities, Edges: allEdges}, nil
 	}
 
-	type chunkResult struct {
-		entities []EntityCandidate
-		edges    []EdgeCandidate
-		err      error
-	}
-
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -293,20 +293,7 @@ func (o *OllamaGrapher) Extract(ctx context.Context, chunks []Chunk) (*GraphExtr
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for idx := range jobs {
-				entities, edges, err := o.extractChunk(ctx, chunks[idx])
-				if err != nil {
-					results[idx].err = err
-					cancel()
-					continue
-				}
-				results[idx].entities = entities
-				results[idx].edges = edges
-			}
-		}()
+		startOllamaGrapherWorker(ctx, o, chunks, jobs, results, cancel, &wg)
 	}
 
 	// Producer goroutine: sends chunk indices to the jobs channel.
@@ -337,4 +324,23 @@ func (o *OllamaGrapher) Extract(ctx context.Context, chunks []Chunk) (*GraphExtr
 	}
 
 	return &GraphExtraction{Entities: allEntities, Edges: allEdges}, nil
+}
+
+func startOllamaGrapherWorker(ctx context.Context, grapher *OllamaGrapher, chunks []Chunk, jobs <-chan int, results []chunkResult, cancel context.CancelFunc, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go runOllamaGrapherWorker(ctx, grapher, chunks, jobs, results, cancel, wg)
+}
+
+func runOllamaGrapherWorker(ctx context.Context, grapher *OllamaGrapher, chunks []Chunk, jobs <-chan int, results []chunkResult, cancel context.CancelFunc, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for idx := range jobs {
+		entities, edges, err := grapher.extractChunk(ctx, chunks[idx])
+		if err != nil {
+			results[idx].err = err
+			cancel()
+			continue
+		}
+		results[idx].entities = entities
+		results[idx].edges = edges
+	}
 }

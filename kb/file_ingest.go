@@ -310,13 +310,20 @@ func extractSourceText(path, contentType string) ([]extractedPage, error) {
 }
 
 func extractPDFPages(path string) ([]extractedPage, error) {
-	r, err := pdf.Open(path)
+	return extractOpenedPDFPages(pdf.Open(path))
+}
+
+func extractOpenedPDFPages(parsedPDF interface {
+	NumPage() int
+	Page(int) pdf.Page
+}, err error) ([]extractedPage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ingest: parse pdf: %w", err)
 	}
-	pages := make([]extractedPage, 0, r.NumPage())
-	for i := 1; i <= r.NumPage(); i++ {
-		p := r.Page(i)
+	defer closePDFReaderIfSupported(parsedPDF)
+	pages := make([]extractedPage, 0, parsedPDF.NumPage())
+	for i := 1; i <= parsedPDF.NumPage(); i++ {
+		p := parsedPDF.Page(i)
 		content := p.Content()
 		var parts []string
 		for _, txt := range content.Text {

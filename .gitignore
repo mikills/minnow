@@ -22,3 +22,4 @@ examples/extensions/
 # Generated local audit reports
 diago_audit.txt
 diago_audit.json
+.diago/

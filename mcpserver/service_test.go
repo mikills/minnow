@@ -58,7 +58,7 @@ func TestService(t *testing.T) {
 	t.Run("query rejects huge k", func(t *testing.T) {
 		svc := newTestService(func(s *Service) {
 			s.Search = func(context.Context, string, []float32, *kb.SearchOptions) ([]kb.ExpandedResult, error) {
-				t.Fatalf("Search should not be called when K is out of bounds")
+				require.Fail(t, "Search should not be called when K is out of bounds")
 				return nil, nil
 			}
 		})
@@ -363,25 +363,29 @@ func TestRegisterTools(t *testing.T) {
 	}
 	ctx := context.Background()
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cs := connectInMemoryMCP(t, ctx, New(Service{Config: tc.cfg}))
-			defer cs.Close()
-			tools, err := cs.ListTools(ctx, nil)
-			require.NoError(t, err)
-			names := toolNames(tools.Tools)
-			for _, want := range tc.expected {
-				require.Contains(t, names, want, "expected %q to be registered for cfg %s", want, tc.name)
-			}
-			for _, hidden := range tc.hidden {
-				require.NotContains(t, names, hidden, "expected %q to be hidden for cfg %s", hidden, tc.name)
-			}
-		})
+		t.Run(tc.name, func(t *testing.T) { assertRegisteredTools(t, ctx, tc.name, tc.cfg, tc.expected, tc.hidden) })
+	}
+}
+
+func assertRegisteredTools(t *testing.T, ctx context.Context, name string, cfg Config, expected, hidden []string) {
+	t.Helper()
+	cs := connectInMemoryMCP(t, ctx, New(Service{Config: cfg}))
+	defer cs.Close()
+	tools, err := cs.ListTools(ctx, nil)
+	require.NoError(t, err)
+	names := toolNames(tools.Tools)
+	for _, want := range expected {
+		require.Contains(t, names, want, "expected %q to be registered for cfg %s", want, name)
+	}
+	for _, hiddenTool := range hidden {
+		require.NotContains(t, names, hiddenTool, "expected %q to be hidden for cfg %s", hiddenTool, name)
 	}
 }
 
 func TestQueryInputSchema(t *testing.T) {
 	t.Run("advertises k bounds", func(t *testing.T) {
-		schema := mustQueryInputSchema()
+		schema, err := queryInputSchema()
+		require.NoError(t, err)
 		require.NotNil(t, schema.Properties["k"], "k property must exist on schema")
 		require.NotNil(t, schema.Properties["k"].Minimum, "k must advertise a minimum")
 		require.NotNil(t, schema.Properties["k"].Maximum, "k must advertise a maximum")

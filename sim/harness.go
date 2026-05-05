@@ -229,6 +229,11 @@ func (h *Harness) Ingest(kbID string, docs []kb.Document) error {
 
 // Query runs a top-k vector query against kbID.
 func (h *Harness) Query(kbID string, vec []float32, k int) ([]kb.ExpandedResult, error) {
+	return h.Search(kbID, vec, k)
+}
+
+// Search runs a top-k vector search against kbID.
+func (h *Harness) Search(kbID string, vec []float32, k int) ([]kb.ExpandedResult, error) {
 	return h.format.QueryRag(h.ctx, kb.RagQueryRequest{
 		KBID:     kbID,
 		QueryVec: vec,
