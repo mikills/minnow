@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/mikills/minnow/kb"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -39,120 +38,10 @@ type Service struct {
 	CodeHookStatus        func(context.Context, string) (kb.CodeHookStatus, error)
 }
 
-// queryInputSchema returns the queryInput JSONSchema with explicit bounds
-// on K. Agents reading `tools/list` see the constraint up front instead of
-// only learning of it via a runtime error. Handler still validates K > 0 as
-// defense-in-depth.
-func queryInputSchema() (*jsonschema.Schema, error) {
-	schema, err := jsonschema.For[queryInput](nil)
-	if err != nil {
-		return nil, fmt.Errorf("build queryInput schema: %w", err)
-	}
-	if k, ok := schema.Properties["k"]; ok {
-		min := float64(1)
-		max := float64(queryToolMaxK)
-		k.Minimum = &min
-		k.Maximum = &max
-	}
-	return schema, nil
-}
-
-func queryToolSchemaOrDefault() *jsonschema.Schema {
-	schema, err := queryInputSchema()
-	if err == nil {
-		return schema
-	}
-	return &jsonschema.Schema{}
-}
-
-func New(s Service) *mcp.Server {
-	cfg := s.Config.normalized()
-	s.Config = cfg
-	server := mcp.NewServer(&mcp.Implementation{Name: "minnow", Version: "v0.1.0"}, &mcp.ServerOptions{
-		Instructions: "Minnow MCP exposes retrieval, indexing, operation status, and explicitly gated maintenance tools for coding agents.",
-		Logger:       s.Logger,
-	})
-	registerTools(server, &s)
-	registerResources(server, &s)
-	return server
-}
-
-// queryToolMaxK caps the K value the schema advertises so agents do not
-// request unboundedly large result sets. Handler still enforces > 0.
-const queryToolMaxK = 200
-
-// registerTools registers only the tools permitted by s.Config so that
-// `tools/list` reflects what the agent can actually call. Per-handler gates
-// remain as defense-in-depth, so a misconfigured Service still rejects
-// disallowed calls instead of silently executing them.
-func registerTools(server *mcp.Server, s *Service) {
-	cfg := s.Config
-
-	queryTool := &mcp.Tool{
-		Name:        "minnow_query",
-		Description: "Query a Minnow knowledge base using vector, graph, or adaptive search.",
-		InputSchema: queryToolSchemaOrDefault(),
-	}
-	mcp.AddTool(server, queryTool, s.query)
-	mcp.AddTool(server, &mcp.Tool{Name: "minnow_operation_status", Description: "Read the status, stages, and terminal event for an async Minnow operation."}, s.operationStatus)
-	mcp.AddTool(server, &mcp.Tool{Name: "minnow_list_media", Description: "List media metadata for a knowledge base when media is configured."}, s.listMedia)
-	mcp.AddTool(server, &mcp.Tool{Name: "minnow_get_media", Description: "Get media metadata by media ID when media is configured."}, s.getMedia)
-	registerCodeTools(server, s)
-	registerIndexingTools(server, s, cfg)
-	registerDestructiveTools(server, s, cfg)
-	registerAdminTools(server, s, cfg)
-}
-
-func registerCodeTools(server *mcp.Server, s *Service) {
-	if s.CodeIndexStatus != nil {
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_code_index_status", Description: "Read codebase indexing status for a Minnow knowledge base."}, s.codeIndexStatus)
-	}
-	if s.SearchCode != nil {
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_code_search", Description: "Search indexed code chunks with optional path and language filters."}, s.codeSearch)
-	}
-}
-
-func registerIndexingTools(server *mcp.Server, s *Service, cfg Config) {
-	if cfg.ReadOnly || !cfg.AllowIndexing {
-		return
-	}
-	mcp.AddTool(server, &mcp.Tool{Name: "minnow_ingest_documents_async", Description: "Submit text documents for asynchronous indexing. Returns an operation ID."}, s.ingestAsync)
-	if s.IndexCodebase != nil {
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_index_codebase", Description: "Index or refresh a local codebase incrementally for a Minnow knowledge base."}, s.indexCodebase)
-	}
-	if cfg.AllowSyncIndexing {
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_ingest_documents_sync", Description: "Submit text documents for indexing and wait for publish up to a bounded timeout."}, s.ingestSync)
-	}
-}
-
-func registerDestructiveTools(server *mcp.Server, s *Service, cfg Config) {
-	if cfg.ReadOnly || !cfg.AllowDestructive {
-		return
-	}
-	mcp.AddTool(server, &mcp.Tool{Name: "minnow_delete_media", Description: "Destructive tool: tombstone media by media ID."}, s.deleteMedia)
-	mcp.AddTool(server, &mcp.Tool{Name: "minnow_delete_knowledge_base", Description: "Destructive tool: delete a knowledge base manifest, shards, cache, and media metadata."}, s.deleteKnowledgeBase)
-}
-
-func registerAdminTools(server *mcp.Server, s *Service, cfg Config) {
-	if !cfg.AllowAdmin {
-		return
-	}
-	mcp.AddTool(server, &mcp.Tool{Name: "minnow_code_hooks_status", Description: "Admin tool: inspect Minnow git hook installation status for a repository."}, s.codeHooksStatus)
-	if !cfg.ReadOnly {
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_install_code_hooks", Description: "Admin tool: install optional Minnow git hooks for incremental codebase indexing."}, s.installCodeHooks)
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_uninstall_code_hooks", Description: "Admin tool: uninstall Minnow git hooks from a repository."}, s.uninstallCodeHooks)
-	}
-	mcp.AddTool(server, &mcp.Tool{Name: "minnow_sweep_cache", Description: "Admin tool: run policy-based cache eviction."}, s.sweepCache)
-	mcp.AddTool(server, &mcp.Tool{Name: "minnow_force_compaction", Description: "Admin tool: trigger compaction for a knowledge base when compaction debt exists."}, s.forceCompaction)
-	if !cfg.ReadOnly && cfg.AllowDestructive {
-		mcp.AddTool(server, &mcp.Tool{Name: "minnow_clear_cache", Description: "Admin destructive tool: clear all local cache entries."}, s.clearCache)
-	}
-}
-
 type queryInput struct {
-	KBID       string `json:"kb_id,omitempty" jsonschema:"Knowledge base ID. Defaults to default."`
-	Query      string `json:"query" jsonschema:"Natural language query."`
-	K          int    `json:"k" jsonschema:"Number of results to return."`
+	KBID       string `json:"kb_id,omitempty"       jsonschema:"Knowledge base ID. Defaults to default."`
+	Query      string `json:"query"                 jsonschema:"Natural language query."`
+	K          int    `json:"k"                     jsonschema:"Number of results to return."`
 	SearchMode string `json:"search_mode,omitempty" jsonschema:"vector, graph, or adaptive."`
 }
 
@@ -171,7 +60,11 @@ type resultOut struct {
 	MediaRefs  []kb.ChunkMediaRef `json:"media_refs,omitempty"`
 }
 
-func (s *Service) query(ctx context.Context, _ *mcp.CallToolRequest, in queryInput) (*mcp.CallToolResult, queryOutput, error) {
+func (s *Service) query(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in queryInput,
+) (*mcp.CallToolResult, queryOutput, error) {
 	kbID := defaultKBID(in.KBID)
 	if err := validateQueryInput(in); err != nil {
 		return nil, queryOutput{}, err
@@ -230,8 +123,8 @@ func resultOutput(result kb.ExpandedResult, mode kb.SearchMode) resultOut {
 }
 
 type ingestDocInput struct {
-	ID        string             `json:"id" jsonschema:"Document ID."`
-	Text      string             `json:"text" jsonschema:"Document text."`
+	ID        string             `json:"id"                   jsonschema:"Document ID."`
+	Text      string             `json:"text"                 jsonschema:"Document text."`
 	MediaIDs  []string           `json:"media_ids,omitempty"`
 	MediaRefs []kb.ChunkMediaRef `json:"media_refs,omitempty"`
 	Metadata  map[string]any     `json:"metadata,omitempty"`
@@ -264,7 +157,11 @@ type codeIndexInput struct {
 	IncludeUntracked bool   `json:"include_untracked,omitempty"`
 }
 
-func (s *Service) indexCodebase(ctx context.Context, _ *mcp.CallToolRequest, in codeIndexInput) (*mcp.CallToolResult, kb.CodeIndexResult, error) {
+func (s *Service) indexCodebase(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in codeIndexInput,
+) (*mcp.CallToolResult, kb.CodeIndexResult, error) {
 	if s.Config.ReadOnly || !s.Config.AllowIndexing {
 		return nil, kb.CodeIndexResult{}, fmt.Errorf("indexing tools are disabled")
 	}
@@ -300,7 +197,11 @@ type codeIndexStatusInput struct {
 	Root     string `json:"root,omitempty"`
 }
 
-func (s *Service) codeIndexStatus(ctx context.Context, _ *mcp.CallToolRequest, in codeIndexStatusInput) (*mcp.CallToolResult, kb.CodeIndexStatus, error) {
+func (s *Service) codeIndexStatus(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in codeIndexStatusInput,
+) (*mcp.CallToolResult, kb.CodeIndexStatus, error) {
 	if s.CodeIndexStatus == nil {
 		return nil, kb.CodeIndexStatus{}, fmt.Errorf("code indexing is unavailable")
 	}
@@ -329,7 +230,11 @@ type codeSearchOutput struct {
 	Results []kb.CodeSearchResult `json:"results"`
 }
 
-func (s *Service) codeSearch(ctx context.Context, _ *mcp.CallToolRequest, in codeSearchInput) (*mcp.CallToolResult, codeSearchOutput, error) {
+func (s *Service) codeSearch(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in codeSearchInput,
+) (*mcp.CallToolResult, codeSearchOutput, error) {
 	if s.SearchCode == nil {
 		return nil, codeSearchOutput{}, fmt.Errorf("code search is unavailable")
 	}
@@ -345,7 +250,12 @@ func (s *Service) codeSearch(ctx context.Context, _ *mcp.CallToolRequest, in cod
 	if k > queryToolMaxK {
 		return nil, codeSearchOutput{}, fmt.Errorf("k must be <= %d", queryToolMaxK)
 	}
-	results, err := s.SearchCode(ctx, kbID, in.Query, kb.CodeSearchOptions{TopK: k, Path: in.Path, Language: in.Language})
+	results, err := s.SearchCode(
+		ctx,
+		kbID,
+		in.Query,
+		kb.CodeSearchOptions{TopK: k, Path: in.Path, Language: in.Language},
+	)
 	return nil, codeSearchOutput{KBID: kbID, Results: results}, err
 }
 
@@ -357,7 +267,11 @@ type codeHooksInput struct {
 	Force    bool   `json:"force,omitempty"`
 }
 
-func (s *Service) installCodeHooks(ctx context.Context, _ *mcp.CallToolRequest, in codeHooksInput) (*mcp.CallToolResult, kb.CodeHookStatus, error) {
+func (s *Service) installCodeHooks(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in codeHooksInput,
+) (*mcp.CallToolResult, kb.CodeHookStatus, error) {
 	if !s.Config.AllowAdmin || s.Config.ReadOnly {
 		return nil, kb.CodeHookStatus{}, fmt.Errorf("admin tools are disabled")
 	}
@@ -368,11 +282,24 @@ func (s *Service) installCodeHooks(ctx context.Context, _ *mcp.CallToolRequest, 
 	if err != nil {
 		return nil, kb.CodeHookStatus{}, err
 	}
-	status, err := s.InstallCodeHooks(ctx, kb.CodeHookOptions{Root: in.Root, KBID: selection.KBID, IndexKey: selection.IndexKey, Binary: in.Binary, Force: in.Force})
+	status, err := s.InstallCodeHooks(
+		ctx,
+		kb.CodeHookOptions{
+			Root:     in.Root,
+			KBID:     selection.KBID,
+			IndexKey: selection.IndexKey,
+			Binary:   in.Binary,
+			Force:    in.Force,
+		},
+	)
 	return nil, status, err
 }
 
-func (s *Service) uninstallCodeHooks(ctx context.Context, _ *mcp.CallToolRequest, in codeHooksInput) (*mcp.CallToolResult, kb.CodeHookStatus, error) {
+func (s *Service) uninstallCodeHooks(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in codeHooksInput,
+) (*mcp.CallToolResult, kb.CodeHookStatus, error) {
 	if !s.Config.AllowAdmin || s.Config.ReadOnly {
 		return nil, kb.CodeHookStatus{}, fmt.Errorf("admin tools are disabled")
 	}
@@ -383,7 +310,11 @@ func (s *Service) uninstallCodeHooks(ctx context.Context, _ *mcp.CallToolRequest
 	return nil, status, err
 }
 
-func (s *Service) codeHooksStatus(ctx context.Context, _ *mcp.CallToolRequest, in codeHooksInput) (*mcp.CallToolResult, kb.CodeHookStatus, error) {
+func (s *Service) codeHooksStatus(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in codeHooksInput,
+) (*mcp.CallToolResult, kb.CodeHookStatus, error) {
 	if !s.Config.AllowAdmin {
 		return nil, kb.CodeHookStatus{}, fmt.Errorf("admin tools are disabled")
 	}
@@ -406,16 +337,44 @@ type ingestOutput struct {
 	Stages         []map[string]any `json:"stages,omitempty"`
 }
 
-func (s *Service) ingestAsync(ctx context.Context, _ *mcp.CallToolRequest, in ingestInput) (*mcp.CallToolResult, ingestOutput, error) {
-	out, err := s.submitIngest(ctx, ingestSubmission{kbID: in.KBID, documents: in.Documents, chunkSize: in.ChunkSize, graphEnabled: in.GraphEnabled, idempotencyKey: in.IdempotencyKey, correlationID: in.CorrelationID})
+func (s *Service) ingestAsync(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in ingestInput,
+) (*mcp.CallToolResult, ingestOutput, error) {
+	out, err := s.submitIngest(
+		ctx,
+		ingestSubmission{
+			kbID:           in.KBID,
+			documents:      in.Documents,
+			chunkSize:      in.ChunkSize,
+			graphEnabled:   in.GraphEnabled,
+			idempotencyKey: in.IdempotencyKey,
+			correlationID:  in.CorrelationID,
+		},
+	)
 	return nil, out, err
 }
 
-func (s *Service) ingestSync(ctx context.Context, _ *mcp.CallToolRequest, in ingestSyncInput) (*mcp.CallToolResult, ingestOutput, error) {
+func (s *Service) ingestSync(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in ingestSyncInput,
+) (*mcp.CallToolResult, ingestOutput, error) {
 	if !s.Config.AllowSyncIndexing {
 		return nil, ingestOutput{}, fmt.Errorf("sync indexing tools are disabled")
 	}
-	out, err := s.submitIngest(ctx, ingestSubmission{kbID: in.KBID, documents: in.Documents, chunkSize: in.ChunkSize, graphEnabled: in.GraphEnabled, idempotencyKey: in.IdempotencyKey, correlationID: in.CorrelationID})
+	out, err := s.submitIngest(
+		ctx,
+		ingestSubmission{
+			kbID:           in.KBID,
+			documents:      in.Documents,
+			chunkSize:      in.ChunkSize,
+			graphEnabled:   in.GraphEnabled,
+			idempotencyKey: in.IdempotencyKey,
+			correlationID:  in.CorrelationID,
+		},
+	)
 	if err != nil {
 		return nil, ingestOutput{}, err
 	}
@@ -502,7 +461,14 @@ func (s *Service) submitIngest(ctx context.Context, submission ingestSubmission)
 	if err != nil {
 		return ingestOutput{}, err
 	}
-	return ingestOutput{EventID: evtID, Status: "accepted", KBID: kbID, DocumentCount: len(docs), DocIDs: docIDs, IdempotencyKey: effectiveIdem}, nil
+	return ingestOutput{
+		EventID:        evtID,
+		Status:         "accepted",
+		KBID:           kbID,
+		DocumentCount:  len(docs),
+		DocIDs:         docIDs,
+		IdempotencyKey: effectiveIdem,
+	}, nil
 }
 
 type operationStatusInput struct {
@@ -515,7 +481,11 @@ type operationStatusOutput struct {
 	Stages   []map[string]any `json:"stages,omitempty"`
 }
 
-func (s *Service) operationStatus(ctx context.Context, _ *mcp.CallToolRequest, in operationStatusInput) (*mcp.CallToolResult, operationStatusOutput, error) {
+func (s *Service) operationStatus(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in operationStatusInput,
+) (*mcp.CallToolResult, operationStatusOutput, error) {
 	out, err := s.operationStatusOutput(ctx, strings.TrimSpace(in.EventID))
 	return nil, out, err
 }
@@ -546,7 +516,13 @@ func ingestDocumentFromInput(input ingestDocInput) (kb.Document, error) {
 	if text == "" {
 		return kb.Document{}, fmt.Errorf("document text is required")
 	}
-	return kb.Document{ID: id, Text: text, MediaIDs: input.MediaIDs, MediaRefs: input.MediaRefs, Metadata: input.Metadata}, nil
+	return kb.Document{
+		ID:        id,
+		Text:      text,
+		MediaIDs:  input.MediaIDs,
+		MediaRefs: input.MediaRefs,
+		Metadata:  input.Metadata,
+	}, nil
 }
 
 func (s *Service) operationStatusOutput(ctx context.Context, eventID string) (operationStatusOutput, error) {
@@ -617,7 +593,11 @@ type listMediaOutput struct {
 	Limit int              `json:"limit"`
 }
 
-func (s *Service) listMedia(ctx context.Context, _ *mcp.CallToolRequest, in listMediaInput) (*mcp.CallToolResult, listMediaOutput, error) {
+func (s *Service) listMedia(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in listMediaInput,
+) (*mcp.CallToolResult, listMediaOutput, error) {
 	if s.ListMedia == nil {
 		return nil, listMediaOutput{}, fmt.Errorf("media subsystem not configured")
 	}
@@ -637,7 +617,11 @@ type mediaOutput struct {
 	Deleted bool            `json:"deleted,omitempty"`
 }
 
-func (s *Service) getMedia(ctx context.Context, _ *mcp.CallToolRequest, in mediaIDInput) (*mcp.CallToolResult, mediaOutput, error) {
+func (s *Service) getMedia(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in mediaIDInput,
+) (*mcp.CallToolResult, mediaOutput, error) {
 	if s.GetMedia == nil {
 		return nil, mediaOutput{}, fmt.Errorf("media subsystem not configured")
 	}
@@ -645,7 +629,11 @@ func (s *Service) getMedia(ctx context.Context, _ *mcp.CallToolRequest, in media
 	return nil, mediaOutput{Media: media}, err
 }
 
-func (s *Service) deleteMedia(ctx context.Context, _ *mcp.CallToolRequest, in mediaIDInput) (*mcp.CallToolResult, mediaOutput, error) {
+func (s *Service) deleteMedia(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in mediaIDInput,
+) (*mcp.CallToolResult, mediaOutput, error) {
 	if !s.Config.AllowDestructive || s.Config.ReadOnly {
 		return nil, mediaOutput{}, fmt.Errorf("destructive tools are disabled")
 	}
@@ -663,7 +651,11 @@ type statusOutput struct {
 	Status string `json:"status"`
 }
 
-func (s *Service) sweepCache(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, statusOutput, error) {
+func (s *Service) sweepCache(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	_ emptyInput,
+) (*mcp.CallToolResult, statusOutput, error) {
 	if !s.Config.AllowAdmin {
 		return nil, statusOutput{}, fmt.Errorf("admin tools are disabled")
 	}
@@ -673,7 +665,11 @@ func (s *Service) sweepCache(ctx context.Context, _ *mcp.CallToolRequest, _ empt
 	return nil, statusOutput{Status: "ok"}, s.SweepCache(ctx)
 }
 
-func (s *Service) clearCache(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, statusOutput, error) {
+func (s *Service) clearCache(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	_ emptyInput,
+) (*mcp.CallToolResult, statusOutput, error) {
 	if !s.Config.AllowAdmin || !s.Config.AllowDestructive || s.Config.ReadOnly {
 		return nil, statusOutput{}, fmt.Errorf("admin destructive tools are disabled")
 	}
@@ -690,7 +686,11 @@ type compactionOutput struct {
 	Result *kb.CompactionPublishResult `json:"result,omitempty"`
 }
 
-func (s *Service) forceCompaction(ctx context.Context, _ *mcp.CallToolRequest, in kbIDInput) (*mcp.CallToolResult, compactionOutput, error) {
+func (s *Service) forceCompaction(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in kbIDInput,
+) (*mcp.CallToolResult, compactionOutput, error) {
 	if !s.Config.AllowAdmin {
 		return nil, compactionOutput{}, fmt.Errorf("admin tools are disabled")
 	}
@@ -710,7 +710,11 @@ type deleteKBOutput struct {
 	KBID    string `json:"kb_id"`
 }
 
-func (s *Service) deleteKnowledgeBase(ctx context.Context, _ *mcp.CallToolRequest, in kbIDInput) (*mcp.CallToolResult, deleteKBOutput, error) {
+func (s *Service) deleteKnowledgeBase(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	in kbIDInput,
+) (*mcp.CallToolResult, deleteKBOutput, error) {
 	if !s.Config.AllowDestructive || s.Config.ReadOnly {
 		return nil, deleteKBOutput{}, fmt.Errorf("destructive tools are disabled")
 	}
@@ -765,7 +769,17 @@ func eventPayload(ev *kb.KBEvent) map[string]any {
 	if ev == nil {
 		return nil
 	}
-	out := map[string]any{"event_id": ev.EventID, "kb_id": ev.KBID, "kind": ev.Kind, "status": ev.Status, "attempt": ev.Attempt, "correlation_id": ev.CorrelationID, "causation_id": ev.CausationID, "created_at": ev.CreatedAt, "last_error": ev.LastError}
+	out := map[string]any{
+		"event_id":       ev.EventID,
+		"kb_id":          ev.KBID,
+		"kind":           ev.Kind,
+		"status":         ev.Status,
+		"attempt":        ev.Attempt,
+		"correlation_id": ev.CorrelationID,
+		"causation_id":   ev.CausationID,
+		"created_at":     ev.CreatedAt,
+		"last_error":     ev.LastError,
+	}
 	switch ev.Kind {
 	case kb.EventKBPublished:
 		var payload kb.KBPublishedPayload

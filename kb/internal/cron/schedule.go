@@ -86,7 +86,9 @@ func NewSchedule(cronExpr string) (*Schedule, error) {
 
 	segments := strings.Fields(cronExpr)
 	if len(segments) != 5 {
-		return nil, errors.New("invalid cron expression - must be a valid macro or to have exactly 5 space separated segments")
+		return nil, errors.New(
+			"invalid cron expression - must be a valid macro or to have exactly 5 space separated segments",
+		)
 	}
 
 	minutes, err := parseCronSegment(segments[0], 0, 59)

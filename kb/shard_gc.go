@@ -139,7 +139,10 @@ func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSwe
 		return ShardGCSweepResult{}, nil
 	}
 
-	state := shardGCSweepState{activeKeysByKB: make(map[string]map[string]struct{}), next: make([]delayedShardGCEntry, 0, len(queue))}
+	state := shardGCSweepState{
+		activeKeysByKB: make(map[string]map[string]struct{}),
+		next:           make([]delayedShardGCEntry, 0, len(queue)),
+	}
 	for _, entry := range queue {
 		if err := ctx.Err(); err != nil {
 			return state.result, err
@@ -157,7 +160,8 @@ func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSwe
 	l.mu.Unlock()
 
 	if result.Deleted > 0 || result.Retried > 0 || result.Pending > 0 {
-		slog.Default().InfoContext(ctx, "completed deferred shard GC sweep", "reason", "gc_sweep", "deleted", result.Deleted, "retried", result.Retried, "pending", result.Pending)
+		slog.Default().
+			InfoContext(ctx, "completed deferred shard GC sweep", logKeyReason, "gc_sweep", "deleted", result.Deleted, "retried", result.Retried, "pending", result.Pending)
 	}
 
 	return result, firstErr
@@ -170,9 +174,15 @@ type shardGCSweepState struct {
 	firstErr       error
 }
 
-func (l *KB) sweepShardGCEntry(ctx context.Context, now time.Time, entry delayedShardGCEntry, state *shardGCSweepState) {
+func (l *KB) sweepShardGCEntry(
+	ctx context.Context,
+	now time.Time,
+	entry delayedShardGCEntry,
+	state *shardGCSweepState,
+) {
 	if now.Before(entry.NotBefore) {
-		slog.Default().InfoContext(ctx, "deferred shard GC pending grace window", "kb_id", entry.KBID, "reason", "grace_window", "shard_key", entry.Shard.Key, "not_before", entry.NotBefore)
+		slog.Default().
+			InfoContext(ctx, "deferred shard GC pending grace window", logKeyKBID, entry.KBID, logKeyReason, "grace_window", "shard_key", entry.Shard.Key, "not_before", entry.NotBefore)
 		state.next = append(state.next, entry)
 		return
 	}
@@ -182,17 +192,20 @@ func (l *KB) sweepShardGCEntry(ctx context.Context, now time.Time, entry delayed
 		return
 	}
 	if _, stillReferenced := activeKeys[entry.Shard.Key]; stillReferenced {
-		slog.Default().InfoContext(ctx, "deferred shard GC skipped referenced shard", "kb_id", entry.KBID, "reason", "still_referenced", "shard_key", entry.Shard.Key)
+		slog.Default().
+			InfoContext(ctx, "deferred shard GC skipped referenced shard", logKeyKBID, entry.KBID, logKeyReason, "still_referenced", "shard_key", entry.Shard.Key)
 		state.retry(entry, now, nil)
 		return
 	}
 	if err := l.deleteShardObject(ctx, entry.Shard.Key); err != nil {
-		slog.Default().WarnContext(ctx, "deferred shard GC delete failed", "kb_id", entry.KBID, "reason", "delete_failed", "shard_key", entry.Shard.Key, "error", err)
+		slog.Default().
+			WarnContext(ctx, "deferred shard GC delete failed", logKeyKBID, entry.KBID, logKeyReason, "delete_failed", "shard_key", entry.Shard.Key, logKeyError, err)
 		state.retry(entry, now, fmt.Errorf("delete replaced shard %s: %w", entry.Shard.Key, err))
 		return
 	}
 	state.result.Deleted++
-	slog.Default().InfoContext(ctx, "deferred shard GC deleted shard", "kb_id", entry.KBID, "reason", "deleted", "shard_key", entry.Shard.Key)
+	slog.Default().
+		InfoContext(ctx, "deferred shard GC deleted shard", logKeyKBID, entry.KBID, logKeyReason, "deleted", "shard_key", entry.Shard.Key)
 }
 
 func (s *shardGCSweepState) retry(entry delayedShardGCEntry, now time.Time, err error) {
@@ -204,7 +217,11 @@ func (s *shardGCSweepState) retry(entry delayedShardGCEntry, now time.Time, err 
 	s.result.Retried++
 }
 
-func (l *KB) activeShardKeysForGC(ctx context.Context, entry delayedShardGCEntry, cache map[string]map[string]struct{}) (map[string]struct{}, error) {
+func (l *KB) activeShardKeysForGC(
+	ctx context.Context,
+	entry delayedShardGCEntry,
+	cache map[string]map[string]struct{},
+) (map[string]struct{}, error) {
 	if activeKeys, ok := cache[entry.KBID]; ok {
 		return activeKeys, nil
 	}
@@ -214,7 +231,8 @@ func (l *KB) activeShardKeysForGC(ctx context.Context, entry delayedShardGCEntry
 		return cache[entry.KBID], nil
 	}
 	if err != nil {
-		slog.Default().WarnContext(ctx, "deferred shard GC manifest download failed", "kb_id", entry.KBID, "reason", "manifest_download_failed", "shard_key", entry.Shard.Key, "error", err)
+		slog.Default().
+			WarnContext(ctx, "deferred shard GC manifest download failed", logKeyKBID, entry.KBID, logKeyReason, "manifest_download_failed", "shard_key", entry.Shard.Key, logKeyError, err)
 		return nil, fmt.Errorf("download manifest for shard gc: %w", err)
 	}
 	activeKeys := activeShardKeys(doc.Manifest.Shards)

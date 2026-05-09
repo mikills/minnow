@@ -12,11 +12,13 @@ import (
 	"time"
 
 	kb "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/duckdb/internal/centroid"
+	"github.com/mikills/minnow/kb/duckdb/internal/reconstruct"
 )
 
 func (f *DuckDBArtifactFormat) CompactIfNeeded(ctx context.Context, kbID string) (*kb.CompactionPublishResult, error) {
 	if strings.TrimSpace(kbID) == "" {
-		return nil, fmt.Errorf("kbID cannot be empty")
+		return nil, fmt.Errorf(errEmptyKBID)
 	}
 
 	lock := f.lockFor(kbID)
@@ -79,7 +81,7 @@ func (f *DuckDBArtifactFormat) acquireCompactionLease(ctx context.Context, kbID 
 	}
 	release := func() {
 		if err := leaseManager.Release(context.WithoutCancel(ctx), lease); err != nil {
-			slog.Default().Warn("compaction lease release failed", "kb_id", kbID, "error", err)
+			slog.Default().Warn("compaction lease release failed", logKeyKBID, kbID, logKeyError, err)
 		}
 	}
 	return release, nil
@@ -92,14 +94,22 @@ func manifestGetError(err error) error {
 	return err
 }
 
-func (f *DuckDBArtifactFormat) afterCompactionPublish(kbID string, candidates []kb.SnapshotShardMetadata, nextManifest kb.SnapshotShardManifest) {
+func (f *DuckDBArtifactFormat) afterCompactionPublish(
+	kbID string,
+	candidates []kb.SnapshotShardMetadata,
+	nextManifest kb.SnapshotShardManifest,
+) {
 	if f.deps.EnqueueReplacedShardsForGC != nil {
 		f.deps.EnqueueReplacedShardsForGC(kbID, candidates, time.Now().UTC())
 	}
 	f.deps.Metrics.RecordShardCount(kbID, len(nextManifest.Shards))
 }
 
-func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(ctx context.Context, kbID string, shards []kb.SnapshotShardMetadata) (kb.SnapshotShardMetadata, error) {
+func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(
+	ctx context.Context,
+	kbID string,
+	shards []kb.SnapshotShardMetadata,
+) (kb.SnapshotShardMetadata, error) {
 	tmpDir, err := os.MkdirTemp("", "minnow-compact-*")
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, err
@@ -123,7 +133,7 @@ func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(ctx context.C
 	if err := createDocsVectorIndex(ctx, db); err != nil {
 		return kb.SnapshotShardMetadata{}, err
 	}
-	centroid, err := computeShardCentroid(ctx, db)
+	centroid, err := centroid.Compute(ctx, db)
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, err
 	}
@@ -161,13 +171,18 @@ func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(ctx context.C
 	}, nil
 }
 
-func (f *DuckDBArtifactFormat) mergeCompactionShards(ctx context.Context, db *sql.DB, tmpDir string, shards []kb.SnapshotShardMetadata) error {
+func (f *DuckDBArtifactFormat) mergeCompactionShards(
+	ctx context.Context,
+	db *sql.DB,
+	tmpDir string,
+	shards []kb.SnapshotShardMetadata,
+) error {
 	for i, shard := range shards {
 		partPath := filepath.Join(tmpDir, fmt.Sprintf("in-%05d.duckdb", i))
 		if err := f.deps.BlobStore.Download(ctx, shard.Key, partPath); err != nil {
 			return err
 		}
-		if err := mergeShardIntoDB(ctx, db, fmt.Sprintf("s%d", i), partPath, i == 0); err != nil {
+		if err := reconstruct.MergeShardIntoDB(ctx, db, reconstruct.MergeOptions{Alias: fmt.Sprintf("s%d", i), PartPath: partPath, IsFirst: i == 0, EnsureGraphTables: EnsureGraphTables}); err != nil {
 			return err
 		}
 	}
@@ -200,6 +215,10 @@ func compactedShardFileInfo(ctx context.Context, path string) (string, os.FileIn
 }
 
 // BuildAndUploadCompactionReplacement merges the given shards into one replacement shard and uploads it.
-func (f *DuckDBArtifactFormat) BuildAndUploadCompactionReplacement(ctx context.Context, kbID string, shards []kb.SnapshotShardMetadata) (kb.SnapshotShardMetadata, error) {
+func (f *DuckDBArtifactFormat) BuildAndUploadCompactionReplacement(
+	ctx context.Context,
+	kbID string,
+	shards []kb.SnapshotShardMetadata,
+) (kb.SnapshotShardMetadata, error) {
 	return f.buildAndUploadCompactionReplacement(ctx, kbID, shards)
 }

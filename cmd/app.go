@@ -207,14 +207,18 @@ func (a *App) registerRoutes() {
 	RegisterUI(a.echo)
 }
 
-func appMediaUploadFn(loader *kb.KB) func(context.Context, kb.MediaUploadInput, int64, string, string) (string, string, error) {
+func appMediaUploadFn(
+	loader *kb.KB,
+) func(context.Context, kb.MediaUploadInput, int64, string, string) (string, string, error) {
 	if loader == nil || loader.MediaStore == nil || loader.EventStore == nil {
 		return nil
 	}
 	return loader.AppendMediaUploadDetailed
 }
 
-func appFileIngestFn(loader *kb.KB) func(context.Context, kb.FileIngestInput, int64, string, string) (string, string, error) {
+func appFileIngestFn(
+	loader *kb.KB,
+) func(context.Context, kb.FileIngestInput, int64, string, string) (string, string, error) {
 	if loader == nil || loader.EventStore == nil {
 		return nil
 	}
@@ -289,7 +293,9 @@ func kbEmbedFn(loader *kb.KB) func(context.Context, string) ([]float32, error) {
 	}
 }
 
-func kbSearchFn(loader *kb.KB) func(context.Context, string, []float32, *kb.SearchOptions) ([]kb.ExpandedResult, error) {
+func kbSearchFn(
+	loader *kb.KB,
+) func(context.Context, string, []float32, *kb.SearchOptions) ([]kb.ExpandedResult, error) {
 	return func(ctx context.Context, kbID string, queryVec []float32, opts *kb.SearchOptions) ([]kb.ExpandedResult, error) {
 		if loader == nil {
 			return nil, fmt.Errorf("kb unavailable")
@@ -447,7 +453,7 @@ func (a *App) startCacheEvictionLoopLocked() {
 			case <-ticker.C:
 				sweepCtx, sweepCancel := context.WithTimeout(ctx, cacheSweepTimeout)
 				if err := a.kb.SweepCache(sweepCtx); err != nil {
-					a.config.Logger.Warn("cache eviction sweep failed", "error", err)
+					a.config.Logger.Warn("cache eviction sweep failed", errorResponseKey, err)
 				}
 				sweepCancel()
 			}

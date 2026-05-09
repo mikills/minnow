@@ -1,4 +1,4 @@
-package kb
+package kb_test
 
 import (
 	"context"
@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/mikills/minnow/kb"
 
 	"github.com/stretchr/testify/require"
 )
@@ -29,7 +32,7 @@ func TestOpenAICompatibleEmbedder(t *testing.T) {
 		}))
 		defer server.Close()
 
-		embedder, err := NewOpenAICompatibleEmbedder(OpenAICompatibleEmbedderConfig{
+		embedder, err := kb.NewOpenAICompatibleEmbedder(kb.OpenAICompatibleEmbedderConfig{
 			BaseURL:    server.URL + "/v1/",
 			Model:      "text-embedding-3-small",
 			Token:      "secret-token",
@@ -57,7 +60,9 @@ func TestOpenAICompatibleEmbedder(t *testing.T) {
 		}))
 		defer server.Close()
 
-		embedder, err := NewOpenAICompatibleEmbedder(OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "model"})
+		embedder, err := kb.NewOpenAICompatibleEmbedder(
+			kb.OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "model"},
+		)
 		require.NoError(t, err)
 		vectors, err := embedder.EmbedBatch(context.Background(), []string{"one", "two"})
 		require.NoError(t, err)
@@ -71,7 +76,9 @@ func TestOpenAICompatibleEmbedder(t *testing.T) {
 		}))
 		defer server.Close()
 
-		embedder, err := NewOpenAICompatibleEmbedder(OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "model"})
+		embedder, err := kb.NewOpenAICompatibleEmbedder(
+			kb.OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "model"},
+		)
 		require.NoError(t, err)
 		vectors, err := embedder.EmbedBatch(context.Background(), []string{"one", "two"})
 		require.NoError(t, err)
@@ -88,7 +95,9 @@ func TestOpenAICompatibleEmbedder(t *testing.T) {
 		}))
 		defer server.Close()
 
-		embedder, err := NewOpenAICompatibleEmbedder(OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "nomic-embed-text"})
+		embedder, err := kb.NewOpenAICompatibleEmbedder(
+			kb.OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "nomic-embed-text"},
+		)
 		require.NoError(t, err)
 		_, err = embedder.Embed(context.Background(), "hello")
 		require.NoError(t, err)
@@ -102,7 +111,9 @@ func TestOpenAICompatibleEmbedder(t *testing.T) {
 		}))
 		defer server.Close()
 
-		embedder, err := NewOpenAICompatibleEmbedder(OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "model"})
+		embedder, err := kb.NewOpenAICompatibleEmbedder(
+			kb.OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "model"},
+		)
 		require.NoError(t, err)
 		_, err = embedder.Embed(context.Background(), "hello")
 		require.Error(t, err)
@@ -115,7 +126,9 @@ func TestOpenAICompatibleEmbedder(t *testing.T) {
 		}))
 		defer server.Close()
 
-		embedder, err := NewOpenAICompatibleEmbedder(OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "model"})
+		embedder, err := kb.NewOpenAICompatibleEmbedder(
+			kb.OpenAICompatibleEmbedderConfig{BaseURL: server.URL, Model: "model"},
+		)
 		require.NoError(t, err)
 		_, err = embedder.Embed(context.Background(), "hello")
 		require.Error(t, err)
@@ -124,22 +137,30 @@ func TestOpenAICompatibleEmbedder(t *testing.T) {
 	})
 
 	t.Run("validates_constructor_inputs", func(t *testing.T) {
-		_, err := NewOpenAICompatibleEmbedder(OpenAICompatibleEmbedderConfig{BaseURL: "ftp://example.com", Model: "model"})
+		_, err := kb.NewOpenAICompatibleEmbedder(
+			kb.OpenAICompatibleEmbedderConfig{BaseURL: "ftp://example.com", Model: "model"},
+		)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "scheme")
 
-		_, err = NewOpenAICompatibleEmbedder(OpenAICompatibleEmbedderConfig{BaseURL: "http://example.com", Model: ""})
+		_, err = kb.NewOpenAICompatibleEmbedder(
+			kb.OpenAICompatibleEmbedderConfig{BaseURL: "http://example.com", Model: ""},
+		)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "model")
 
-		_, err = NewOpenAICompatibleEmbedder(OpenAICompatibleEmbedderConfig{BaseURL: "http://example.com", Model: "model", Dimensions: -1})
-		require.ErrorIs(t, err, ErrInvalidEmbeddingDimension)
+		_, err = kb.NewOpenAICompatibleEmbedder(
+			kb.OpenAICompatibleEmbedderConfig{BaseURL: "http://example.com", Model: "model", Dimensions: -1},
+		)
+		require.ErrorIs(t, err, kb.ErrInvalidEmbeddingDimension)
 	})
 
 	t.Run("constructor sets default timeout", func(t *testing.T) {
-		emb, err := NewOpenAICompatibleEmbedder(OpenAICompatibleEmbedderConfig{BaseURL: "http://example.com", Model: "model"})
+		emb, err := kb.NewOpenAICompatibleEmbedder(
+			kb.OpenAICompatibleEmbedderConfig{BaseURL: "http://example.com", Model: "model"},
+		)
 		require.NoError(t, err)
 		require.NotNil(t, emb.HTTPClient)
-		require.Equal(t, defaultOpenAICompatibleTimeout, emb.HTTPClient.Timeout)
+		require.Equal(t, 30*time.Second, emb.HTTPClient.Timeout)
 	})
 }

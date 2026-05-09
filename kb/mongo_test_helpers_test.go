@@ -1,4 +1,4 @@
-package kb
+package kb_test
 
 import (
 	"context"

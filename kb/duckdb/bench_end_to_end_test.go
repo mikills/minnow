@@ -1,10 +1,11 @@
-package duckdb
+package duckdb_test
 
 import (
 	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	kb "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/duckdb"
 )
 
 // BenchmarkVectorQuery measures full QueryRag latency at several corpus sizes.
@@ -89,7 +91,7 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 		kb.WithManifestStore(manifestStore),
 	)
 
-	af, err := NewArtifactFormat(DuckDBArtifactDeps{
+	af, err := duckdb.NewArtifactFormat(duckdb.DuckDBArtifactDeps{
 		BlobStore:      loader.BlobStore,
 		ManifestStore:  loader.ManifestStore,
 		CacheDir:       cacheDir,
@@ -252,7 +254,7 @@ func looksEmbeddable(text string) bool {
 // If Ollama is selected but unreachable, the bench skips cleanly.
 func pickEmbedder(b *testing.B, vectorDim int, realCorpus bool) (kb.Embedder, string) {
 	if !realCorpus {
-		return newFixtureEmbedder(vectorDim), fmt.Sprintf("fixture-fnv-%d", vectorDim)
+		return mustBenchLocalEmbedder(b, vectorDim), fmt.Sprintf("local-subword-%d", vectorDim)
 	}
 	if vectorDim == 768 {
 		const model = "nomic-embed-text"
@@ -337,4 +339,27 @@ func findRepoRoot() (string, error) {
 		}
 		dir = parent
 	}
+}
+
+func normalizeVec(vec []float32) []float32 {
+	var sumSq float32
+	for _, v := range vec {
+		sumSq += v * v
+	}
+	norm := float32(math.Sqrt(float64(sumSq)))
+	if norm == 0 {
+		return vec
+	}
+	normalized := make([]float32, len(vec))
+	for i, v := range vec {
+		normalized[i] = v / norm
+	}
+	return normalized
+}
+
+func mustBenchLocalEmbedder(b *testing.B, dim int) kb.Embedder {
+	b.Helper()
+	embedder, err := kb.NewLocalEmbedder(dim)
+	require.NoError(b, err)
+	return embedder
 }

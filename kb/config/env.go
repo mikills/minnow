@@ -48,7 +48,10 @@ func (r EnvResolver) ResolveBytes(data []byte) ([]byte, error) {
 			names = append(names, n)
 		}
 		sort.Strings(names)
-		return nil, fmt.Errorf("unresolved env vars: %s (note: ${VAR} in YAML comments also triggers this error)", strings.Join(names, ", "))
+		return nil, fmt.Errorf(
+			"unresolved env vars: %s (note: ${VAR} in YAML comments also triggers this error)",
+			strings.Join(names, ", "),
+		)
 	}
 	return out, nil
 }

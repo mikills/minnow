@@ -6,330 +6,223 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
-	"time"
+	"os"
+
+	"github.com/mikills/minnow/kb/workerpool"
 )
 
-// WorkerResult captures the post-handle commit work for a worker attempt.
-type WorkerResult struct {
-	FollowUps []KBEvent
-	Commit    func(context.Context) error
-}
+type WorkerResult = workerpool.WorkerResult
+type Worker = workerpool.Worker
+type WorkerPoolConfig = workerpool.WorkerPoolConfig
+type WorkerMetrics = workerpool.WorkerMetrics
+type NoopWorkerMetrics = workerpool.NoopWorkerMetrics
+type WorkerPool = workerpool.WorkerPool
 
-// Worker handles events of a single Kind. Handle runs the side-effects and
-// returns the follow-up events plus any worker-specific commit-side mutation
-// that must land atomically with Ack.
-type Worker interface {
-	Kind() EventKind
-	WorkerID() string
-	Handle(ctx context.Context, event *KBEvent) (WorkerResult, error)
-}
-
-// WorkerPoolConfig configures a worker pool.
-type WorkerPoolConfig struct {
-	Concurrency       int
-	PollInterval      time.Duration
-	VisibilityTimeout time.Duration
-	MaxAttempts       int
-	// Clock drives timestamps on synthetic worker.failed events and is also
-	// used for elapsed-time measurements where deterministic sim matters.
-	// Defaults to RealClock when nil.
-	Clock Clock
-}
-
-func (c WorkerPoolConfig) withDefaults() WorkerPoolConfig {
-	out := c
-	if out.Clock == nil {
-		out.Clock = RealClock
-	}
-	if out.Concurrency <= 0 {
-		out.Concurrency = 4
-	}
-	if out.PollInterval <= 0 {
-		out.PollInterval = 250 * time.Millisecond
-	}
-	if out.VisibilityTimeout <= 0 {
-		out.VisibilityTimeout = 30 * time.Second
-	}
-	if out.MaxAttempts <= 0 {
-		out.MaxAttempts = 5
-	}
-	return out
-}
-
-// WorkerMetrics observes per-event outcomes.
-type WorkerMetrics interface {
-	OnWorkerTick(kind EventKind, workerID string, outcome string, duration time.Duration, err error)
-}
-
-// NoopWorkerMetrics discards observations.
-type NoopWorkerMetrics struct{}
-
-// OnWorkerTick implements WorkerMetrics.
-func (NoopWorkerMetrics) OnWorkerTick(_ EventKind, _ string, _ string, _ time.Duration, _ error) {}
-
-// Sentinel errors for WorkerPool construction and lifecycle.
 var (
-	ErrStoreNotTransactional = errors.New("worker pool: event store must implement TransactionRunner")
-	ErrAlreadyStarted        = errors.New("worker pool: already started")
+	ErrStoreNotTransactional = workerpool.ErrStoreNotTransactional
+	ErrAlreadyStarted        = workerpool.ErrAlreadyStarted
 )
 
-// WorkerPool runs goroutines that claim and dispatch events for a single
-// Worker.
-type WorkerPool struct {
-	worker  Worker
-	store   EventStore
-	runner  TransactionRunner
-	inbox   EventInbox
-	cfg     WorkerPoolConfig
-	metrics WorkerMetrics
-
-	wg     sync.WaitGroup
-	cancel context.CancelFunc
-
-	startedMu sync.Mutex
-	started   bool
-}
-
-// NewWorkerPool constructs a pool around the given worker. The EventStore
-// must also implement TransactionRunner, otherwise the pool cannot uphold
-// the outbox's atomicity contract and construction returns
-// ErrStoreNotTransactional.
 func NewWorkerPool(worker Worker, store EventStore, inbox EventInbox, cfg WorkerPoolConfig) (*WorkerPool, error) {
-	runner, ok := store.(TransactionRunner)
-	if !ok {
-		return nil, ErrStoreNotTransactional
+	if cfg.BuildFailureEvent == nil {
+		cfg.BuildFailureEvent = buildWorkerFailedEvent
 	}
-	return &WorkerPool{
-		worker:  worker,
-		store:   store,
-		runner:  runner,
-		inbox:   inbox,
-		cfg:     cfg.withDefaults(),
-		metrics: NoopWorkerMetrics{},
-	}, nil
+	return workerpool.NewWorkerPool(worker, store, inbox, cfg)
 }
 
-// SetMetrics attaches a metrics observer. Safe to call before Start.
-func (p *WorkerPool) SetMetrics(m WorkerMetrics) {
-	if m == nil {
-		m = NoopWorkerMetrics{}
-	}
-	p.metrics = m
-}
-
-// Start begins polling. Returns ErrAlreadyStarted if the pool was already
-// started and not yet stopped.
-func (p *WorkerPool) Start(parentCtx context.Context) error {
-	p.startedMu.Lock()
-	defer p.startedMu.Unlock()
-	if p.started {
-		return ErrAlreadyStarted
-	}
-	p.started = true
-
-	ctx, cancel := context.WithCancel(parentCtx)
-	p.cancel = cancel
-
-	for i := 0; i < p.cfg.Concurrency; i++ {
-		p.startWorker(ctx)
-	}
-	return nil
-}
-
-func (p *WorkerPool) startWorker(ctx context.Context) {
-	p.wg.Add(1)
-	go p.loop(ctx)
-}
-
-// Stop signals workers to exit and waits for them. After Stop returns, the
-// pool may be started again with Start.
-func (p *WorkerPool) Stop() {
-	p.startedMu.Lock()
-	if !p.started || p.cancel == nil {
-		p.startedMu.Unlock()
-		return
-	}
-	cancel := p.cancel
-	p.cancel = nil
-	p.startedMu.Unlock()
-
-	cancel()
-	p.wg.Wait()
-
-	p.startedMu.Lock()
-	p.started = false
-	p.startedMu.Unlock()
-}
-
-func (p *WorkerPool) loop(ctx context.Context) {
-	defer p.wg.Done()
-	ticker := time.NewTicker(p.cfg.PollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			p.tick(ctx)
-		}
-	}
-}
-
-func (p *WorkerPool) tick(ctx context.Context) {
-	for {
-		event, err := p.store.Claim(ctx, p.worker.Kind(), p.worker.WorkerID(), p.cfg.VisibilityTimeout)
-		if err != nil {
-			if errors.Is(err, ErrEventNoneAvailable) {
-				return
-			}
-			slog.Default().Warn("worker claim failed", "kind", string(p.worker.Kind()), "error", err)
-			return
-		}
-		p.dispatch(ctx, event)
-	}
-}
-
-// HandleOnce claims at most one event and dispatches it. Returns the
-// dispatched event id and the handler error (if any).
-func (p *WorkerPool) HandleOnce(ctx context.Context) (string, error) {
-	event, err := p.store.Claim(ctx, p.worker.Kind(), p.worker.WorkerID(), p.cfg.VisibilityTimeout)
-	if err != nil {
-		return "", err
-	}
-	return event.EventID, p.dispatch(ctx, event)
-}
-
-func (p *WorkerPool) dispatch(ctx context.Context, event *KBEvent) error {
-	start := time.Now()
-
-	// Run side-effects. They must remain idempotent across crashes because
-	// until MarkProcessed lands inside the commit transaction, a concurrent
-	// worker (or the reaper+next claim) may rerun Handle on the same event.
-	result, handlerErr := safeHandle(ctx, p.worker, event)
-	if handlerErr != nil {
-		p.recordFailure(ctx, event, handlerErr, time.Since(start))
-		return handlerErr
-	}
-
-	commitErr := p.runner.InTransaction(ctx, func(ctx context.Context) error {
-		return p.commitWorkerResult(ctx, event, result)
-	})
-	dur := time.Since(start)
-	return p.finishDispatch(ctx, event, commitErr, dur)
-}
-
-func (p *WorkerPool) commitWorkerResult(ctx context.Context, event *KBEvent, result WorkerResult) error {
-	// Order matters: follow-ups → commit mutation → Ack source → MarkProcessed.
-	for _, up := range result.FollowUps {
-		if err := p.store.Append(ctx, up); err != nil && !errors.Is(err, ErrEventDuplicateKey) {
-			return fmt.Errorf("append follow-up %s: %w", up.Kind, err)
-		}
-	}
-	if result.Commit != nil {
-		if err := result.Commit(ctx); err != nil {
-			return err
-		}
-	}
-	if err := p.store.Ack(ctx, event.EventID); err != nil {
-		return err
-	}
-	return p.markWorkerProcessed(ctx, event)
-}
-
-func (p *WorkerPool) markWorkerProcessed(ctx context.Context, event *KBEvent) error {
-	if event.IdempotencyKey == "" || p.inbox == nil {
-		return nil
-	}
-	return p.inbox.MarkProcessed(ctx, p.worker.WorkerID(), event.IdempotencyKey, event.EventID)
-}
-
-func (p *WorkerPool) finishDispatch(ctx context.Context, event *KBEvent, commitErr error, dur time.Duration) error {
-	if commitErr == nil {
-		p.metrics.OnWorkerTick(p.worker.Kind(), p.worker.WorkerID(), "success", dur, nil)
-		return nil
-	}
-	if IsInboxDuplicate(commitErr) {
-		return p.finishDuplicateDispatch(ctx, event, dur)
-	}
-	slog.Default().Warn("worker commit failed", "kind", string(p.worker.Kind()), "event_id", event.EventID, "error", commitErr)
-	p.recordFailure(ctx, event, commitErr, dur)
-	return commitErr
-}
-
-func (p *WorkerPool) finishDuplicateDispatch(ctx context.Context, event *KBEvent, dur time.Duration) error {
-	slog.Default().Info("worker lost inbox race; acking duplicate", "kind", string(p.worker.Kind()), "event_id", event.EventID, "idempotency_key", event.IdempotencyKey)
-	if err := p.store.Ack(ctx, event.EventID); err != nil && !errors.Is(err, ErrEventNotFound) {
-		slog.Default().Warn("worker ack after duplicate failed", "error", err)
-	}
-	p.metrics.OnWorkerTick(p.worker.Kind(), p.worker.WorkerID(), "duplicate", dur, nil)
-	return nil
-}
-
-// recordFailure appends a worker.failed domain event and then calls
-// EventStore.Fail. The ordering matters: if the fail-event append fails
-// we must NOT transition the source to Dead, because observers would then
-// see "gone dead, no reason". Leaving the source pending lets the next
-// visibility-timeout retry try again.
-func (p *WorkerPool) recordFailure(ctx context.Context, event *KBEvent, handlerErr error, dur time.Duration) {
-	maxAttempts := event.EffectiveMaxAttempts()
-	willRetry := event.Attempt < maxAttempts
-
+func buildWorkerFailedEvent(input workerpool.FailureEventInput) (KBEvent, error) {
 	var resultCarrier fileResultCarrier
-	hasFileResults := errors.As(handlerErr, &resultCarrier)
+	hasFileResults := errors.As(input.Error, &resultCarrier)
 	var fileResults []FileIngestResult
 	if hasFileResults && resultCarrier != nil {
 		fileResults = resultCarrier.FileIngestResults()
 	}
-
-	failPayload, _ := json.Marshal(WorkerFailedPayload{
-		Stage:         string(p.worker.Kind()),
-		SourceEventID: event.EventID,
-		Attempt:       event.Attempt,
-		Error:         handlerErr.Error(),
-		WillRetry:     willRetry,
+	payload, err := json.Marshal(WorkerFailedPayload{
+		Stage:         string(input.WorkerKind),
+		SourceEventID: input.Event.EventID,
+		Attempt:       input.Event.Attempt,
+		Error:         input.Error.Error(),
+		WillRetry:     input.WillRetry,
 		FileResults:   fileResults,
 	})
-	now := p.cfg.Clock.Now()
-	failEvent := KBEvent{
-		EventID:        newULIDLikeAt("evt", now),
-		KBID:           event.KBID,
+	if err != nil {
+		return KBEvent{}, err
+	}
+	return KBEvent{
+		EventID:        newULIDLikeAt("evt", input.Now),
+		KBID:           input.Event.KBID,
 		Kind:           EventWorkerFailed,
-		Payload:        failPayload,
+		Payload:        payload,
 		PayloadSchema:  "worker.failed/v1",
-		CorrelationID:  event.CorrelationID,
-		CausationID:    event.EventID,
-		IdempotencyKey: fmt.Sprintf("%s|worker.failed|%d", event.EventID, event.Attempt),
+		CorrelationID:  input.Event.CorrelationID,
+		CausationID:    input.Event.EventID,
+		IdempotencyKey: fmt.Sprintf("%s|worker.failed|%d", input.Event.EventID, input.Event.Attempt),
 		Status:         EventStatusPending,
-		CreatedAt:      now,
-	}
-	if err := p.store.Append(ctx, failEvent); err != nil && !errors.Is(err, ErrEventDuplicateKey) {
-		slog.Default().Warn("worker.failed append failed; leaving source pending for retry",
-			"kind", string(p.worker.Kind()), "event_id", event.EventID, "error", err)
-		p.metrics.OnWorkerTick(p.worker.Kind(), p.worker.WorkerID(), "failed", dur, handlerErr)
-		return
-	}
-
-	if err := p.store.Fail(ctx, event.EventID, event.Attempt, handlerErr.Error()); err != nil {
-		// ErrEventStateChanged means a concurrent actor advanced the attempt
-		// counter. the worker.failed event is in place, so metrics report
-		// "failed" and the reaper/next claim will make the terminal call.
-		slog.Default().Warn("worker store.Fail failed", "error", err)
-	}
-
-	outcome := "failed"
-	if !willRetry {
-		outcome = "dead"
-	}
-	p.metrics.OnWorkerTick(p.worker.Kind(), p.worker.WorkerID(), outcome, dur, handlerErr)
+		CreatedAt:      input.Now,
+	}, nil
 }
 
-func safeHandle(ctx context.Context, w Worker, event *KBEvent) (result WorkerResult, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("worker panicked: %v", r)
+type DocumentChunkedWorker struct {
+	KB *KB
+	ID string
+}
+
+func (w *DocumentChunkedWorker) Kind() EventKind  { return EventDocumentChunked }
+func (w *DocumentChunkedWorker) WorkerID() string { return w.ID }
+
+func (w *DocumentChunkedWorker) Handle(ctx context.Context, event *KBEvent) (WorkerResult, error) {
+	var payload DocumentChunkedPayload
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return WorkerResult{}, fmt.Errorf("decode payload: %w", err)
+	}
+	embedded := make([]EmbeddedDocument, 0, len(payload.Documents))
+	for _, doc := range payload.Documents {
+		vec, err := w.KB.Embed(ctx, doc.Text)
+		if err != nil {
+			return WorkerResult{}, fmt.Errorf("embed doc %q: %w", doc.ID, err)
 		}
-	}()
-	return w.Handle(ctx, event)
+		embedded = append(embedded, EmbeddedDocument{
+			ID:        doc.ID,
+			Text:      doc.Text,
+			MediaIDs:  doc.MediaIDs,
+			MediaRefs: doc.MediaRefs,
+			Metadata:  doc.Metadata,
+			Embedding: vec,
+		})
+	}
+	if payload.Options.GraphEnabled != nil && *payload.Options.GraphEnabled {
+		return w.handleGraphExtract(ctx, event, payload, embedded)
+	}
+	return w.handleEmbed(event, payload, embedded), nil
+}
+
+func (w *DocumentChunkedWorker) handleEmbed(
+	event *KBEvent,
+	payload DocumentChunkedPayload,
+	embedded []EmbeddedDocument,
+) WorkerResult {
+	nextPayload, _ := json.Marshal(DocumentEmbeddedPayload{
+		KBID:          payload.KBID,
+		DocumentCount: payload.DocumentCount,
+		Documents:     embedded,
+		FileResults:   payload.FileResults,
+		Options:       payload.Options,
+		SourceEventID: payload.SourceEventID,
+	})
+	return WorkerResult{
+		FollowUps: []KBEvent{
+			w.KB.newChildPendingEvent(
+				event,
+				EventDocumentEmbedded,
+				"document.embedded/v1",
+				event.EventID+"|document.embedded",
+				nextPayload,
+			),
+		},
+	}
+}
+
+func (w *DocumentChunkedWorker) handleGraphExtract(
+	ctx context.Context,
+	event *KBEvent,
+	payload DocumentChunkedPayload,
+	embedded []EmbeddedDocument,
+) (WorkerResult, error) {
+	if w.KB.GraphBuilder == nil {
+		return WorkerResult{}, ErrGraphUnavailable
+	}
+	graphDocs := make([]Document, 0, len(payload.Documents))
+	for _, doc := range payload.Documents {
+		graphDocs = append(graphDocs, doc)
+	}
+	graphResult, err := w.KB.GraphBuilder.Build(ctx, graphDocs)
+	if err != nil {
+		return WorkerResult{}, fmt.Errorf("build graph: %w", err)
+	}
+	nextPayload, _ := json.Marshal(DocumentGraphExtractedPayload{
+		KBID:          payload.KBID,
+		DocumentCount: payload.DocumentCount,
+		Documents:     embedded,
+		FileResults:   payload.FileResults,
+		GraphResult:   graphResult,
+		Options:       payload.Options,
+		SourceEventID: payload.SourceEventID,
+	})
+	return WorkerResult{
+		FollowUps: []KBEvent{
+			w.KB.newChildPendingEvent(
+				event,
+				EventDocumentGraphExtracted,
+				"document.graph_extracted/v1",
+				event.EventID+"|document.graph_extracted",
+				nextPayload,
+			),
+		},
+	}, nil
+}
+
+type DocumentUpsertWorker struct {
+	KB *KB
+	ID string
+}
+
+func (w *DocumentUpsertWorker) Kind() EventKind { return EventDocumentUpsert }
+
+func (w *DocumentUpsertWorker) WorkerID() string { return w.ID }
+
+func (w *DocumentUpsertWorker) Handle(ctx context.Context, event *KBEvent) (WorkerResult, error) {
+	var payload DocumentUpsertPayload
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return WorkerResult{}, fmt.Errorf("decode payload: %w", err)
+	}
+	chunkedDocs, fileResults, _, stagedBlobKeys, err := w.normalizeDocuments(
+		ctx,
+		payload.KBID,
+		payload.Documents,
+		payload.FileSources,
+		payload.ChunkSize,
+	)
+	if err != nil {
+		return WorkerResult{}, err
+	}
+	nextPayload, _ := json.Marshal(DocumentChunkedPayload{
+		KBID:          payload.KBID,
+		DocumentCount: len(payload.Documents) + successfulFileCount(fileResults),
+		Documents:     chunkedDocs,
+		FileResults:   fileResults,
+		Options:       payload.Options,
+		SourceEventID: event.EventID,
+	})
+	next := w.KB.newChildPendingEvent(
+		event,
+		EventDocumentChunked,
+		"document.chunked/v1",
+		event.EventID+"|document.chunked",
+		nextPayload,
+	)
+	return WorkerResult{FollowUps: []KBEvent{next}, Commit: func(ctx context.Context) error {
+		var firstErr error
+		for _, key := range stagedBlobKeys {
+			err := w.KB.BlobStore.Delete(ctx, key)
+			if err == nil || errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			slog.Default().Warn("ingest: staged blob delete failed",
+				"blob_key", key, logKeyError, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("ingest: delete staged blob %q: %w", key, err)
+			}
+		}
+		return firstErr
+	}}, nil
+}
+
+func successfulFileCount(results []FileIngestResult) int {
+	count := 0
+	for _, result := range results {
+		if result.Status == "succeeded" {
+			count++
+		}
+	}
+	return count
 }

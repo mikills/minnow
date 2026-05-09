@@ -100,7 +100,13 @@ func main() {
 		len(companies)-failures, totalChunks, failures, time.Since(start).Round(time.Second))
 }
 
-func fetchOne(ctx context.Context, client *http.Client, ua string, co company, chunker kb.TextChunker) ([]kb.Chunk, string, error) {
+func fetchOne(
+	ctx context.Context,
+	client *http.Client,
+	ua string,
+	co company,
+	chunker kb.TextChunker,
+) ([]kb.Chunk, string, error) {
 	submissionsURL := fmt.Sprintf("https://data.sec.gov/submissions/CIK%s.json", co.CIK)
 	body, err := fetch(ctx, client, ua, submissionsURL)
 	if err != nil {

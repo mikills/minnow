@@ -50,5 +50,7 @@ func (s *Service) readResource(ctx context.Context, req *mcp.ReadResourceRequest
 	if err != nil {
 		return nil, err
 	}
-	return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: uri, MIMEType: "application/json", Text: string(data)}}}, nil
+	return &mcp.ReadResourceResult{
+		Contents: []*mcp.ResourceContents{{URI: uri, MIMEType: "application/json", Text: string(data)}},
+	}, nil
 }

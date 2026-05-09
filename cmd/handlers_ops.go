@@ -82,21 +82,24 @@ func operationStatusHandler(deps Dependencies, operationsLimiter *ipRateLimiter)
 	return func(c echo.Context) error {
 		if !operationsLimiter.Allow(c.RealIP()) {
 			c.Response().Header().Set("Retry-After", "1")
-			return c.JSON(http.StatusTooManyRequests, map[string]any{"error": "rate limit exceeded"})
+			return c.JSON(http.StatusTooManyRequests, map[string]any{errorResponseKey: "rate limit exceeded"})
 		}
 		if deps.GetEvent == nil {
-			return c.JSON(http.StatusServiceUnavailable, map[string]any{"error": "event subsystem not configured"})
+			return c.JSON(
+				http.StatusServiceUnavailable,
+				map[string]any{errorResponseKey: "event subsystem not configured"},
+			)
 		}
 		id := strings.TrimSpace(c.Param("id"))
 		if id == "" {
-			return c.JSON(http.StatusBadRequest, map[string]any{"error": "id required"})
+			return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "id required"})
 		}
 		ev, err := deps.GetEvent(c.Request().Context(), id)
 		if err != nil {
 			if errors.Is(err, kb.ErrEventNotFound) {
-				return c.JSON(http.StatusNotFound, map[string]any{"error": "not found"})
+				return c.JSON(http.StatusNotFound, map[string]any{errorResponseKey: "not found"})
 			}
-			return c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return c.JSON(http.StatusInternalServerError, map[string]any{errorResponseKey: err.Error()})
 		}
 		root := operationStatusPayload(c, deps, id, ev)
 		return c.JSON(http.StatusOK, root)
@@ -141,15 +144,15 @@ func eventStatusPayload(ev *kb.KBEvent) map[string]any {
 		return nil
 	}
 	out := map[string]any{
-		"event_id":       ev.EventID,
-		"kb_id":          ev.KBID,
-		"kind":           ev.Kind,
-		"status":         ev.Status,
-		"attempt":        ev.Attempt,
-		"correlation_id": ev.CorrelationID,
-		"causation_id":   ev.CausationID,
-		"created_at":     ev.CreatedAt,
-		"last_error":     ev.LastError,
+		eventIDResponseKey: ev.EventID,
+		kbIDContextKey:     ev.KBID,
+		"kind":             ev.Kind,
+		"status":           ev.Status,
+		"attempt":          ev.Attempt,
+		"correlation_id":   ev.CorrelationID,
+		"causation_id":     ev.CausationID,
+		"created_at":       ev.CreatedAt,
+		"last_error":       ev.LastError,
 	}
 	switch ev.Kind {
 	case kb.EventKBPublished:

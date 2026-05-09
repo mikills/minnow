@@ -81,10 +81,20 @@ const (
 
 func (f *DuckDBArtifactFormat) validateManifestFormat(manifest *kb.SnapshotShardManifest) error {
 	if manifest.FormatKind != DuckDBFormatKind {
-		return fmt.Errorf("%w: manifest format_kind %q does not match expected %q", kb.ErrArtifactFormatNotConfigured, manifest.FormatKind, DuckDBFormatKind)
+		return fmt.Errorf(
+			"%w: manifest format_kind %q does not match expected %q",
+			kb.ErrArtifactFormatNotConfigured,
+			manifest.FormatKind,
+			DuckDBFormatKind,
+		)
 	}
 	if manifest.FormatVersion != DuckDBFormatVersion {
-		return fmt.Errorf("%w: manifest format_version %d is not supported (expected %d)", kb.ErrArtifactFormatNotConfigured, manifest.FormatVersion, DuckDBFormatVersion)
+		return fmt.Errorf(
+			"%w: manifest format_version %d is not supported (expected %d)",
+			kb.ErrArtifactFormatNotConfigured,
+			manifest.FormatVersion,
+			DuckDBFormatVersion,
+		)
 	}
 	// A manifest carries one FormatVersion that applies to all shards.
 	// Reject any encoded per-shard contradiction by requiring shards to
@@ -180,7 +190,12 @@ func (f *DuckDBArtifactFormat) QueryGraph(ctx context.Context, req kb.GraphQuery
 	return filterExpandedByMaxDistance(merged, req.Options.MaxDistance), nil
 }
 
-func (f *DuckDBArtifactFormat) runGraphExpansionAcrossShards(ctx context.Context, req kb.GraphQueryRequest, selection *vectorQuerySelection, options kb.ExpansionOptions) ([]kb.ExpandedResult, error) {
+func (f *DuckDBArtifactFormat) runGraphExpansionAcrossShards(
+	ctx context.Context,
+	req kb.GraphQueryRequest,
+	selection *vectorQuerySelection,
+	options kb.ExpansionOptions,
+) ([]kb.ExpandedResult, error) {
 	parallelism := selection.Plan.Parallelism
 	if parallelism <= 0 {
 		parallelism = 1
@@ -202,7 +217,20 @@ func (f *DuckDBArtifactFormat) runGraphExpansionAcrossShards(ctx context.Context
 			continue
 		}
 		graphShardCount++
-		f.startGraphShardQuery(ctx, req, shardGraphQueryWork{idx: idx, shard: shard, options: options, sem: sem, errCh: errCh, results: results, cancel: cancel, wg: &wg})
+		f.startGraphShardQuery(
+			ctx,
+			req,
+			shardGraphQueryWork{
+				idx:     idx,
+				shard:   shard,
+				options: options,
+				sem:     sem,
+				errCh:   errCh,
+				results: results,
+				cancel:  cancel,
+				wg:      &wg,
+			},
+		)
 	}
 	if graphShardCount == 0 {
 		return nil, kb.ErrGraphQueryUnavailable
@@ -229,12 +257,20 @@ type shardGraphQueryWork struct {
 	wg      *sync.WaitGroup
 }
 
-func (f *DuckDBArtifactFormat) startGraphShardQuery(ctx context.Context, req kb.GraphQueryRequest, work shardGraphQueryWork) {
+func (f *DuckDBArtifactFormat) startGraphShardQuery(
+	ctx context.Context,
+	req kb.GraphQueryRequest,
+	work shardGraphQueryWork,
+) {
 	work.wg.Add(1)
 	go f.runGraphShardQuery(ctx, req, work)
 }
 
-func (f *DuckDBArtifactFormat) runGraphShardQuery(ctx context.Context, req kb.GraphQueryRequest, work shardGraphQueryWork) {
+func (f *DuckDBArtifactFormat) runGraphShardQuery(
+	ctx context.Context,
+	req kb.GraphQueryRequest,
+	work shardGraphQueryWork,
+) {
 	defer work.wg.Done()
 	select {
 	case work.sem <- struct{}{}:
@@ -254,7 +290,12 @@ func (f *DuckDBArtifactFormat) runGraphShardQuery(ctx context.Context, req kb.Gr
 	work.results[work.idx] = shardResults
 }
 
-func (f *DuckDBArtifactFormat) queryGraphSingleShard(ctx context.Context, req kb.GraphQueryRequest, shard kb.SnapshotShardMetadata, options kb.ExpansionOptions) ([]kb.ExpandedResult, error) {
+func (f *DuckDBArtifactFormat) queryGraphSingleShard(
+	ctx context.Context,
+	req kb.GraphQueryRequest,
+	shard kb.SnapshotShardMetadata,
+	options kb.ExpansionOptions,
+) ([]kb.ExpandedResult, error) {
 	localPath, _, err := f.ensureLocalShardFile(ctx, req.KBID, shard)
 	if err != nil {
 		return nil, err

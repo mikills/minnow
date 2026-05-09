@@ -76,7 +76,13 @@ func assertAppEndpoint(t *testing.T, base, method, path string, status int) {
 func testAppMCPHTTPMount(t *testing.T) {
 	tmp := t.TempDir()
 	loader := kb.NewKB(&kb.LocalBlobStore{Root: filepath.Join(tmp, "blobs")}, filepath.Join(tmp, "cache"))
-	app := NewApp(loader, AppConfig{Address: "127.0.0.1:0", MCP: mcpserver.Config{Enabled: true, HTTPEnabled: true, HTTPPath: "/mcp", HTTPJSONResponse: true}})
+	app := NewApp(
+		loader,
+		AppConfig{
+			Address: "127.0.0.1:0",
+			MCP:     mcpserver.Config{Enabled: true, HTTPEnabled: true, HTTPPath: "/mcp", HTTPJSONResponse: true},
+		},
+	)
 	require.NoError(t, app.Start())
 	t.Cleanup(func() {
 		_ = app.Stop(context.Background())

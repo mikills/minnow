@@ -7,8 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"time"
+
+	"github.com/mikills/minnow/kb/fileingest"
 )
 
 // Recommended visibility timeouts per ingest stage. Exposed so operators can
@@ -21,29 +22,9 @@ const (
 	DocumentPublishWorkerVisibilityTimeout = 5 * time.Minute
 )
 
-type FileIngestSource struct {
-	FileID        string         `json:"file_id"`
-	DocumentID    string         `json:"document_id"`
-	MediaID       string         `json:"media_id"`
-	Filename      string         `json:"filename"`
-	ContentType   string         `json:"content_type"`
-	StagedBlobKey string         `json:"staged_blob_key"`
-	SizeBytes     int64          `json:"size_bytes"`
-	Checksum      string         `json:"checksum"`
-	Metadata      map[string]any `json:"metadata,omitempty"`
-}
-
-type FileIngestResult struct {
-	FileID      string         `json:"file_id"`
-	DocumentID  string         `json:"document_id,omitempty"`
-	MediaID     string         `json:"media_id,omitempty"`
-	Filename    string         `json:"filename"`
-	ContentType string         `json:"content_type,omitempty"`
-	Status      string         `json:"status"`
-	Error       string         `json:"error,omitempty"`
-	PageCount   int            `json:"page_count,omitempty"`
-	Metadata    map[string]any `json:"metadata,omitempty"`
-}
+type FileIngestSource = fileingest.Source
+type FileIngestResult = fileingest.Result
+type FileIngestUpload = fileingest.Upload
 
 // DocumentUpsertPayload is the payload carried by a document.upsert command.
 type DocumentUpsertPayload struct {
@@ -100,15 +81,6 @@ type WorkerFailedPayload struct {
 	Error         string             `json:"error"`
 	WillRetry     bool               `json:"will_retry"`
 	FileResults   []FileIngestResult `json:"file_results,omitempty"`
-}
-
-type FileIngestUpload struct {
-	FileID      string
-	DocumentID  string
-	Filename    string
-	ContentType string
-	Metadata    map[string]any
-	Body        io.Reader
 }
 
 type FileIngestInput struct {
@@ -170,8 +142,23 @@ func (l *KB) newRootPendingEvent(input pendingEventInput) KBEvent {
 	return l.newPendingEvent(input)
 }
 
-func (l *KB) newChildPendingEvent(parent *KBEvent, kind EventKind, schema, idempotencyKey string, payload []byte) KBEvent {
-	return l.newPendingEvent(pendingEventInput{kind: kind, kbID: parent.KBID, schema: schema, correlationID: parent.CorrelationID, causationID: parent.EventID, idempotencyKey: idempotencyKey, payload: payload})
+func (l *KB) newChildPendingEvent(
+	parent *KBEvent,
+	kind EventKind,
+	schema, idempotencyKey string,
+	payload []byte,
+) KBEvent {
+	return l.newPendingEvent(
+		pendingEventInput{
+			kind:           kind,
+			kbID:           parent.KBID,
+			schema:         schema,
+			correlationID:  parent.CorrelationID,
+			causationID:    parent.EventID,
+			idempotencyKey: idempotencyKey,
+			payload:        payload,
+		},
+	)
 }
 
 // NewULIDLike on *KB uses the KB's Clock. Prefer this over the package-level
@@ -185,7 +172,11 @@ func (l *KB) NewULIDLike(prefix string) string {
 // so retried submissions collapse to a single event.
 //
 // Returns the new event's id and the effective idempotency key.
-func (l *KB) AppendDocumentUpsertDetailed(ctx context.Context, p DocumentUpsertPayload, idempotencyKey, correlationID string) (string, string, error) {
+func (l *KB) AppendDocumentUpsertDetailed(
+	ctx context.Context,
+	p DocumentUpsertPayload,
+	idempotencyKey, correlationID string,
+) (string, string, error) {
 	if l.EventStore == nil {
 		return "", "", errors.New("ingest: EventStore not configured")
 	}
@@ -200,7 +191,16 @@ func (l *KB) AppendDocumentUpsertDetailed(ctx context.Context, p DocumentUpsertP
 	if err := l.ValidateDocumentReferences(ctx, p.KBID, p.Documents); err != nil {
 		return "", "", err
 	}
-	event := l.newRootPendingEvent(pendingEventInput{kind: EventDocumentUpsert, kbID: p.KBID, schema: "document.upsert/v1", correlationID: correlationID, idempotencyKey: idempotencyKey, payload: payload})
+	event := l.newRootPendingEvent(
+		pendingEventInput{
+			kind:           EventDocumentUpsert,
+			kbID:           p.KBID,
+			schema:         "document.upsert/v1",
+			correlationID:  correlationID,
+			idempotencyKey: idempotencyKey,
+			payload:        payload,
+		},
+	)
 	return l.appendDocumentUpsertEvent(ctx, event, p.KBID, idempotencyKey)
 }
 
@@ -221,14 +221,24 @@ func (l *KB) validateDocumentUpsertRequest(ctx context.Context, p DocumentUpsert
 	return nil
 }
 
-func (l *KB) appendDocumentUpsertEvent(ctx context.Context, event KBEvent, kbID string, idempotencyKey string) (string, string, error) {
+func (l *KB) appendDocumentUpsertEvent(
+	ctx context.Context,
+	event KBEvent,
+	kbID string,
+	idempotencyKey string,
+) (string, string, error) {
 	if err := l.EventStore.Append(ctx, event); err != nil {
 		return l.handleDocumentUpsertAppendError(ctx, err, kbID, idempotencyKey)
 	}
 	return event.EventID, idempotencyKey, nil
 }
 
-func (l *KB) handleDocumentUpsertAppendError(ctx context.Context, err error, kbID string, idempotencyKey string) (string, string, error) {
+func (l *KB) handleDocumentUpsertAppendError(
+	ctx context.Context,
+	err error,
+	kbID string,
+	idempotencyKey string,
+) (string, string, error) {
 	if !errors.Is(err, ErrEventDuplicateKey) {
 		return "", "", err
 	}
@@ -242,7 +252,11 @@ func (l *KB) handleDocumentUpsertAppendError(ctx context.Context, err error, kbI
 	return "", "", err
 }
 
-func (l *KB) AppendDocumentUpsert(ctx context.Context, p DocumentUpsertPayload, idempotencyKey, correlationID string) (string, error) {
+func (l *KB) AppendDocumentUpsert(
+	ctx context.Context,
+	p DocumentUpsertPayload,
+	idempotencyKey, correlationID string,
+) (string, error) {
 	eventID, _, err := l.AppendDocumentUpsertDetailed(ctx, p, idempotencyKey, correlationID)
 	return eventID, err
 }
@@ -265,6 +279,8 @@ func (l *KB) FindOperationTerminal(ctx context.Context, sourceEventID string) (*
 	return nil, nil
 }
 
+const operationStageCapacity = 1 << 2
+
 func (l *KB) OperationStages(ctx context.Context, sourceEventID string) ([]OperationStageSnapshot, error) {
 	if l.EventStore == nil {
 		return nil, errors.New("event: EventStore not configured")
@@ -273,7 +289,7 @@ func (l *KB) OperationStages(ctx context.Context, sourceEventID string) ([]Opera
 	if err != nil {
 		return nil, err
 	}
-	stages := make([]OperationStageSnapshot, 0, 4)
+	stages := make([]OperationStageSnapshot, 0, operationStageCapacity)
 	seen := map[string]struct{}{}
 	for current != nil {
 		if _, ok := seen[current.EventID]; ok {
@@ -332,7 +348,12 @@ func (l *KB) findOperationEvent(ctx context.Context, rootEventID string, targetK
 	return l.findOperationEventFrom(ctx, rootEventID, targetKind, map[string]struct{}{})
 }
 
-func (l *KB) findOperationEventFrom(ctx context.Context, currentEventID string, targetKind EventKind, seen map[string]struct{}) (*KBEvent, error) {
+func (l *KB) findOperationEventFrom(
+	ctx context.Context,
+	currentEventID string,
+	targetKind EventKind,
+	seen map[string]struct{},
+) (*KBEvent, error) {
 	if _, ok := seen[currentEventID]; ok {
 		return nil, nil
 	}
@@ -359,24 +380,6 @@ func (l *KB) findOperationEventFrom(ctx context.Context, currentEventID string, 
 		}
 	}
 	return nil, nil
-}
-
-func chunkDocuments(ctx context.Context, docs []Document, chunkSize int) ([]Document, error) {
-	if chunkSize <= 0 {
-		chunkSize = DefaultTextChunkSize
-	}
-	chunker := TextChunker{ChunkSize: chunkSize}
-	out := make([]Document, 0, len(docs))
-	for _, doc := range docs {
-		chunks, err := chunker.Chunk(ctx, doc.ID, doc.Text)
-		if err != nil {
-			return nil, err
-		}
-		for _, chunk := range chunks {
-			out = append(out, Document{ID: chunk.ChunkID, Text: chunk.Text, MediaIDs: doc.MediaIDs, MediaRefs: doc.MediaRefs, Metadata: doc.Metadata})
-		}
-	}
-	return out, nil
 }
 
 func collectMediaIDs(docs []Document) []string {

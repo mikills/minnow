@@ -1,8 +1,7 @@
-package duckdb
+package duckdb_test
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"math"
 	"os"
@@ -20,25 +19,15 @@ import (
 	kb "github.com/mikills/minnow/kb"
 )
 
-func openConfiguredDBForTest(ctx context.Context, dbPath, memLimit, extensionDir string, offlineExt bool) (*sql.DB, error) {
-	f := &DuckDBArtifactFormat{
-		deps: DuckDBArtifactDeps{
-			MemoryLimit:  memLimit,
-			ExtensionDir: extensionDir,
-			OfflineExt:   offlineExt,
-		},
-	}
-	return f.openConfiguredDB(ctx, dbPath)
-}
-
-func TestDuckDBCorrectness(t *testing.T) {
-	t.Run("concurrent_reads_finance_fixture", testE2EConcurrentReadsFinanceFixture)
-	t.Run("concurrent_writes_recipe_fixture", testE2EConcurrentWritesRecipeFixture)
-	t.Run("query_recall_against_bruteforce", testMultiTenantQueryRecallAgainstBruteForce)
-	t.Run("write_visibility_across_readers", testMultiTenantWriteVisibilityAcrossReaders)
-}
-
-func startFinanceReader(ctx context.Context, wg *sync.WaitGroup, readerKB *kb.KB, tenantID string, worker, iterations int, queryVecs [][]float32, errCh chan<- error) {
+func startFinanceReader(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	readerKB *kb.KB,
+	tenantID string,
+	worker, iterations int,
+	queryVecs [][]float32,
+	errCh chan<- error,
+) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -72,10 +61,10 @@ func validateFinanceResults(results []kb.ExpandedResult) error {
 func testE2EConcurrentReadsFinanceFixture(t *testing.T) {
 	ctx := context.Background()
 	sharedBlobRoot := kb.SharedBlobRoot(t)
-	embedder := newFixtureEmbedder(64)
+	embedder := mustLocalEmbedder(t, 64)
 	writer := kb.NewTestHarness(t, "unused").WithBlobRoot(sharedBlobRoot).WithEmbedder(embedder).Setup()
 	t.Cleanup(writer.Cleanup)
-	registerFormatOnHarness(t, writer)
+	registerDuckDBFormatOnHarness(t, writer)
 	loader := writer.KB()
 
 	financeTenant := "tenant-finance"
@@ -110,9 +99,12 @@ func testE2EConcurrentReadsFinanceFixture(t *testing.T) {
 
 	readerHarnesses := make([]*kb.TestHarness, 0, 4)
 	for i := 0; i < 4; i++ {
-		rh := kb.NewTestHarness(t, fmt.Sprintf("reader-%d", i)).WithBlobRoot(sharedBlobRoot).WithEmbedder(embedder).Setup()
+		rh := kb.NewTestHarness(t, fmt.Sprintf("reader-%d", i)).
+			WithBlobRoot(sharedBlobRoot).
+			WithEmbedder(embedder).
+			Setup()
 		t.Cleanup(rh.Cleanup)
-		registerFormatOnHarness(t, rh)
+		registerDuckDBFormatOnHarness(t, rh)
 		readerHarnesses = append(readerHarnesses, rh)
 		_, err := rh.KB().Search(ctx, financeTenant, queryVecs[0], &kb.SearchOptions{TopK: 1})
 		require.NoError(t, err)
@@ -123,7 +115,16 @@ func testE2EConcurrentReadsFinanceFixture(t *testing.T) {
 	readerWorkers := len(readerHarnesses)
 	iterationsPerReader := 80
 	for worker := 0; worker < readerWorkers; worker++ {
-		startFinanceReader(ctx, &readerWG, readerHarnesses[worker].KB(), financeTenant, worker, iterationsPerReader, queryVecs, readerErrCh)
+		startFinanceReader(
+			ctx,
+			&readerWG,
+			readerHarnesses[worker].KB(),
+			financeTenant,
+			worker,
+			iterationsPerReader,
+			queryVecs,
+			readerErrCh,
+		)
 	}
 	readerWG.Wait()
 	close(readerErrCh)
@@ -132,7 +133,16 @@ func testE2EConcurrentReadsFinanceFixture(t *testing.T) {
 	}
 }
 
-func startRecipeReader(ctx context.Context, wg *sync.WaitGroup, readerKB *kb.KB, worker int, tenantID string, queryVecs [][]float32, stop <-chan struct{}, errCh chan<- error) {
+func startRecipeReader(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	readerKB *kb.KB,
+	worker int,
+	tenantID string,
+	queryVecs [][]float32,
+	stop <-chan struct{},
+	errCh chan<- error,
+) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -168,13 +178,26 @@ func validateRecipeResults(results []kb.ExpandedResult) error {
 	return nil
 }
 
-func startRecipeWriter(ctx context.Context, wg *sync.WaitGroup, writerKB *kb.KB, tenantID string, worker, writesPerWorker int, recipeLines []string, mu *sync.Mutex, writtenDocs *[]kb.Document, errCh chan<- error) {
+func startRecipeWriter(
+	ctx context.Context,
+	wg *sync.WaitGroup,
+	writerKB *kb.KB,
+	tenantID string,
+	worker, writesPerWorker int,
+	recipeLines []string,
+	mu *sync.Mutex,
+	writtenDocs *[]kb.Document,
+	errCh chan<- error,
+) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; i < writesPerWorker; i++ {
 			line := recipeLines[(worker+i)%len(recipeLines)]
-			doc := kb.Document{ID: fmt.Sprintf("recipe-w%d-%03d", worker, i), Text: fmt.Sprintf("%s (writer=%d seq=%d)", line, worker, i)}
+			doc := kb.Document{
+				ID:   fmt.Sprintf("recipe-w%d-%03d", worker, i),
+				Text: fmt.Sprintf("%s (writer=%d seq=%d)", line, worker, i),
+			}
 			if err := writerKB.UpsertDocsAndUpload(ctx, tenantID, []kb.Document{doc}); err != nil {
 				errCh <- err
 				return
@@ -189,11 +212,11 @@ func startRecipeWriter(ctx context.Context, wg *sync.WaitGroup, writerKB *kb.KB,
 func testE2EConcurrentWritesRecipeFixture(t *testing.T) {
 	ctx := context.Background()
 	sharedBlobRoot := kb.SharedBlobRoot(t)
-	embedder := newFixtureEmbedder(64)
+	embedder := mustLocalEmbedder(t, 64)
 
 	writer := kb.NewTestHarness(t, "unused").WithBlobRoot(sharedBlobRoot).WithEmbedder(embedder).Setup()
 	t.Cleanup(writer.Cleanup)
-	registerFormatOnHarness(t, writer)
+	registerDuckDBFormatOnHarness(t, writer)
 	writerKB := writer.KB()
 	tenantID := "tenant-recipe-writes"
 
@@ -211,9 +234,12 @@ func testE2EConcurrentWritesRecipeFixture(t *testing.T) {
 	}
 	readerHarnesses := make([]*kb.TestHarness, 0, 4)
 	for i := 0; i < 4; i++ {
-		rh := kb.NewTestHarness(t, fmt.Sprintf("recipe-reader-%d", i)).WithBlobRoot(sharedBlobRoot).WithEmbedder(embedder).Setup()
+		rh := kb.NewTestHarness(t, fmt.Sprintf("recipe-reader-%d", i)).
+			WithBlobRoot(sharedBlobRoot).
+			WithEmbedder(embedder).
+			Setup()
 		t.Cleanup(rh.Cleanup)
-		registerFormatOnHarness(t, rh)
+		registerDuckDBFormatOnHarness(t, rh)
 		readerHarnesses = append(readerHarnesses, rh)
 	}
 
@@ -235,14 +261,34 @@ func testE2EConcurrentWritesRecipeFixture(t *testing.T) {
 
 	var readerWG sync.WaitGroup
 	for worker := 0; worker < len(readerHarnesses); worker++ {
-		startRecipeReader(ctx, &readerWG, readerHarnesses[worker].KB(), worker, tenantID, queryVecs, stopReaders, readerErrCh)
+		startRecipeReader(
+			ctx,
+			&readerWG,
+			readerHarnesses[worker].KB(),
+			worker,
+			tenantID,
+			queryVecs,
+			stopReaders,
+			readerErrCh,
+		)
 	}
 
 	writerWorkers := 3
 	writesPerWorker := 18
 	var writerWG sync.WaitGroup
 	for worker := 0; worker < writerWorkers; worker++ {
-		startRecipeWriter(ctx, &writerWG, writerKB, tenantID, worker, writesPerWorker, recipeLines, &mu, &writtenDocs, readerErrCh)
+		startRecipeWriter(
+			ctx,
+			&writerWG,
+			writerKB,
+			tenantID,
+			worker,
+			writesPerWorker,
+			recipeLines,
+			&mu,
+			&writtenDocs,
+			readerErrCh,
+		)
 	}
 
 	writerWG.Wait()
@@ -259,16 +305,19 @@ func testE2EConcurrentWritesRecipeFixture(t *testing.T) {
 	require.Len(t, docs, writerWorkers*writesPerWorker)
 
 	for i := 0; i < len(docs); i += 7 {
-		require.NoError(t, waitForDocVisible(ctx, readerHarnesses[0].KB(), tenantID, docs[i].Text, docs[i].ID, 4*time.Second))
+		require.NoError(
+			t,
+			waitForDocVisible(ctx, readerHarnesses[0].KB(), tenantID, docs[i].Text, docs[i].ID, 4*time.Second),
+		)
 	}
 }
 
 func testMultiTenantQueryRecallAgainstBruteForce(t *testing.T) {
 	ctx := context.Background()
-	embedder := newFixtureEmbedder(64)
+	embedder := mustLocalEmbedder(t, 64)
 	h := kb.NewTestHarness(t, "unused").WithEmbedder(embedder).Setup()
 	t.Cleanup(h.Cleanup)
-	registerFormatOnHarness(t, h)
+	registerDuckDBFormatOnHarness(t, h)
 	loader := h.KB()
 
 	tenantID := "tenant-recall"
@@ -323,15 +372,15 @@ func testMultiTenantQueryRecallAgainstBruteForce(t *testing.T) {
 func testMultiTenantWriteVisibilityAcrossReaders(t *testing.T) {
 	ctx := context.Background()
 	sharedBlobRoot := kb.SharedBlobRoot(t)
-	embedder := newFixtureEmbedder(32)
+	embedder := mustLocalEmbedder(t, 32)
 
 	writer := kb.NewTestHarness(t, "unused").WithBlobRoot(sharedBlobRoot).WithEmbedder(embedder).Setup()
 	t.Cleanup(writer.Cleanup)
-	registerFormatOnHarness(t, writer)
+	registerDuckDBFormatOnHarness(t, writer)
 
 	reader := kb.NewTestHarness(t, "unused").WithBlobRoot(sharedBlobRoot).WithEmbedder(embedder).Setup()
 	t.Cleanup(reader.Cleanup)
-	registerFormatOnHarness(t, reader)
+	registerDuckDBFormatOnHarness(t, reader)
 
 	writerKB := writer.KB()
 	readerKB := reader.KB()

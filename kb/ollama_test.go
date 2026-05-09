@@ -1,4 +1,4 @@
-package kb
+package kb_test
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+
+	"github.com/mikills/minnow/kb"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,14 +57,14 @@ func TestOllamaEmbedder(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			embedder := NewOllamaEmbedder(tc.baseURL, tc.model)
+			embedder := kb.NewOllamaEmbedder(tc.baseURL, tc.model)
 
 			var err error
 			if tc.name == "empty_input" || tc.name == "whitespace_only_input" {
-				testKB := NewKB(
-					&LocalBlobStore{Root: t.TempDir()},
+				testKB := kb.NewKB(
+					&kb.LocalBlobStore{Root: t.TempDir()},
 					t.TempDir(),
-					WithEmbedder(embedder),
+					kb.WithEmbedder(embedder),
 				)
 				_, err = testKB.Embed(context.Background(), tc.input)
 			} else {
@@ -80,6 +82,17 @@ func TestOllamaEmbedder(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+type ollamaGenerateResponse struct {
+	Response string `json:"response"`
+}
+
+type ollamaGenerateRequest struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+	Format string `json:"format"`
+	Stream bool   `json:"stream"`
 }
 
 func ollamaGrapherResponse(innerJSON string) []byte {
@@ -100,7 +113,7 @@ func TestOllamaGrapher(t *testing.T) {
 
 	testCases := []struct {
 		name            string
-		chunks          []Chunk
+		chunks          []kb.Chunk
 		mockStatus      int
 		mockBody        []byte
 		mockBodies      [][]byte
@@ -112,7 +125,7 @@ func TestOllamaGrapher(t *testing.T) {
 		wantEntityNames []string
 		wantEdge        *wantEdge
 		checkRequest    func(*testing.T, ollamaGenerateRequest)
-		checkResult     func(*testing.T, *GraphExtraction)
+		checkResult     func(*testing.T, *kb.GraphExtraction)
 	}{
 		{
 			name:            "nil_chunks",
@@ -124,17 +137,19 @@ func TestOllamaGrapher(t *testing.T) {
 		},
 		{
 			name:            "empty_chunks",
-			chunks:          []Chunk{},
+			chunks:          []kb.Chunk{},
 			mockStatus:      http.StatusOK,
 			mockBody:        ollamaGrapherResponse(`{"entities":[],"edges":[]}`),
 			wantEntityCount: 0,
 			wantEdgeCount:   0,
 		},
 		{
-			name:            "valid_entities_and_edges",
-			chunks:          []Chunk{{DocID: "d1", ChunkID: "d1-chunk-000", Text: "Alice works at ACME Corp."}},
-			mockStatus:      http.StatusOK,
-			mockBody:        ollamaGrapherResponse(`{"entities":["Alice","ACME Corp"],"edges":[{"src":"Alice","dst":"ACME Corp","rel":"works_at","weight":0.9}]}`),
+			name:       "valid_entities_and_edges",
+			chunks:     []kb.Chunk{{DocID: "d1", ChunkID: "d1-chunk-000", Text: "Alice works at ACME Corp."}},
+			mockStatus: http.StatusOK,
+			mockBody: ollamaGrapherResponse(
+				`{"entities":["Alice","ACME Corp"],"edges":[{"src":"Alice","dst":"ACME Corp","rel":"works_at","weight":0.9}]}`,
+			),
 			wantEntityCount: 2,
 			wantEdgeCount:   1,
 			wantEntityNames: []string{"Alice", "ACME Corp"},
@@ -147,7 +162,7 @@ func TestOllamaGrapher(t *testing.T) {
 		},
 		{
 			name:            "empty_entities_empty_edges",
-			chunks:          []Chunk{{ChunkID: "c0", Text: "no entities here"}},
+			chunks:          []kb.Chunk{{ChunkID: "c0", Text: "no entities here"}},
 			mockStatus:      http.StatusOK,
 			mockBody:        ollamaGrapherResponse(`{"entities":[],"edges":[]}`),
 			wantEntityCount: 0,
@@ -155,7 +170,7 @@ func TestOllamaGrapher(t *testing.T) {
 		},
 		{
 			name:        "non_200_status",
-			chunks:      []Chunk{{ChunkID: "c0", Text: "x"}},
+			chunks:      []kb.Chunk{{ChunkID: "c0", Text: "x"}},
 			mockStatus:  http.StatusInternalServerError,
 			mockBody:    []byte("internal error"),
 			wantErr:     true,
@@ -163,14 +178,14 @@ func TestOllamaGrapher(t *testing.T) {
 		},
 		{
 			name:       "malformed_outer_json",
-			chunks:     []Chunk{{ChunkID: "c0", Text: "x"}},
+			chunks:     []kb.Chunk{{ChunkID: "c0", Text: "x"}},
 			mockStatus: http.StatusOK,
 			mockBody:   []byte("not-json"),
 			wantErr:    true,
 		},
 		{
 			name:        "malformed_inner_json",
-			chunks:      []Chunk{{ChunkID: "c0", Text: "x"}},
+			chunks:      []kb.Chunk{{ChunkID: "c0", Text: "x"}},
 			mockStatus:  http.StatusOK,
 			mockBody:    ollamaGrapherResponse(`{broken`),
 			wantErr:     true,
@@ -179,12 +194,12 @@ func TestOllamaGrapher(t *testing.T) {
 		{
 			name:    "unreachable_url",
 			baseURL: "http://127.0.0.1:1",
-			chunks:  []Chunk{{ChunkID: "c0", Text: "x"}},
+			chunks:  []kb.Chunk{{ChunkID: "c0", Text: "x"}},
 			wantErr: true,
 		},
 		{
 			name:       "prompt_contains_chunk_text",
-			chunks:     []Chunk{{ChunkID: "c0", Text: "uniqueMarker"}},
+			chunks:     []kb.Chunk{{ChunkID: "c0", Text: "uniqueMarker"}},
 			mockStatus: http.StatusOK,
 			mockBody:   ollamaGrapherResponse(`{"entities":[],"edges":[]}`),
 			checkRequest: func(t *testing.T, req ollamaGenerateRequest) {
@@ -195,18 +210,18 @@ func TestOllamaGrapher(t *testing.T) {
 		},
 		{
 			name:       "request_model_field",
-			chunks:     []Chunk{{ChunkID: "c0", Text: "x"}},
+			chunks:     []kb.Chunk{{ChunkID: "c0", Text: "x"}},
 			mockStatus: http.StatusOK,
 			mockBody:   ollamaGrapherResponse(`{"entities":[],"edges":[]}`),
 			checkRequest: func(t *testing.T, req ollamaGenerateRequest) {
-				assert.Equal(t, defaultGrapherModel, req.Model)
+				assert.Equal(t, "gemma3:4b", req.Model)
 			},
 			wantEntityCount: 0,
 			wantEdgeCount:   0,
 		},
 		{
 			name:       "request_format_field",
-			chunks:     []Chunk{{ChunkID: "c0", Text: "x"}},
+			chunks:     []kb.Chunk{{ChunkID: "c0", Text: "x"}},
 			mockStatus: http.StatusOK,
 			mockBody:   ollamaGrapherResponse(`{"entities":[],"edges":[]}`),
 			checkRequest: func(t *testing.T, req ollamaGenerateRequest) {
@@ -217,7 +232,7 @@ func TestOllamaGrapher(t *testing.T) {
 		},
 		{
 			name:       "request_stream_false",
-			chunks:     []Chunk{{ChunkID: "c0", Text: "x"}},
+			chunks:     []kb.Chunk{{ChunkID: "c0", Text: "x"}},
 			mockStatus: http.StatusOK,
 			mockBody:   ollamaGrapherResponse(`{"entities":[],"edges":[]}`),
 			checkRequest: func(t *testing.T, req ollamaGenerateRequest) {
@@ -227,13 +242,19 @@ func TestOllamaGrapher(t *testing.T) {
 			wantEdgeCount:   0,
 		},
 		{
-			name:            "multi_chunk_aggregates",
-			chunks:          []Chunk{{DocID: "d", ChunkID: "d-chunk-000", Text: "a"}, {DocID: "d", ChunkID: "d-chunk-001", Text: "b"}},
-			mockStatus:      http.StatusOK,
-			mockBodies:      [][]byte{ollamaGrapherResponse(`{"entities":["Entity1"],"edges":[]}`), ollamaGrapherResponse(`{"entities":["Entity2"],"edges":[]}`)},
+			name: "multi_chunk_aggregates",
+			chunks: []kb.Chunk{
+				{DocID: "d", ChunkID: "d-chunk-000", Text: "a"},
+				{DocID: "d", ChunkID: "d-chunk-001", Text: "b"},
+			},
+			mockStatus: http.StatusOK,
+			mockBodies: [][]byte{
+				ollamaGrapherResponse(`{"entities":["Entity1"],"edges":[]}`),
+				ollamaGrapherResponse(`{"entities":["Entity2"],"edges":[]}`),
+			},
 			wantEntityCount: 2,
 			wantEdgeCount:   0,
-			checkResult: func(t *testing.T, result *GraphExtraction) {
+			checkResult: func(t *testing.T, result *kb.GraphExtraction) {
 				require.Len(t, result.Entities, 2)
 				names := []string{result.Entities[0].Name, result.Entities[1].Name}
 				chunkIDs := []string{result.Entities[0].ChunkID, result.Entities[1].ChunkID}
@@ -246,7 +267,7 @@ func TestOllamaGrapher(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			grapher := NewOllamaGrapher(tc.baseURL, "")
+			grapher := kb.NewOllamaGrapher(tc.baseURL, "")
 
 			if tc.baseURL == "" {
 				var mu sync.Mutex
@@ -285,7 +306,7 @@ func TestOllamaGrapher(t *testing.T) {
 					}
 				}))
 				t.Cleanup(server.Close)
-				grapher = NewOllamaGrapher(server.URL, "")
+				grapher = kb.NewOllamaGrapher(server.URL, "")
 			}
 
 			result, err := grapher.Extract(ctx, tc.chunks)

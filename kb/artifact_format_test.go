@@ -1,215 +1,58 @@
-package kb
+package kb_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
+	. "github.com/mikills/minnow/kb"
 	"github.com/stretchr/testify/require"
 )
 
-func TestResolveFormat(t *testing.T) {
-	formatA := &stubArtifactFormat{kind: "format-a"}
-	formatB := &stubArtifactFormat{kind: "format-b"}
-
-	tests := []struct {
-		name       string
-		opts       []KBOption
-		store      ManifestStore
-		kbID       string
-		wantFormat ArtifactFormat
-	}{
-		{
-			name: "default_when_missing",
-			opts: []KBOption{
-				WithFormats(formatB),
-				WithArtifactFormat(formatA),
-			},
-			store: &stubManifestStore{
-				docs: map[string]*ManifestDocument{
-					"existing": {
-						Manifest: SnapshotShardManifest{
-							KBID:       "existing",
-							FormatKind: formatB.Kind(),
-						},
-						Version: "v1",
-					},
-				},
-			},
-			kbID:       "missing",
-			wantFormat: formatB,
-		},
-		{
-			name: "manifest_kind_match",
-			opts: []KBOption{
-				WithFormats(formatB),
-				WithArtifactFormat(formatA),
-			},
-			store: &stubManifestStore{
-				docs: map[string]*ManifestDocument{
-					"existing": {
-						Manifest: SnapshotShardManifest{
-							KBID:       "existing",
-							FormatKind: formatB.Kind(),
-						},
-						Version: "v1",
-					},
-				},
-			},
-			kbID:       "existing",
-			wantFormat: formatB,
-		},
-		{
-			name: "artifact_then_formats",
-			opts: []KBOption{
-				WithArtifactFormat(formatA),
-				WithFormats(formatB),
-			},
-			kbID:       "missing",
-			wantFormat: formatA,
-		},
-		{
-			name: "formats_then_artifact",
-			opts: []KBOption{
-				WithFormats(formatB),
-				WithArtifactFormat(formatA),
-			},
-			kbID:       "missing",
-			wantFormat: formatB,
-		},
-		{
-			name: "wrapped_not_found",
-			opts: []KBOption{
-				WithArtifactFormat(formatA),
-			},
-			store: &stubManifestStore{
-				getErr: fmt.Errorf("wrapped: %w", ErrManifestNotFound),
-			},
-			kbID:       "missing",
-			wantFormat: formatA,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			opts := tc.opts
-			if tc.store != nil {
-				opts = append(opts, WithManifestStore(tc.store))
-			}
-
-			kb := NewKB(
-				&LocalBlobStore{Root: t.TempDir()},
-				t.TempDir(),
-				opts...,
-			)
-
-			resolved, err := kb.resolveFormat(context.Background(), tc.kbID)
-			require.NoError(t, err, "resolveFormat(%q)", tc.kbID)
-			require.Same(t, tc.wantFormat, resolved)
-		})
-	}
-}
-
 func TestArtifactFormatRegistration(t *testing.T) {
-	t.Run("resolve by kind returns error for unregistered format", func(t *testing.T) {
-		formatA := &stubArtifactFormat{kind: "format-a"}
-		kb := NewKB(
-			&LocalBlobStore{Root: t.TempDir()},
-			t.TempDir(),
-			WithArtifactFormat(formatA),
-		)
-
-		_, err := kb.resolveFormatByKind("format-b")
-		require.ErrorIs(t, err, ErrFormatNotRegistered)
-	})
-
-	t.Run("rejects nil format", func(t *testing.T) {
+	t.Run("rejects invalid formats", func(t *testing.T) {
 		kb := NewKB(&LocalBlobStore{Root: t.TempDir()}, t.TempDir())
-		err := kb.RegisterFormat(nil)
-		require.ErrorIs(t, err, ErrInvalidArtifactFormat)
-		require.False(t, kb.HasFormat(), "expected registry to remain empty")
+		require.ErrorIs(t, kb.RegisterFormat(nil), ErrInvalidArtifactFormat)
+		require.False(t, kb.HasFormat())
+		require.ErrorIs(t, kb.RegisterFormat(&stubArtifactFormat{}), ErrInvalidArtifactFormat)
+		require.False(t, kb.HasFormat())
 	})
 
-	t.Run("rejects format with empty kind", func(t *testing.T) {
-		kb := NewKB(&LocalBlobStore{Root: t.TempDir()}, t.TempDir())
-		err := kb.RegisterFormat(&stubArtifactFormat{})
-		require.ErrorIs(t, err, ErrInvalidArtifactFormat)
-		require.False(t, kb.HasFormat(), "expected registry to remain empty")
-	})
-
-	t.Run("option registration errors surface at resolve time", func(t *testing.T) {
-		kb := NewKB(
-			&LocalBlobStore{Root: t.TempDir()},
-			t.TempDir(),
-			WithArtifactFormat(nil),
+	t.Run("search uses registered artifact format", func(t *testing.T) {
+		format := &stubArtifactFormat{kind: "mock", resultID: "from-a"}
+		kb := NewKB(&LocalBlobStore{Root: t.TempDir()}, t.TempDir(), WithArtifactFormat(format))
+		seedManifest(
+			t,
+			context.Background(),
+			kb.BlobStore,
+			"kb-a",
+			[]SnapshotShardMetadata{{ShardID: "s1", Key: "snapshots/kb-a/s1.duckdb"}},
 		)
-		_, err := kb.resolveFormat(context.Background(), "missing")
-		require.ErrorIs(t, err, ErrInvalidArtifactFormat)
+		results, err := kb.Search(context.Background(), "kb-a", []float32{1}, &SearchOptions{TopK: 1})
+		require.NoError(t, err)
+		require.Equal(t, "from-a", results[0].ID)
 	})
 }
 
 type stubArtifactFormat struct {
-	kind string
+	kind     string
+	resultID string
 }
 
-func (f *stubArtifactFormat) Kind() string { return f.kind }
-
-func (f *stubArtifactFormat) Version() int { return 1 }
-
+func (f *stubArtifactFormat) Kind() string    { return f.kind }
+func (f *stubArtifactFormat) Version() int    { return 1 }
 func (f *stubArtifactFormat) FileExt() string { return ".stub" }
-
 func (f *stubArtifactFormat) BuildArtifacts(context.Context, string, string, int64) ([]SnapshotShardMetadata, error) {
 	return nil, nil
 }
-
 func (f *stubArtifactFormat) QueryRag(context.Context, RagQueryRequest) ([]ExpandedResult, error) {
-	return nil, nil
+	return []ExpandedResult{{ID: f.resultID}}, nil
 }
-
 func (f *stubArtifactFormat) QueryGraph(context.Context, GraphQueryRequest) ([]ExpandedResult, error) {
 	return nil, nil
 }
-
 func (f *stubArtifactFormat) Ingest(context.Context, IngestUpsertRequest) (IngestResult, error) {
 	return IngestResult{}, nil
 }
-
 func (f *stubArtifactFormat) Delete(context.Context, IngestDeleteRequest) (IngestResult, error) {
 	return IngestResult{}, nil
-}
-
-type stubManifestStore struct {
-	docs   map[string]*ManifestDocument
-	getErr error
-}
-
-func (s *stubManifestStore) Get(_ context.Context, kbID string) (*ManifestDocument, error) {
-	if s.getErr != nil {
-		return nil, s.getErr
-	}
-	if doc, ok := s.docs[kbID]; ok {
-		return doc, nil
-	}
-	return nil, ErrManifestNotFound
-}
-
-func (s *stubManifestStore) HeadVersion(context.Context, string) (string, error) {
-	return "", nil
-}
-
-func (s *stubManifestStore) UpsertIfMatch(_ context.Context, kbID string, manifest SnapshotShardManifest, expectedVersion string) (string, error) {
-	if s.docs == nil {
-		s.docs = make(map[string]*ManifestDocument)
-	}
-	version := expectedVersion
-	if version == "" {
-		version = "v1"
-	}
-	s.docs[kbID] = &ManifestDocument{Manifest: manifest, Version: version}
-	return version, nil
-}
-
-func (s *stubManifestStore) Delete(_ context.Context, kbID string) error {
-	delete(s.docs, kbID)
-	return nil
 }

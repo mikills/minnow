@@ -94,7 +94,11 @@ func ResolveDefaultPath() (string, error) {
 		return "", fmt.Errorf("stat config %q: %w", userPath, err)
 	}
 
-	return "", fmt.Errorf("read config: neither %q nor %q exists; set MINNOW_CONFIG or run `minnow config init dev-openai`", DefaultPath, userPath)
+	return "", fmt.Errorf(
+		"read config: neither %q nor %q exists; set MINNOW_CONFIG or run `minnow config init dev-openai`",
+		DefaultPath,
+		userPath,
+	)
 }
 
 // decodeStrict decodes YAML bytes into a Config, rejecting any unknown keys.
@@ -148,7 +152,12 @@ func (c *Config) resolvePaths(baseDir string) error {
 		resolved := filepath.Clean(filepath.Join(baseDir, *f.p))
 		base := filepath.Clean(baseDir)
 		if resolved != base && !strings.HasPrefix(resolved, base+string(filepath.Separator)) {
-			return fmt.Errorf("%s resolves outside the config's base directory (got %q, base %q)", f.name, resolved, base)
+			return fmt.Errorf(
+				"%s resolves outside the config's base directory (got %q, base %q)",
+				f.name,
+				resolved,
+				base,
+			)
 		}
 		*f.p = resolved
 	}

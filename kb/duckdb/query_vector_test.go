@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	kb "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/duckdb/internal/vectorplan"
 )
 
 // registerFormatOnHarness creates and registers a DuckDBArtifactFormat on the
@@ -437,7 +438,6 @@ func testKBTopKShardFanoutPlan(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			af := testDuckDBFormat(t, tc.policy)
 			manifest := &kb.SnapshotShardManifest{}
 			if len(tc.shards) > 0 {
 				manifest.Shards = append(manifest.Shards, tc.shards...)
@@ -451,7 +451,7 @@ func testKBTopKShardFanoutPlan(t *testing.T) {
 				}
 			}
 
-			plan := af.planShardFanout(kb.NormalizeShardingPolicy(tc.policy), manifest, tc.queryVec)
+			plan := vectorplan.PlanShardFanout(kb.NormalizeShardingPolicy(tc.policy), manifest, tc.queryVec)
 			if tc.assertExact {
 				assert.Equal(t, tc.wantFanout, plan.Fanout)
 				assert.Equal(t, tc.wantParallelism, plan.Parallelism)
@@ -500,7 +500,7 @@ func testKBTopKShardLocalMultiplier(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := shardLocalTopK(tc.k, kb.NormalizeShardingPolicy(tc.policy))
+			got := vectorplan.LocalTopK(tc.k, kb.NormalizeShardingPolicy(tc.policy))
 			assert.Equal(t, tc.want, got)
 		})
 	}
@@ -543,7 +543,7 @@ func testKBTopKShardMerge(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := mergeShardTopKResults(tc.input, tc.k)
+			got := vectorplan.MergeTopK(tc.input, tc.k)
 			require.Len(t, got, len(tc.wantIDs))
 			for i := range got {
 				assert.Equal(t, tc.wantIDs[i], got[i].ID)
@@ -592,7 +592,7 @@ func BenchmarkRankShardsForQuery(b *testing.B) {
 		b.Run("shards=%d", func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				_ = rankShardsForQuery(shards, qVec)
+				_ = vectorplan.RankShards(shards, qVec)
 			}
 		})
 	}
@@ -602,11 +602,11 @@ func BenchmarkRankShardsForQuery(b *testing.B) {
 // calls math.Sqrt even though ordering only needs squared distance.
 func BenchmarkShardRankScore(b *testing.B) {
 	const dim = 64
-	shard := buildBenchShards(1, dim)[0]
+	shards := buildBenchShards(1, dim)
 	qVec := buildBenchQueryVec(dim)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = shardRankScore(shard, qVec)
+		_ = vectorplan.RankShards(shards, qVec)
 	}
 }
 
@@ -631,7 +631,7 @@ func BenchmarkMergeShardTopKResults(b *testing.B) {
 			b.Run("shards=%d_results=%d", func(b *testing.B) {
 				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
-					_ = mergeShardTopKResults(shardResults, k)
+					_ = vectorplan.MergeTopK(shardResults, k)
 				}
 			})
 		}

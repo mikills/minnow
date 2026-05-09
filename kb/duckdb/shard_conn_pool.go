@@ -3,6 +3,7 @@ package duckdb
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -53,7 +54,9 @@ func (p *shardConnPool) GetOrOpen(ctx context.Context, localPath string,
 		existing.mu.Lock()
 		existing.lastUse = time.Now()
 		p.mu.Unlock()
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			slog.Default().Warn("close duplicate shard connection failed", "path", localPath, logKeyError, err)
+		}
 		return existing, nil
 	}
 	sc.mu.Lock()
@@ -78,7 +81,9 @@ func (p *shardConnPool) CloseByPrefix(prefix string) {
 
 	for _, sc := range toClose {
 		sc.mu.Lock()
-		_ = sc.db.Close()
+		if err := sc.db.Close(); err != nil {
+			slog.Default().Warn("close shard connection failed", logKeyError, err)
+		}
 		sc.mu.Unlock()
 	}
 }
@@ -92,7 +97,9 @@ func (p *shardConnPool) CloseAll() {
 
 	for _, sc := range entries {
 		sc.mu.Lock()
-		_ = sc.db.Close()
+		if err := sc.db.Close(); err != nil {
+			slog.Default().Warn("close shard connection failed", logKeyError, err)
+		}
 		sc.mu.Unlock()
 	}
 }

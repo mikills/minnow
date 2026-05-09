@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/mikills/minnow/kb/cacheevict"
 )
 
 // DeleteKnowledgeBase removes the manifest and known shard/cache/media state for
@@ -74,7 +76,7 @@ func (l *KB) deleteKBCache(kbID string) []error {
 	if err := os.RemoveAll(filepath.Join(l.CacheDir, kbID)); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("remove cache dir for %q: %w", kbID, err))
 	}
-	_, total := l.collectCacheEntries()
+	_, total := cacheevict.ScanEntries(l.CacheDir)
 	l.recordCacheBytesCurrent(total)
 	return errs
 }

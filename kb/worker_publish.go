@@ -67,38 +67,83 @@ func decodePublishWork(event *KBEvent) (publishWork, error) {
 
 func decodeEmbeddedPublishWork(event *KBEvent) (publishWork, error) {
 	if event.PayloadSchema != "" && event.PayloadSchema != "document.embedded/v1" {
-		return publishWork{}, fmt.Errorf("publish worker: expected document.embedded/v1 schema, got %q", event.PayloadSchema)
+		return publishWork{}, fmt.Errorf(
+			"publish worker: expected document.embedded/v1 schema, got %q",
+			event.PayloadSchema,
+		)
 	}
 	var payload DocumentEmbeddedPayload
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return publishWork{}, fmt.Errorf("decode payload: %w", err)
 	}
-	return publishWork{kbID: payload.KBID, docs: payload.Documents, fileResults: payload.FileResults, documentCount: payload.DocumentCount, opts: payload.Options, sourceEventID: payload.SourceEventID}, nil
+	return publishWork{
+		kbID:          payload.KBID,
+		docs:          payload.Documents,
+		fileResults:   payload.FileResults,
+		documentCount: payload.DocumentCount,
+		opts:          payload.Options,
+		sourceEventID: payload.SourceEventID,
+	}, nil
 }
 
 func decodeGraphPublishWork(event *KBEvent) (publishWork, error) {
 	if event.PayloadSchema != "" && event.PayloadSchema != "document.graph_extracted/v1" {
-		return publishWork{}, fmt.Errorf("publish worker: expected document.graph_extracted/v1 schema, got %q", event.PayloadSchema)
+		return publishWork{}, fmt.Errorf(
+			"publish worker: expected document.graph_extracted/v1 schema, got %q",
+			event.PayloadSchema,
+		)
 	}
 	var payload DocumentGraphExtractedPayload
 	if err := json.Unmarshal(event.Payload, &payload); err != nil {
 		return publishWork{}, fmt.Errorf("decode payload: %w", err)
 	}
-	return publishWork{kbID: payload.KBID, docs: payload.Documents, fileResults: payload.FileResults, documentCount: payload.DocumentCount, opts: payload.Options, sourceEventID: payload.SourceEventID, graphResult: payload.GraphResult}, nil
+	return publishWork{
+		kbID:          payload.KBID,
+		docs:          payload.Documents,
+		fileResults:   payload.FileResults,
+		documentCount: payload.DocumentCount,
+		opts:          payload.Options,
+		sourceEventID: payload.SourceEventID,
+		graphResult:   payload.GraphResult,
+	}, nil
 }
 
 func embeddedToPlainDocuments(docs []EmbeddedDocument) []Document {
 	plainDocs := make([]Document, 0, len(docs))
 	for _, doc := range docs {
-		plainDocs = append(plainDocs, Document{ID: doc.ID, Text: doc.Text, MediaIDs: doc.MediaIDs, MediaRefs: doc.MediaRefs, Metadata: doc.Metadata})
+		plainDocs = append(
+			plainDocs,
+			Document{
+				ID:        doc.ID,
+				Text:      doc.Text,
+				MediaIDs:  doc.MediaIDs,
+				MediaRefs: doc.MediaRefs,
+				Metadata:  doc.Metadata,
+			},
+		)
 	}
 	return plainDocs
 }
 
 func (w *DocumentPublishWorker) publishedResult(event *KBEvent, work publishWork, plainDocs []Document) WorkerResult {
 	mediaIDs := collectMediaIDs(plainDocs)
-	pubPayload, _ := json.Marshal(KBPublishedPayload{KBID: work.kbID, DocumentCount: work.documentCount, ChunkCount: len(plainDocs), MediaIDs: mediaIDs, FileResults: work.fileResults, SourceEventID: work.sourceEventID})
-	pub := w.KB.newChildPendingEvent(event, EventKBPublished, "kb.published/v1", work.sourceEventID+"|kb.published", pubPayload)
+	pubPayload, _ := json.Marshal(
+		KBPublishedPayload{
+			KBID:          work.kbID,
+			DocumentCount: work.documentCount,
+			ChunkCount:    len(plainDocs),
+			MediaIDs:      mediaIDs,
+			FileResults:   work.fileResults,
+			SourceEventID: work.sourceEventID,
+		},
+	)
+	pub := w.KB.newChildPendingEvent(
+		event,
+		EventKBPublished,
+		"kb.published/v1",
+		work.sourceEventID+"|kb.published",
+		pubPayload,
+	)
 	return WorkerResult{FollowUps: []KBEvent{pub}, Commit: func(ctx context.Context) error {
 		if err := w.KB.PromoteReferencedMedia(ctx, work.kbID, mediaIDs); err != nil {
 			return fmt.Errorf("promote media: %w", err)

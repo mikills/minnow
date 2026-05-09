@@ -9,20 +9,20 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mikills/minnow/kb/blobstore"
+	"github.com/mikills/minnow/kb/graphbuild"
+	"github.com/mikills/minnow/kb/metrics"
 )
 
-// Embedder generates embeddings for text inputs.
 type Embedder interface {
 	Embed(ctx context.Context, input string) ([]float32, error)
 }
 
-// BatchEmbedder can embed several inputs in one provider call. Embedders that
-// do not implement it still work through Embed.
 type BatchEmbedder interface {
 	EmbedBatch(ctx context.Context, inputs []string) ([][]float32, error)
 }
 
-// QueryResult represents a single vector search result.
 type QueryResult struct {
 	ID        string          `json:"id"`       // Document ID
 	Content   string          `json:"content"`  // Document text stored at ingestion time
@@ -30,11 +30,6 @@ type QueryResult struct {
 	MediaRefs []ChunkMediaRef `json:"media_refs,omitempty"`
 }
 
-// Document is a source document for ingestion pipelines. MediaIDs carries
-// simple doc-level media references (synthesised into ChunkMediaRef rows
-// when persisted). MediaRefs carries rich chunk-level refs (role/label/
-// locator) when the ingest caller has them. when both are present MediaRefs
-// wins.
 type Document struct {
 	ID        string
 	Text      string
@@ -43,23 +38,12 @@ type Document struct {
 	Metadata  map[string]any
 }
 
-// Chunk is a text segment with provenance.
-type Chunk struct {
-	DocID     string
-	ChunkID   string
-	Text      string
-	Start     int
-	End       int
-	MediaRefs []ChunkMediaRef // optional and nil for text-only chunks
-}
+type Chunk = graphbuild.Chunk
 
-// Chunker produces chunks from raw text.
 type Chunker interface {
 	Chunk(ctx context.Context, docID string, text string) ([]Chunk, error)
 }
 
-// KB is the core knowledge base orchestrator for loading, querying,
-// mutating, uploading, and maintaining HNSW indices.
 type KB struct {
 	BlobStore     BlobStore
 	ManifestStore ManifestStore
@@ -74,27 +58,15 @@ type KB struct {
 	MaxCacheBytes     int64
 	CacheEntryTTL     time.Duration
 
-	// Clock drives all time-based behaviour inside the KB (event timestamps,
-	// GC cutoffs, TTL comparisons). Defaults to RealClock. substitute a
-	// FakeClock for tests and the simulation harness.
 	Clock Clock
 
-	// EventStore and EventInbox back the event-driven ingest pipeline. Both
-	// are optional. when nil the scheduler skips the related reaper/cleanup
-	// jobs.
 	EventStore EventStore
 	EventInbox EventInbox
 
-	// MediaStore holds media metadata. Optional. when nil the media upload
-	// path and media-gc sweeps are no-ops.
 	MediaStore MediaStore
 
-	// MediaGC tunes media GC timings. Zero fields fall back to package
-	// defaults.
 	MediaGC MediaGCConfig
 
-	// MediaContentTypeAllowlist, if non-empty, restricts accepted upload
-	// content types. Entries may end with "*" for prefix matching.
 	MediaContentTypeAllowlist []string
 
 	cacheBytesCurrent        int64
@@ -102,7 +74,7 @@ type KB struct {
 	cacheEvictionsSizeTotal  uint64
 	cacheEvictionErrorsTotal uint64
 	cacheBudgetExceededTotal uint64
-	shardMetricsByKB         map[string]shardMetrics
+	shardMetrics             *metrics.ShardRegistry
 
 	formatMu          sync.RWMutex
 	formatRegistry    map[string]ArtifactFormat
@@ -114,26 +86,20 @@ type KB struct {
 	shardGC []delayedShardGCEntry
 }
 
-// KBOption configures KB instances.
 type KBOption func(*KB)
 
-// WithEmbedder sets the embedder for generating document embeddings.
 func WithEmbedder(embedder Embedder) KBOption {
 	return func(kb *KB) {
 		kb.Embedder = embedder
 	}
 }
 
-// WithManifestStore sets a custom ManifestStore implementation.
 func WithManifestStore(store ManifestStore) KBOption {
 	return func(kb *KB) {
 		kb.ManifestStore = store
 	}
 }
 
-// WithArtifactFormat registers a single artifact format.
-// When multiple formats are registered, the first registered format becomes the
-// default for new KBs. call SetDefaultFormatKind after construction to override.
 func WithArtifactFormat(format ArtifactFormat) KBOption {
 	return func(kb *KB) {
 		if err := kb.RegisterFormat(format); err != nil {
@@ -142,9 +108,6 @@ func WithArtifactFormat(format ArtifactFormat) KBOption {
 	}
 }
 
-// WithFormats registers multiple artifact formats in order.
-// When multiple formats are registered, the first registered format becomes the
-// default for new KBs. call SetDefaultFormatKind after construction to override.
 func WithFormats(formats ...ArtifactFormat) KBOption {
 	return func(kb *KB) {
 		for _, f := range formats {
@@ -155,14 +118,12 @@ func WithFormats(formats ...ArtifactFormat) KBOption {
 	}
 }
 
-// WithGraphBuilder sets the graph builder for RAG functionality.
 func WithGraphBuilder(builder *GraphBuilder) KBOption {
 	return func(kb *KB) {
 		kb.GraphBuilder = builder
 	}
 }
 
-// WithWriteLeaseManager sets the write lease manager for distributed coordination.
 func WithWriteLeaseManager(mgr WriteLeaseManager) KBOption {
 	return func(kb *KB) {
 		if mgr == nil {
@@ -173,7 +134,6 @@ func WithWriteLeaseManager(mgr WriteLeaseManager) KBOption {
 	}
 }
 
-// WithWriteLeaseTTL sets the TTL for write leases.
 func WithWriteLeaseTTL(ttl time.Duration) KBOption {
 	return func(kb *KB) {
 		if ttl <= 0 {
@@ -184,14 +144,12 @@ func WithWriteLeaseTTL(ttl time.Duration) KBOption {
 	}
 }
 
-// WithShardingPolicy sets sharding/query/compaction policy thresholds.
 func WithShardingPolicy(policy ShardingPolicy) KBOption {
 	return func(kb *KB) {
 		kb.ShardingPolicy = NormalizeShardingPolicy(policy)
 	}
 }
 
-// WithCompactionEnabled overrides compaction enablement in sharding policy.
 func WithCompactionEnabled(enabled bool) KBOption {
 	return func(kb *KB) {
 		policy := kb.ShardingPolicy
@@ -201,51 +159,38 @@ func WithCompactionEnabled(enabled bool) KBOption {
 	}
 }
 
-// WithMaxCacheBytes configures on-disk cache size limit for snapshots.
 func WithMaxCacheBytes(max int64) KBOption {
 	return func(kb *KB) {
 		kb.MaxCacheBytes = max
 	}
 }
 
-// WithCacheEntryTTL configures time-based eviction for cached KB snapshots.
 func WithCacheEntryTTL(ttl time.Duration) KBOption {
 	return func(kb *KB) {
 		kb.CacheEntryTTL = ttl
 	}
 }
 
-// WithEventStore wires an EventStore into the KB, enabling the event-driven
-// ingest pipeline.
 func WithEventStore(store EventStore) KBOption {
 	return func(kb *KB) { kb.EventStore = store }
 }
 
-// WithEventInbox wires an EventInbox into the KB, enabling worker dedup.
 func WithEventInbox(inbox EventInbox) KBOption {
 	return func(kb *KB) { kb.EventInbox = inbox }
 }
 
-// WithMediaStore wires a MediaStore into the KB, enabling media uploads.
 func WithMediaStore(store MediaStore) KBOption {
 	return func(kb *KB) { kb.MediaStore = store }
 }
 
-// WithMediaGCConfig overrides the pending/tombstone/upload-completion
-// timings for media GC.
 func WithMediaGCConfig(cfg MediaGCConfig) KBOption {
 	return func(kb *KB) { kb.MediaGC = cfg }
 }
 
-// WithMediaContentTypeAllowlist sets the upload content-type allowlist.
 func WithMediaContentTypeAllowlist(list []string) KBOption {
 	return func(kb *KB) { kb.MediaContentTypeAllowlist = list }
 }
 
-// NewKB creates a new KB instance with the given blob store and cache directory.
-// Callers must provide at least one ArtifactFormat via WithArtifactFormat,
-// WithFormats, or RegisterFormat. without one, query/ingest/delete
-// operations will return ErrArtifactFormatNotConfigured.
 func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 	kb := &KB{
 		BlobStore:         bs,
@@ -256,7 +201,7 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 		Clock:             RealClock,
 		formatRegistry:    make(map[string]ArtifactFormat),
 		locks:             make(map[string]*sync.Mutex),
-		shardMetricsByKB:  make(map[string]shardMetrics),
+		shardMetrics:      metrics.NewShardRegistry(),
 	}
 
 	for _, opt := range opts {
@@ -276,17 +221,10 @@ func NewKB(bs BlobStore, cacheDir string, opts ...KBOption) *KB {
 	return kb
 }
 
-// clockAware is implemented by any store that can accept a Clock. All
-// in-repo store implementations satisfy it (in-memory, Mongo, Redis, S3).
-// External stores can participate by exposing the same method.
 type clockAware interface {
 	SetClock(Clock)
 }
 
-// propagateClockToDefaults threads the KB's Clock onto every attached store
-// that implements clockAware, so WithClock is honoured end-to-end regardless
-// of whether the caller kept the default in-memory stores or injected their
-// own (Mongo, Redis, S3, etc.).
 func (l *KB) propagateClockToDefaults() {
 	if l.Clock == nil {
 		return
@@ -308,7 +246,6 @@ func (l *KB) propagateClockToDefaults() {
 	}
 }
 
-// WithClock overrides the KB's Clock. Use FakeClock in tests and simulation.
 func WithClock(c Clock) KBOption {
 	return func(kb *KB) { kb.Clock = c }
 }
@@ -335,7 +272,6 @@ func (l *KB) SetWriteLeaseTTL(ttl time.Duration) {
 
 var cacheMutationRootContext = context.Background()
 
-// SetMaxCacheBytes updates max cache bytes for local snapshot eviction.
 func (l *KB) SetMaxCacheBytes(max int64) {
 	l.mu.Lock()
 	l.MaxCacheBytes = max
@@ -343,11 +279,10 @@ func (l *KB) SetMaxCacheBytes(max int64) {
 	ctx, cancel := context.WithTimeout(cacheMutationRootContext, defaultCacheEvictionRetryWindow)
 	defer cancel()
 	if err := l.evictCacheIfNeeded(ctx, ""); err != nil {
-		slog.Default().Warn("cache eviction after max bytes update failed", "error", err)
+		slog.Default().Warn("cache eviction after max bytes update failed", logKeyError, err)
 	}
 }
 
-// SetCacheEntryTTL updates TTL for time-based cache eviction.
 func (l *KB) SetCacheEntryTTL(ttl time.Duration) {
 	l.mu.Lock()
 	l.CacheEntryTTL = ttl
@@ -355,7 +290,7 @@ func (l *KB) SetCacheEntryTTL(ttl time.Duration) {
 	ctx, cancel := context.WithTimeout(cacheMutationRootContext, defaultCacheEvictionRetryWindow)
 	defer cancel()
 	if err := l.evictCacheIfNeeded(ctx, ""); err != nil {
-		slog.Default().Warn("cache eviction after ttl update failed", "error", err)
+		slog.Default().Warn("cache eviction after ttl update failed", logKeyError, err)
 	}
 }
 
@@ -375,12 +310,10 @@ func (l *KB) LockFor(kbID string) *sync.Mutex {
 	return l.locks[kbID]
 }
 
-// EvictCacheIfNeeded runs cache eviction, protecting the given KB ID.
 func (l *KB) EvictCacheIfNeeded(ctx context.Context, protectKBID string) error {
 	return l.evictCacheIfNeeded(ctx, protectKBID)
 }
 
-// Close releases resources held by the KB, including pooled shard connections.
 func (l *KB) Close() {
 	for _, format := range l.registeredFormatsSnapshot() {
 		if c, ok := format.(io.Closer); ok {
@@ -389,9 +322,6 @@ func (l *KB) Close() {
 	}
 }
 
-// RegisterFormat registers an artifact format under its Kind().
-// The first registered format becomes the default for new KBs.
-// Returns ErrInvalidArtifactFormat when format is nil or Kind() is empty.
 func (l *KB) RegisterFormat(format ArtifactFormat) error {
 	if format == nil {
 		return fmt.Errorf("%w: nil format", ErrInvalidArtifactFormat)
@@ -413,7 +343,6 @@ func (l *KB) RegisterFormat(format ArtifactFormat) error {
 	return nil
 }
 
-// SetDefaultFormatKind changes which registered format is used for new KBs.
 func (l *KB) SetDefaultFormatKind(kind string) error {
 	l.formatMu.Lock()
 	defer l.formatMu.Unlock()
@@ -427,14 +356,12 @@ func (l *KB) SetDefaultFormatKind(kind string) error {
 	return nil
 }
 
-// HasFormat returns true if at least one artifact format is registered.
 func (l *KB) HasFormat() bool {
 	l.formatMu.RLock()
 	defer l.formatMu.RUnlock()
 	return len(l.formatRegistry) > 0
 }
 
-// FormatByKind returns a registered format by kind, or nil if not found.
 func (l *KB) FormatByKind(kind string) ArtifactFormat {
 	l.formatMu.RLock()
 	defer l.formatMu.RUnlock()
@@ -446,7 +373,6 @@ func (l *KB) FormatByKind(kind string) ArtifactFormat {
 	return nil
 }
 
-// DefaultFormat returns the default registered artifact format, or nil if none.
 func (l *KB) DefaultFormat() ArtifactFormat {
 	l.formatMu.RLock()
 	defer l.formatMu.RUnlock()
@@ -458,8 +384,6 @@ func (l *KB) DefaultFormat() ArtifactFormat {
 	return nil
 }
 
-// resolveFormat returns the ArtifactFormat for a given kbID by reading
-// the manifest's format_kind. Falls back to the default for new KBs.
 func (l *KB) resolveFormat(ctx context.Context, kbID string) (ArtifactFormat, error) {
 	if err := l.getInitErr(); err != nil {
 		return nil, err
@@ -467,7 +391,6 @@ func (l *KB) resolveFormat(ctx context.Context, kbID string) (ArtifactFormat, er
 	doc, err := l.ManifestStore.Get(ctx, kbID)
 	if err != nil {
 		if errors.Is(err, ErrManifestNotFound) {
-			// New KB: use default format
 			if format := l.DefaultFormat(); format != nil {
 				return format, nil
 			}
@@ -501,7 +424,6 @@ func (l *KB) getInitErr() error {
 	return l.initErr
 }
 
-// resolveFormatByKind looks up a format by kind string without reading the manifest.
 func (l *KB) resolveFormatByKind(kind string) (ArtifactFormat, error) {
 	l.formatMu.RLock()
 	defer l.formatMu.RUnlock()
@@ -529,7 +451,6 @@ func (l *KB) registeredFormatsSnapshot() []ArtifactFormat {
 	return formats
 }
 
-// Embed returns an embedding for input using the configured Embedder.
 func (k *KB) Embed(ctx context.Context, input string) ([]float32, error) {
 	if k.Embedder == nil {
 		return nil, fmt.Errorf("embedder is not configured")
@@ -542,14 +463,10 @@ func (k *KB) Embed(ctx context.Context, input string) ([]float32, error) {
 	return k.Embedder.Embed(ctx, input)
 }
 
-// Compactor is an optional interface that ArtifactFormat implementations can
-// satisfy to support background compaction of sharded data.
 type Compactor interface {
 	CompactIfNeeded(ctx context.Context, kbID string) (*CompactionPublishResult, error)
 }
 
-// CompactIfNeeded triggers compaction for the given KB if the resolved format
-// supports it. Returns a zero result when the format does not implement Compactor.
 func (l *KB) CompactIfNeeded(ctx context.Context, kbID string) (*CompactionPublishResult, error) {
 	format, err := l.resolveFormat(ctx, kbID)
 	if err != nil {
@@ -560,3 +477,37 @@ func (l *KB) CompactIfNeeded(ctx context.Context, kbID string) (*CompactionPubli
 	}
 	return &CompactionPublishResult{}, nil
 }
+
+type (
+	AppMetrics       = metrics.App
+	RouteStats       = metrics.RouteStats
+	EmbedStats       = metrics.EmbedStats
+	QueryStats       = metrics.QueryStats
+	IngestStats      = metrics.IngestStats
+	WorkerStats      = metrics.WorkerStats
+	MediaUploadStats = metrics.MediaUploadStats
+	RecentRequest    = metrics.RecentRequest
+	RuntimeStats     = metrics.RuntimeStats
+	MetricsSnapshot  = metrics.MetricsSnapshot
+	NoopAppMetrics   = metrics.NoopApp
+	InMemAppMetrics  = metrics.InMemApp
+)
+
+var NewInMemAppMetrics = metrics.NewInMemApp
+
+type CompactionPublishResult struct {
+	Performed          bool
+	ReplacedShards     []SnapshotShardMetadata
+	ReplacementShards  []SnapshotShardMetadata
+	ManifestVersionOld string
+	ManifestVersionNew string
+}
+
+type (
+	BlobObjectInfo = blobstore.ObjectInfo
+	BlobStore      = blobstore.Store
+	LocalBlobStore = blobstore.LocalBlobStore
+	S3BlobStore    = blobstore.S3BlobStore
+)
+
+var NewS3BlobStore = blobstore.NewS3BlobStore

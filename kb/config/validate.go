@@ -206,7 +206,10 @@ func (c *Config) validateEmbedder() error {
 	case "openai_compatible":
 		return validateOpenAICompatibleEmbedder(c.Embedder.OpenAICompatible)
 	default:
-		return fmt.Errorf("embedder.provider %q is not supported (expected \"ollama\", \"local\", or \"openai_compatible\")", c.Embedder.Provider)
+		return fmt.Errorf(
+			"embedder.provider %q is not supported (expected \"ollama\", \"local\", or \"openai_compatible\")",
+			c.Embedder.Provider,
+		)
 	}
 }
 
@@ -229,7 +232,9 @@ func validateLocalEmbedder(cfg *LocalEmbedderConfig) error {
 
 func validateOpenAICompatibleEmbedder(cfg *OpenAICompatibleEmbedderConfig) error {
 	if cfg == nil {
-		return errors.New("embedder.openai_compatible block is required when embedder.provider is \"openai_compatible\"")
+		return errors.New(
+			"embedder.openai_compatible block is required when embedder.provider is \"openai_compatible\"",
+		)
 	}
 	if err := firstErr(
 		requireNonEmptyString("embedder.openai_compatible.base_url", cfg.BaseURL),
@@ -437,7 +442,13 @@ func validateResolvedShardingFanout(cfg ShardingConfig, resolved kb.ShardingPoli
 		return fmt.Errorf("sharding.query_shard_fanout_adaptive_max must be <= %d", maxSafeFanout)
 	}
 	if resolved.QueryShardFanoutAdaptiveMax < resolved.QueryShardFanout {
-		return fmt.Errorf("sharding: query_shard_fanout_adaptive_max (%d, %s) must be >= query_shard_fanout (%d, %s)", resolved.QueryShardFanoutAdaptiveMax, provenance(cfg.QueryShardFanoutAdaptiveMax != nil), resolved.QueryShardFanout, provenance(cfg.QueryShardFanout != nil))
+		return fmt.Errorf(
+			"sharding: query_shard_fanout_adaptive_max (%d, %s) must be >= query_shard_fanout (%d, %s)",
+			resolved.QueryShardFanoutAdaptiveMax,
+			provenance(cfg.QueryShardFanoutAdaptiveMax != nil),
+			resolved.QueryShardFanout,
+			provenance(cfg.QueryShardFanout != nil),
+		)
 	}
 	if resolved.QueryShardLocalTopKMult > maxTopKMult {
 		return fmt.Errorf("sharding.query_shard_local_topk_multiplier must be <= %d", maxTopKMult)

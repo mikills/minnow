@@ -101,7 +101,9 @@ func runMCPSubcommand(baseCtx context.Context, args []string) int {
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.HTTPShutdownTimeout())
 		defer cancel()
-		_ = rt.Stop(shutdownCtx)
+		if err := rt.Stop(shutdownCtx); err != nil {
+			logger.Warn("runtime stop failed", "error", err)
+		}
 	}()
 	server := appcmd.NewMCPServerFromKB(rt.KB(), mcpCfg, logger)
 	if err := mcpserver.RunStdio(ctx, server); err != nil {
@@ -136,7 +138,9 @@ func runServer(baseCtx context.Context, logger *slog.Logger) error {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.HTTPShutdownTimeout())
 		defer cancel()
-		_ = rt.Stop(shutdownCtx)
+		if err := rt.Stop(shutdownCtx); err != nil {
+			logger.Warn("runtime stop failed", "error", err)
+		}
 	}()
 
 	return rt.Wait()
@@ -388,7 +392,7 @@ func runIndexRefresh(ctx context.Context, args []string, logger *slog.Logger) in
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
-	defer func() { _ = rt.Stop(context.WithoutCancel(ctx)) }()
+	defer stopRuntimeForCLI(ctx, logger, rt)
 
 	result, err := rt.KB().IndexCodebase(ctx, codeIndexOptionsForCLI(cfg, opts))
 	if err != nil {
@@ -402,6 +406,12 @@ func runIndexRefresh(ctx context.Context, args []string, logger *slog.Logger) in
 		}
 	}
 	return 0
+}
+
+func stopRuntimeForCLI(ctx context.Context, logger *slog.Logger, rt *configruntime.Runtime) {
+	if err := rt.Stop(context.WithoutCancel(ctx)); err != nil {
+		logger.Warn("runtime stop failed", "error", err)
+	}
 }
 
 func codeIndexOptionsForCLI(cfg *config.Config, opts indexCLIOptions) kb.CodeIndexOptions {
@@ -464,7 +474,7 @@ func runIndexStatus(ctx context.Context, args []string, logger *slog.Logger) int
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
-	defer func() { _ = rt.Stop(context.WithoutCancel(ctx)) }()
+	defer stopRuntimeForCLI(ctx, logger, rt)
 	selection, err := kb.ResolveCodeIndexSelection(opts.root, opts.indexKey, opts.kbID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "resolve code index: %v\n", err)
@@ -483,7 +493,10 @@ func runIndexStatus(ctx context.Context, args []string, logger *slog.Logger) int
 
 func runIndexHooks(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: minnow index hooks <install|uninstall|status> [--kb id] [--index-key key] [--root path] [--binary minnow] [--force]")
+		fmt.Fprintln(
+			os.Stderr,
+			"usage: minnow index hooks <install|uninstall|status> [--kb id] [--index-key key] [--root path] [--binary minnow] [--force]",
+		)
 		return 2
 	}
 	action := args[0]
@@ -500,7 +513,16 @@ func runIndexHooks(ctx context.Context, args []string) int {
 			fmt.Fprintf(os.Stderr, "resolve code index: %v\n", selErr)
 			return 1
 		}
-		status, err = kb.InstallCodeIndexHooks(ctx, kb.CodeHookOptions{Root: opts.root, KBID: selection.KBID, IndexKey: selection.IndexKey, Binary: opts.binary, Force: opts.force})
+		status, err = kb.InstallCodeIndexHooks(
+			ctx,
+			kb.CodeHookOptions{
+				Root:     opts.root,
+				KBID:     selection.KBID,
+				IndexKey: selection.IndexKey,
+				Binary:   opts.binary,
+				Force:    opts.force,
+			},
+		)
 	case "uninstall":
 		status, err = kb.UninstallCodeIndexHooks(ctx, opts.root)
 	case "status":

@@ -20,54 +20,26 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
+
+	"github.com/mikills/minnow/kb/manifest"
 )
 
-const (
-	DefaultSnapshotShardSize   int64  = 16 * 1024 * 1024
-	ShardManifestLayoutDuckDBs string = "duckdb_shard_files"
-)
+const DefaultSnapshotShardSize int64 = 16 * 1024 * 1024
 
-// SnapshotShardMetadata describes one logical shard file in the manifest.
-type SnapshotShardMetadata struct {
-	ShardID        string    `json:"shard_id"`
-	Key            string    `json:"key"`
-	Version        string    `json:"version,omitempty"`
-	SizeBytes      int64     `json:"size_bytes"`
-	VectorRows     int64     `json:"vector_rows"`
-	CreatedAt      time.Time `json:"created_at"`
-	SealedAt       time.Time `json:"sealed_at,omitempty"`
-	TombstoneRatio float64   `json:"tombstone_ratio"`
-	GraphAvailable bool      `json:"graph_available"`
-	Centroid       []float32 `json:"centroid,omitempty"`
-	SHA256         string    `json:"sha256,omitempty"`
-	// MediaIDs lists media object ids referenced by chunks in this shard.
-	// Empty for shards that predate the media subsystem. readers must treat
-	// a nil slice as "no refs" rather than "unknown".
-	MediaIDs []string `json:"media_ids,omitempty"`
-}
+const ShardManifestLayoutDuckDBs = manifest.ShardManifestLayoutDuckDBs
 
-// SnapshotShardManifest describes a sharded snapshot using one manifest key.
-type SnapshotShardManifest struct {
-	SchemaVersion  int                     `json:"schema_version"`
-	Layout         string                  `json:"layout,omitempty"`
-	FormatKind     string                  `json:"format_kind,omitempty"`
-	FormatVersion  int                     `json:"format_version,omitempty"`
-	KBID           string                  `json:"kb_id"`
-	CreatedAt      time.Time               `json:"created_at"`
-	TotalSizeBytes int64                   `json:"total_size_bytes"`
-	Shards         []SnapshotShardMetadata `json:"shards"`
-}
+type SnapshotShardMetadata = manifest.ShardMetadata
+type SnapshotShardManifest = manifest.ShardManifest
 
-// ShardManifestKey returns the blob key for a KB's shard manifest.
-// The ".duckdb" segment is a historical artifact name. the key is format-agnostic.
-func ShardManifestKey(kbID string) string {
-	return kbID + ".duckdb.manifest.json"
-}
+func ShardManifestKey(kbID string) string { return manifest.ShardManifestKey(kbID) }
 
 // UploadSnapshotShardedIfMatch uploads a DB snapshot as immutable shard objects
 // and updates the manifest with optimistic version matching.
-func (l *KB) UploadSnapshotShardedIfMatch(ctx context.Context, kbID, localDBPath, expectedManifestVersion string, partSize int64) (*BlobObjectInfo, error) {
+func (l *KB) UploadSnapshotShardedIfMatch(
+	ctx context.Context,
+	kbID, localDBPath, expectedManifestVersion string,
+	partSize int64,
+) (*BlobObjectInfo, error) {
 	if err := validateSnapshotShardUpload(kbID, localDBPath); err != nil {
 		return nil, err
 	}
@@ -80,7 +52,7 @@ func (l *KB) UploadSnapshotShardedIfMatch(ctx context.Context, kbID, localDBPath
 
 	defer func() {
 		if err := leaseManager.Release(context.WithoutCancel(ctx), lease); err != nil {
-			slog.Default().Warn("snapshot shard lease release failed", "kb_id", kbID, "error", err)
+			slog.Default().Warn("snapshot shard lease release failed", logKeyKBID, kbID, logKeyError, err)
 		}
 	}()
 
@@ -125,8 +97,21 @@ func normalizeSnapshotPartSize(partSize int64) int64 {
 	return partSize
 }
 
-func (l *KB) snapshotShardManifest(kbID string, format ArtifactFormat, artifacts []SnapshotShardMetadata) SnapshotShardManifest {
-	return SnapshotShardManifest{SchemaVersion: 1, Layout: ShardManifestLayoutDuckDBs, FormatKind: format.Kind(), FormatVersion: format.Version(), KBID: kbID, CreatedAt: l.Clock.Now(), TotalSizeBytes: snapshotShardTotalSize(artifacts), Shards: artifacts}
+func (l *KB) snapshotShardManifest(
+	kbID string,
+	format ArtifactFormat,
+	artifacts []SnapshotShardMetadata,
+) SnapshotShardManifest {
+	return SnapshotShardManifest{
+		SchemaVersion:  1,
+		Layout:         ShardManifestLayoutDuckDBs,
+		FormatKind:     format.Kind(),
+		FormatVersion:  format.Version(),
+		KBID:           kbID,
+		CreatedAt:      l.Clock.Now(),
+		TotalSizeBytes: snapshotShardTotalSize(artifacts),
+		Shards:         artifacts,
+	}
 }
 
 func snapshotShardTotalSize(artifacts []SnapshotShardMetadata) int64 {

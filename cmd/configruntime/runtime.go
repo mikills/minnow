@@ -147,8 +147,20 @@ func graphKBOptions(cfg *config.Config, logger *slog.Logger) []kb.KBOption {
 	}
 	grapher := kb.NewOllamaGrapher(cfg.Graph.URL, cfg.Graph.Model)
 	grapher.MaxParallel = cfg.GraphParallelism()
-	logger.Info("configured ollama grapher", "url", cfg.Graph.URL, "model", cfg.Graph.Model, "parallelism", cfg.GraphParallelism())
-	return []kb.KBOption{kb.WithGraphBuilder(&kb.GraphBuilder{Chunker: &kb.TextChunker{ChunkSize: kb.DefaultTextChunkSize}, Grapher: grapher})}
+	logger.Info(
+		"configured ollama grapher",
+		"url",
+		cfg.Graph.URL,
+		"model",
+		cfg.Graph.Model,
+		"parallelism",
+		cfg.GraphParallelism(),
+	)
+	return []kb.KBOption{
+		kb.WithGraphBuilder(
+			&kb.GraphBuilder{Chunker: &kb.TextChunker{ChunkSize: kb.DefaultTextChunkSize}, Grapher: grapher},
+		),
+	}
 }
 
 func fallbackKBOptions(cfg *config.Config, mongoOpts []kb.KBOption) []kb.KBOption {
@@ -166,7 +178,15 @@ func fallbackKBOptions(cfg *config.Config, mongoOpts []kb.KBOption) []kb.KBOptio
 }
 
 func appConfigFromConfig(cfg *config.Config, logger *slog.Logger) appcmd.AppConfig {
-	return appcmd.AppConfig{Address: cfg.HTTP.Address, ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout(), ShutdownTimeout: cfg.HTTPShutdownTimeout(), CacheEvictionInterval: cfg.CacheEvictInterval(), MaxMediaBytes: cfg.Media.MaxBytes, MCP: mcpConfigFromConfig(cfg), Logger: logger}
+	return appcmd.AppConfig{
+		Address:               cfg.HTTP.Address,
+		ReadHeaderTimeout:     cfg.HTTPReadHeaderTimeout(),
+		ShutdownTimeout:       cfg.HTTPShutdownTimeout(),
+		CacheEvictionInterval: cfg.CacheEvictInterval(),
+		MaxMediaBytes:         cfg.Media.MaxBytes,
+		MCP:                   mcpConfigFromConfig(cfg),
+		Logger:                logger,
+	}
 }
 
 func (r *Runtime) wireSchedulerAndWorkers(cfg *config.Config) error {
@@ -330,7 +350,15 @@ func buildEmbedder(cfg *config.Config, logger *slog.Logger) (kb.Embedder, error)
 		if err != nil {
 			return nil, fmt.Errorf("build openai compatible embedder: %w", err)
 		}
-		logger.Info("configured openai compatible embedder", "base_url", oc.BaseURL, "model", oc.Model, "dimensions", oc.Dimensions)
+		logger.Info(
+			"configured openai compatible embedder",
+			"base_url",
+			oc.BaseURL,
+			"model",
+			oc.Model,
+			"dimensions",
+			oc.Dimensions,
+		)
 		return e, nil
 	default:
 		return nil, fmt.Errorf("configruntime: embedder provider %q not supported", cfg.Embedder.Provider)
@@ -383,7 +411,13 @@ func (r *Runtime) wireMongo(ctx context.Context, cfg *config.Config) ([]kb.KBOpt
 		disconnectCtx, disconnectCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer disconnectCancel()
 		if disconnectErr := client.Disconnect(disconnectCtx); disconnectErr != nil {
-			r.logger.Warn("mongo disconnect after ping failure failed", "uri", redactedURI, "error", disconnectErr.Error())
+			r.logger.Warn(
+				"mongo disconnect after ping failure failed",
+				"uri",
+				redactedURI,
+				"error",
+				disconnectErr.Error(),
+			)
 		}
 		r.logger.Error("mongo ping failed", "uri", redactedURI, "error", err.Error())
 		return nil, errors.New("mongo ping failed: check MINNOW_MONGO_URI and network reachability")
@@ -479,11 +513,28 @@ func buildWorkerPools(k *kb.KB, cfg *config.Config, app *appcmd.App) ([]*kb.Work
 	entries := []entry{
 		{&kb.DocumentUpsertWorker{KB: k, ID: "document-upsert-worker"}, cfg.Workers.DocumentUpsert},
 		{&kb.DocumentChunkedWorker{KB: k, ID: "document-chunked-worker"}, cfg.Workers.DocumentChunked},
-		{&kb.DocumentPublishWorker{KB: k, ID: "document-publish-embedded-worker", KindValue: kb.EventDocumentEmbedded}, cfg.Workers.DocumentPublish},
-		{&kb.DocumentPublishWorker{KB: k, ID: "document-publish-graph-worker", KindValue: kb.EventDocumentGraphExtracted}, cfg.Workers.DocumentPublish},
+		{
+			&kb.DocumentPublishWorker{
+				KB:        k,
+				ID:        "document-publish-embedded-worker",
+				KindValue: kb.EventDocumentEmbedded,
+			},
+			cfg.Workers.DocumentPublish,
+		},
+		{
+			&kb.DocumentPublishWorker{
+				KB:        k,
+				ID:        "document-publish-graph-worker",
+				KindValue: kb.EventDocumentGraphExtracted,
+			},
+			cfg.Workers.DocumentPublish,
+		},
 	}
 	if cfg.Media.Enabled {
-		entries = append(entries, entry{&kb.MediaUploadWorker{KB: k, ID: "media-upload-worker"}, cfg.Workers.MediaUpload})
+		entries = append(
+			entries,
+			entry{&kb.MediaUploadWorker{KB: k, ID: "media-upload-worker"}, cfg.Workers.MediaUpload},
+		)
 	}
 
 	pools := make([]*kb.WorkerPool, 0, len(entries))
@@ -520,6 +571,11 @@ func redactMongoURI(uri string) string {
 // workerMetricsAdapter bridges kb.WorkerMetrics to appcmd.AppMetrics.
 type workerMetricsAdapter struct{ m kb.AppMetrics }
 
-func (a workerMetricsAdapter) OnWorkerTick(kind kb.EventKind, workerID, outcome string, duration time.Duration, _ error) {
+func (a workerMetricsAdapter) OnWorkerTick(
+	kind kb.EventKind,
+	workerID, outcome string,
+	duration time.Duration,
+	_ error,
+) {
 	a.m.RecordWorkerTick(string(kind), workerID, outcome, duration.Milliseconds())
 }

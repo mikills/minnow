@@ -1,4 +1,4 @@
-package kb
+package kb_test
 
 import (
 	"context"
@@ -7,12 +7,18 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/mikills/minnow/kb"
+
 	"github.com/stretchr/testify/require"
 )
 
 // newAsyncHarness returns a harness wired with in-memory event store + inbox,
 // the shared setup for worker-pool and pipeline tests.
-func newAsyncHarness(t *testing.T, kbID string, opts ...KBOption) (*TestHarness, *InMemoryEventStore, *InMemoryEventInbox) {
+func newAsyncHarness(
+	t *testing.T,
+	kbID string,
+	opts ...KBOption,
+) (*TestHarness, *InMemoryEventStore, *InMemoryEventInbox) {
 	t.Helper()
 	h := NewTestHarness(t, kbID).WithOptions(opts...).Setup()
 	t.Cleanup(h.Cleanup)
@@ -27,15 +33,30 @@ func TestAppendDocumentUpsert(t *testing.T) {
 	t.Run("requires event store", func(t *testing.T) {
 		h := NewTestHarness(t, "async-no-store").Setup()
 		t.Cleanup(h.Cleanup)
-		_, err := h.KB().AppendDocumentUpsert(context.Background(), DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d", Text: "t"}}}, "", "")
+		_, err := h.KB().
+			AppendDocumentUpsert(context.Background(), DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d", Text: "t"}}}, "", "")
 		require.ErrorContains(t, err, "EventStore")
 	})
 
 	t.Run("emits event with payload", func(t *testing.T) {
 		h, store, _ := newAsyncHarness(t, "async-append")
 		h.KB().MediaStore = NewInMemoryMediaStore()
-		require.NoError(t, h.KB().MediaStore.Put(context.Background(), MediaObject{ID: "m1", KBID: "kb", Filename: "x", BlobKey: "k", CreatedAtUnixMs: time.Now().UnixMilli(), State: MediaStatePending}))
-		evtID, err := h.KB().AppendDocumentUpsert(context.Background(), DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d", Text: "t", MediaIDs: []string{"m1"}}}, ChunkSize: 42}, "idem-x", "corr-y")
+		require.NoError(
+			t,
+			h.KB().MediaStore.Put(
+				context.Background(),
+				MediaObject{
+					ID:              "m1",
+					KBID:            "kb",
+					Filename:        "x",
+					BlobKey:         "k",
+					CreatedAtUnixMs: time.Now().UnixMilli(),
+					State:           MediaStatePending,
+				},
+			),
+		)
+		evtID, err := h.KB().
+			AppendDocumentUpsert(context.Background(), DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d", Text: "t", MediaIDs: []string{"m1"}}}, ChunkSize: 42}, "idem-x", "corr-y")
 		require.NoError(t, err)
 		got, err := store.Get(context.Background(), evtID)
 		require.NoError(t, err)
@@ -47,9 +68,11 @@ func TestAppendDocumentUpsert(t *testing.T) {
 
 	t.Run("duplicate idempotency key returns existing event", func(t *testing.T) {
 		h, _, _ := newAsyncHarness(t, "async-append-dup")
-		firstID, err := h.KB().AppendDocumentUpsert(context.Background(), DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d", Text: "t"}}}, "idem-x", "corr-y")
+		firstID, err := h.KB().
+			AppendDocumentUpsert(context.Background(), DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d", Text: "t"}}}, "idem-x", "corr-y")
 		require.NoError(t, err)
-		secondID, err := h.KB().AppendDocumentUpsert(context.Background(), DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d", Text: "t"}}}, "idem-x", "corr-z")
+		secondID, err := h.KB().
+			AppendDocumentUpsert(context.Background(), DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d", Text: "t"}}}, "idem-x", "corr-z")
 		require.NoError(t, err)
 		require.Equal(t, firstID, secondID)
 	})
@@ -59,9 +82,15 @@ func TestDocumentPipelineWorkers(t *testing.T) {
 	t.Run("upsert worker emits document.chunked", func(t *testing.T) {
 		h, store, inbox := newAsyncHarness(t, "async-worker")
 		worker := &DocumentUpsertWorker{KB: h.KB(), ID: "doc-upsert"}
-		pool, err := NewWorkerPool(worker, store, inbox, WorkerPoolConfig{Concurrency: 1, PollInterval: 10 * time.Millisecond, MaxAttempts: 3})
+		pool, err := NewWorkerPool(
+			worker,
+			store,
+			inbox,
+			WorkerPoolConfig{Concurrency: 1, PollInterval: 10 * time.Millisecond, MaxAttempts: 3},
+		)
 		require.NoError(t, err)
-		evtID, err := h.KB().AppendDocumentUpsert(context.Background(), DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d1", Text: "hello world"}}, ChunkSize: 5}, "", "")
+		evtID, err := h.KB().
+			AppendDocumentUpsert(context.Background(), DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d1", Text: "hello world"}}, ChunkSize: 5}, "", "")
 		require.NoError(t, err)
 		_, err = pool.HandleOnce(context.Background())
 		require.NoError(t, err)
@@ -79,10 +108,36 @@ func TestDocumentPipelineWorkers(t *testing.T) {
 		h, store, inbox := newAsyncHarness(t, "async-chunked-worker")
 		h.KB().Embedder = staticEmbedder{vec: []float32{1, 2, 3}}
 		worker := &DocumentChunkedWorker{KB: h.KB(), ID: "doc-chunked"}
-		pool, err := NewWorkerPool(worker, store, inbox, WorkerPoolConfig{Concurrency: 1, PollInterval: 10 * time.Millisecond, MaxAttempts: 2})
+		pool, err := NewWorkerPool(
+			worker,
+			store,
+			inbox,
+			WorkerPoolConfig{Concurrency: 1, PollInterval: 10 * time.Millisecond, MaxAttempts: 2},
+		)
 		require.NoError(t, err)
-		payload, _ := json.Marshal(DocumentChunkedPayload{KBID: "kb", Documents: []Document{{ID: "d1-chunk-0", Text: "hello"}}, SourceEventID: "src-1"})
-		require.NoError(t, store.Append(context.Background(), KBEvent{EventID: "evt-1", KBID: "kb", Kind: EventDocumentChunked, Payload: payload, PayloadSchema: "document.chunked/v1", IdempotencyKey: "idem-1", Status: EventStatusPending, CreatedAt: time.Now().UTC()}))
+		payload, _ := json.Marshal(
+			DocumentChunkedPayload{
+				KBID:          "kb",
+				Documents:     []Document{{ID: "d1-chunk-0", Text: "hello"}},
+				SourceEventID: "src-1",
+			},
+		)
+		require.NoError(
+			t,
+			store.Append(
+				context.Background(),
+				KBEvent{
+					EventID:        "evt-1",
+					KBID:           "kb",
+					Kind:           EventDocumentChunked,
+					Payload:        payload,
+					PayloadSchema:  "document.chunked/v1",
+					IdempotencyKey: "idem-1",
+					Status:         EventStatusPending,
+					CreatedAt:      time.Now().UTC(),
+				},
+			),
+		)
 		_, err = pool.HandleOnce(context.Background())
 		require.NoError(t, err)
 		child, err := store.FindByCausation(context.Background(), EventDocumentEmbedded, "evt-1")
@@ -94,10 +149,32 @@ func TestDocumentPipelineWorkers(t *testing.T) {
 		h, store, inbox := newAsyncHarness(t, "async-chunked-fail")
 		h.KB().Embedder = errEmbedder{err: errors.New("embed failure")}
 		worker := &DocumentChunkedWorker{KB: h.KB(), ID: "doc-chunked"}
-		pool, err := NewWorkerPool(worker, store, inbox, WorkerPoolConfig{Concurrency: 1, PollInterval: 10 * time.Millisecond, MaxAttempts: 2})
+		pool, err := NewWorkerPool(
+			worker,
+			store,
+			inbox,
+			WorkerPoolConfig{Concurrency: 1, PollInterval: 10 * time.Millisecond, MaxAttempts: 2},
+		)
 		require.NoError(t, err)
-		payload, _ := json.Marshal(DocumentChunkedPayload{KBID: "kb", Documents: []Document{{ID: "d", Text: "t"}}, SourceEventID: "src-1"})
-		require.NoError(t, store.Append(context.Background(), KBEvent{EventID: "evt-1", KBID: "kb", Kind: EventDocumentChunked, Payload: payload, PayloadSchema: "document.chunked/v1", IdempotencyKey: "idem-1", Status: EventStatusPending, CreatedAt: time.Now().UTC()}))
+		payload, _ := json.Marshal(
+			DocumentChunkedPayload{KBID: "kb", Documents: []Document{{ID: "d", Text: "t"}}, SourceEventID: "src-1"},
+		)
+		require.NoError(
+			t,
+			store.Append(
+				context.Background(),
+				KBEvent{
+					EventID:        "evt-1",
+					KBID:           "kb",
+					Kind:           EventDocumentChunked,
+					Payload:        payload,
+					PayloadSchema:  "document.chunked/v1",
+					IdempotencyKey: "idem-1",
+					Status:         EventStatusPending,
+					CreatedAt:      time.Now().UTC(),
+				},
+			),
+		)
 		_, err = pool.HandleOnce(context.Background())
 		require.Error(t, err)
 		src, _ := store.Get(context.Background(), "evt-1")
@@ -110,12 +187,54 @@ func TestDocumentPipelineWorkers(t *testing.T) {
 		h, store, inbox := newAsyncHarness(t, "async-publish", WithArtifactFormat(format))
 		mediaStore := NewInMemoryMediaStore()
 		h.KB().MediaStore = mediaStore
-		require.NoError(t, mediaStore.Put(context.Background(), MediaObject{ID: "m1", KBID: "kb", Filename: "x", BlobKey: "k", CreatedAtUnixMs: time.Now().UnixMilli(), State: MediaStatePending}))
+		require.NoError(
+			t,
+			mediaStore.Put(
+				context.Background(),
+				MediaObject{
+					ID:              "m1",
+					KBID:            "kb",
+					Filename:        "x",
+					BlobKey:         "k",
+					CreatedAtUnixMs: time.Now().UnixMilli(),
+					State:           MediaStatePending,
+				},
+			),
+		)
 		worker := &DocumentPublishWorker{KB: h.KB(), ID: "publish-worker", KindValue: EventDocumentEmbedded}
-		pool, err := NewWorkerPool(worker, store, inbox, WorkerPoolConfig{Concurrency: 1, PollInterval: 10 * time.Millisecond, MaxAttempts: 2})
+		pool, err := NewWorkerPool(
+			worker,
+			store,
+			inbox,
+			WorkerPoolConfig{Concurrency: 1, PollInterval: 10 * time.Millisecond, MaxAttempts: 2},
+		)
 		require.NoError(t, err)
-		payload, _ := json.Marshal(DocumentEmbeddedPayload{KBID: "kb", DocumentCount: 1, Documents: []EmbeddedDocument{{ID: "d1-chunk-0", Text: "hello", MediaIDs: []string{"m1"}, Embedding: []float32{1, 2, 3}}}, SourceEventID: "src-1"})
-		require.NoError(t, store.Append(context.Background(), KBEvent{EventID: "evt-1", KBID: "kb", Kind: EventDocumentEmbedded, Payload: payload, PayloadSchema: "document.embedded/v1", IdempotencyKey: "idem-1", Status: EventStatusPending, CreatedAt: time.Now().UTC()}))
+		payload, _ := json.Marshal(
+			DocumentEmbeddedPayload{
+				KBID:          "kb",
+				DocumentCount: 1,
+				Documents: []EmbeddedDocument{
+					{ID: "d1-chunk-0", Text: "hello", MediaIDs: []string{"m1"}, Embedding: []float32{1, 2, 3}},
+				},
+				SourceEventID: "src-1",
+			},
+		)
+		require.NoError(
+			t,
+			store.Append(
+				context.Background(),
+				KBEvent{
+					EventID:        "evt-1",
+					KBID:           "kb",
+					Kind:           EventDocumentEmbedded,
+					Payload:        payload,
+					PayloadSchema:  "document.embedded/v1",
+					IdempotencyKey: "idem-1",
+					Status:         EventStatusPending,
+					CreatedAt:      time.Now().UTC(),
+				},
+			),
+		)
 		_, err = pool.HandleOnce(context.Background())
 		require.NoError(t, err)
 		child, err := store.FindByCausation(context.Background(), EventKBPublished, "evt-1")
@@ -135,7 +254,14 @@ func TestDocumentPipelineWorkers(t *testing.T) {
 	t.Run("publish worker rejects event whose kind does not match worker kind", func(t *testing.T) {
 		h, _, _ := newAsyncHarness(t, "async-publish-mismatch-kind")
 		worker := &DocumentPublishWorker{KB: h.KB(), ID: "publish-worker", KindValue: EventDocumentEmbedded}
-		payload, _ := json.Marshal(DocumentGraphExtractedPayload{KBID: "kb", DocumentCount: 1, Documents: []EmbeddedDocument{{ID: "d1", Text: "t"}}, SourceEventID: "src-1"})
+		payload, _ := json.Marshal(
+			DocumentGraphExtractedPayload{
+				KBID:          "kb",
+				DocumentCount: 1,
+				Documents:     []EmbeddedDocument{{ID: "d1", Text: "t"}},
+				SourceEventID: "src-1",
+			},
+		)
 		// Event kind deliberately does not match the worker's KindValue.
 		event := &KBEvent{
 			EventID:       "evt-mismatch",
@@ -154,7 +280,14 @@ func TestDocumentPipelineWorkers(t *testing.T) {
 	t.Run("publish worker rejects mismatched payload schema", func(t *testing.T) {
 		h, _, _ := newAsyncHarness(t, "async-publish-schema-mismatch")
 		worker := &DocumentPublishWorker{KB: h.KB(), ID: "publish-worker", KindValue: EventDocumentEmbedded}
-		payload, _ := json.Marshal(DocumentEmbeddedPayload{KBID: "kb", DocumentCount: 1, Documents: []EmbeddedDocument{{ID: "d1", Text: "t"}}, SourceEventID: "src-1"})
+		payload, _ := json.Marshal(
+			DocumentEmbeddedPayload{
+				KBID:          "kb",
+				DocumentCount: 1,
+				Documents:     []EmbeddedDocument{{ID: "d1", Text: "t"}},
+				SourceEventID: "src-1",
+			},
+		)
 		event := &KBEvent{
 			EventID:       "evt-schema-mismatch",
 			KBID:          "kb",
@@ -200,8 +333,18 @@ func TestWorkerCommit(t *testing.T) {
 		h.KB().BlobStore = &failingDeleteBlobStore{inner: h.KB().BlobStore, deleteErr: errors.New("s3 throttled")}
 
 		worker := &DocumentUpsertWorker{KB: h.KB(), ID: "upsert"}
-		payload, _ := json.Marshal(DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d1", Text: "hello world"}}, ChunkSize: 32})
-		event := &KBEvent{EventID: "evt-1", KBID: "kb", Kind: EventDocumentUpsert, Payload: payload, PayloadSchema: "document.upsert/v1", Status: EventStatusClaimed, CreatedAt: time.Now().UTC()}
+		payload, _ := json.Marshal(
+			DocumentUpsertPayload{KBID: "kb", Documents: []Document{{ID: "d1", Text: "hello world"}}, ChunkSize: 32},
+		)
+		event := &KBEvent{
+			EventID:       "evt-1",
+			KBID:          "kb",
+			Kind:          EventDocumentUpsert,
+			Payload:       payload,
+			PayloadSchema: "document.upsert/v1",
+			Status:        EventStatusClaimed,
+			CreatedAt:     time.Now().UTC(),
+		}
 		result, err := worker.Handle(context.Background(), event)
 		require.NoError(t, err)
 		require.NotNil(t, result.Commit)
@@ -224,10 +367,40 @@ func TestWorkerCommit(t *testing.T) {
 		worker := &MediaUploadWorker{KB: h.KB(), ID: "media"}
 		// Seed the media record so the worker does not try to re-upload bytes
 		// (persistStagedMediaObject would otherwise need the staged blob to exist).
-		require.NoError(t, mediaStore.Put(context.Background(), MediaObject{ID: "m-already", KBID: "kb", Filename: "x.bin", BlobKey: "kbs/kb/media/m-already/x.bin", CreatedAtUnixMs: time.Now().UnixMilli(), State: MediaStatePending}))
+		require.NoError(
+			t,
+			mediaStore.Put(
+				context.Background(),
+				MediaObject{
+					ID:              "m-already",
+					KBID:            "kb",
+					Filename:        "x.bin",
+					BlobKey:         "kbs/kb/media/m-already/x.bin",
+					CreatedAtUnixMs: time.Now().UnixMilli(),
+					State:           MediaStatePending,
+				},
+			),
+		)
 
-		payload, _ := json.Marshal(MediaUploadPayload{KBID: "kb", MediaID: "m-already", StagedBlobKey: "staged/key", Filename: "x.bin", ContentType: "application/octet-stream", SourceEventID: "evt-1"})
-		event := &KBEvent{EventID: "evt-1", KBID: "kb", Kind: EventMediaUpload, Payload: payload, PayloadSchema: "media.upload/v1", Status: EventStatusClaimed, CreatedAt: time.Now().UTC()}
+		payload, _ := json.Marshal(
+			MediaUploadPayload{
+				KBID:          "kb",
+				MediaID:       "m-already",
+				StagedBlobKey: "staged/key",
+				Filename:      "x.bin",
+				ContentType:   "application/octet-stream",
+				SourceEventID: "evt-1",
+			},
+		)
+		event := &KBEvent{
+			EventID:       "evt-1",
+			KBID:          "kb",
+			Kind:          EventMediaUpload,
+			Payload:       payload,
+			PayloadSchema: "media.upload/v1",
+			Status:        EventStatusClaimed,
+			CreatedAt:     time.Now().UTC(),
+		}
 		result, err := worker.Handle(context.Background(), event)
 		require.NoError(t, err)
 		require.NotNil(t, result.Commit)
@@ -252,7 +425,8 @@ func TestFileIngest(t *testing.T) {
 			for i := range docs {
 				docs[i] = Document{ID: "d", Text: "t"}
 			}
-			_, _, err := h.KB().AppendFileIngestDetailed(context.Background(), FileIngestInput{KBID: "kb", Documents: docs}, 0, "", "")
+			_, _, err := h.KB().
+				AppendFileIngestDetailed(context.Background(), FileIngestInput{KBID: "kb", Documents: docs}, 0, "", "")
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "too many items")
 		})
@@ -265,10 +439,65 @@ func TestOperationStages(t *testing.T) {
 		t.Cleanup(h.Cleanup)
 		store := NewInMemoryEventStore()
 		h.KB().EventStore = store
-		require.NoError(t, store.Append(context.Background(), KBEvent{EventID: "src-1", KBID: "kb", Kind: EventDocumentUpsert, IdempotencyKey: "k1", Status: EventStatusDone, CreatedAt: time.Now().UTC()}))
-		require.NoError(t, store.Append(context.Background(), KBEvent{EventID: "mid-1", KBID: "kb", Kind: EventDocumentChunked, IdempotencyKey: "k-mid", CausationID: "src-1", Status: EventStatusDone, CreatedAt: time.Now().UTC().Add(time.Millisecond)}))
-		require.NoError(t, store.Append(context.Background(), KBEvent{EventID: "emb-1", KBID: "kb", Kind: EventDocumentEmbedded, IdempotencyKey: "k-emb", CausationID: "mid-1", Status: EventStatusDone, CreatedAt: time.Now().UTC().Add(2 * time.Millisecond)}))
-		require.NoError(t, store.Append(context.Background(), KBEvent{EventID: "pub-1", KBID: "kb", Kind: EventKBPublished, IdempotencyKey: "k2", CausationID: "emb-1", Status: EventStatusDone, CreatedAt: time.Now().UTC().Add(3 * time.Millisecond)}))
+		require.NoError(
+			t,
+			store.Append(
+				context.Background(),
+				KBEvent{
+					EventID:        "src-1",
+					KBID:           "kb",
+					Kind:           EventDocumentUpsert,
+					IdempotencyKey: "k1",
+					Status:         EventStatusDone,
+					CreatedAt:      time.Now().UTC(),
+				},
+			),
+		)
+		require.NoError(
+			t,
+			store.Append(
+				context.Background(),
+				KBEvent{
+					EventID:        "mid-1",
+					KBID:           "kb",
+					Kind:           EventDocumentChunked,
+					IdempotencyKey: "k-mid",
+					CausationID:    "src-1",
+					Status:         EventStatusDone,
+					CreatedAt:      time.Now().UTC().Add(time.Millisecond),
+				},
+			),
+		)
+		require.NoError(
+			t,
+			store.Append(
+				context.Background(),
+				KBEvent{
+					EventID:        "emb-1",
+					KBID:           "kb",
+					Kind:           EventDocumentEmbedded,
+					IdempotencyKey: "k-emb",
+					CausationID:    "mid-1",
+					Status:         EventStatusDone,
+					CreatedAt:      time.Now().UTC().Add(2 * time.Millisecond),
+				},
+			),
+		)
+		require.NoError(
+			t,
+			store.Append(
+				context.Background(),
+				KBEvent{
+					EventID:        "pub-1",
+					KBID:           "kb",
+					Kind:           EventKBPublished,
+					IdempotencyKey: "k2",
+					CausationID:    "emb-1",
+					Status:         EventStatusDone,
+					CreatedAt:      time.Now().UTC().Add(3 * time.Millisecond),
+				},
+			),
+		)
 		stages, err := h.KB().OperationStages(context.Background(), "src-1")
 		require.NoError(t, err)
 		require.Len(t, stages, 4)
@@ -283,10 +512,60 @@ func TestOperationStages(t *testing.T) {
 		t.Cleanup(h.Cleanup)
 		store := NewInMemoryEventStore()
 		h.KB().EventStore = store
-		require.NoError(t, store.Append(context.Background(), KBEvent{EventID: "src-1", KBID: "kb", Kind: EventDocumentUpsert, IdempotencyKey: "k1", Status: EventStatusDone, CreatedAt: time.Now().UTC()}))
-		require.NoError(t, store.Append(context.Background(), KBEvent{EventID: "mid-1", KBID: "kb", Kind: EventDocumentChunked, IdempotencyKey: "k-mid", CausationID: "src-1", Status: EventStatusPending, CreatedAt: time.Now().UTC().Add(time.Millisecond)}))
-		failurePayload, _ := json.Marshal(WorkerFailedPayload{Stage: string(EventDocumentChunked), SourceEventID: "mid-1", Attempt: 1, Error: "boom", WillRetry: false})
-		require.NoError(t, store.Append(context.Background(), KBEvent{EventID: "fail-1", KBID: "kb", Kind: EventWorkerFailed, Payload: failurePayload, PayloadSchema: "worker.failed/v1", CausationID: "mid-1", Status: EventStatusPending, CreatedAt: time.Now().UTC().Add(2 * time.Millisecond)}))
+		require.NoError(
+			t,
+			store.Append(
+				context.Background(),
+				KBEvent{
+					EventID:        "src-1",
+					KBID:           "kb",
+					Kind:           EventDocumentUpsert,
+					IdempotencyKey: "k1",
+					Status:         EventStatusDone,
+					CreatedAt:      time.Now().UTC(),
+				},
+			),
+		)
+		require.NoError(
+			t,
+			store.Append(
+				context.Background(),
+				KBEvent{
+					EventID:        "mid-1",
+					KBID:           "kb",
+					Kind:           EventDocumentChunked,
+					IdempotencyKey: "k-mid",
+					CausationID:    "src-1",
+					Status:         EventStatusPending,
+					CreatedAt:      time.Now().UTC().Add(time.Millisecond),
+				},
+			),
+		)
+		failurePayload, _ := json.Marshal(
+			WorkerFailedPayload{
+				Stage:         string(EventDocumentChunked),
+				SourceEventID: "mid-1",
+				Attempt:       1,
+				Error:         "boom",
+				WillRetry:     false,
+			},
+		)
+		require.NoError(
+			t,
+			store.Append(
+				context.Background(),
+				KBEvent{
+					EventID:       "fail-1",
+					KBID:          "kb",
+					Kind:          EventWorkerFailed,
+					Payload:       failurePayload,
+					PayloadSchema: "worker.failed/v1",
+					CausationID:   "mid-1",
+					Status:        EventStatusPending,
+					CreatedAt:     time.Now().UTC().Add(2 * time.Millisecond),
+				},
+			),
+		)
 		stages, err := h.KB().OperationStages(context.Background(), "src-1")
 		require.NoError(t, err)
 		require.Len(t, stages, 2)

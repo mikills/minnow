@@ -1,4 +1,4 @@
-package kb
+package kb_test
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	. "github.com/mikills/minnow/kb"
 
 	"github.com/stretchr/testify/require"
 )
@@ -49,8 +51,6 @@ func TestDeleteKnowledgeBase(t *testing.T) {
 
 		writeCacheBytes(t, cacheDir, "kb-1", 100)
 		writeCacheBytes(t, cacheDir, "kb-other", 50)
-		k.recordCacheBytesCurrent(150)
-
 		err := k.DeleteKnowledgeBase(ctx, "kb-1")
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "deleted with cleanup errors")
@@ -65,9 +65,8 @@ func TestDeleteKnowledgeBase(t *testing.T) {
 		_, err = os.Stat(filepath.Join(cacheDir, "kb-other"))
 		require.NoError(t, err, "kb-other cache must remain")
 
-		_, total := k.collectCacheEntries()
-		require.Equal(t, total, k.cacheBytesCurrent, "cacheBytesCurrent must be recomputed after delete")
-		require.Less(t, k.cacheBytesCurrent, int64(150), "metric must drop after delete")
+		metrics := k.CacheEvictionMetricsSnapshot()
+		require.Less(t, metrics.CacheBytesCurrent, int64(150), "metric must drop after delete")
 	})
 
 	t.Run("succeeds when no manifest present", func(t *testing.T) {
@@ -138,7 +137,12 @@ func (r *recordingManifestStore) HeadVersion(ctx context.Context, kbID string) (
 	return r.manifest.Version, nil
 }
 
-func (r *recordingManifestStore) UpsertIfMatch(ctx context.Context, kbID string, manifest SnapshotShardManifest, expectedVersion string) (string, error) {
+func (r *recordingManifestStore) UpsertIfMatch(
+	ctx context.Context,
+	kbID string,
+	manifest SnapshotShardManifest,
+	expectedVersion string,
+) (string, error) {
 	return "", fmt.Errorf("not implemented")
 }
 

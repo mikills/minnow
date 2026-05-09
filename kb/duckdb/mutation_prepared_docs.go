@@ -9,6 +9,7 @@ import (
 
 	duckdbdriver "github.com/duckdb/duckdb-go/v2"
 	kb "github.com/mikills/minnow/kb"
+	graph "github.com/mikills/minnow/kb/duckdb/internal/graph"
 )
 
 func applyPreparedDocsAppender(ctx context.Context, db *sql.DB, docs []preparedUpsertDoc) error {
@@ -33,7 +34,11 @@ func createPreparedDocsStagingTable(ctx context.Context, db *sql.DB, table strin
 	if err != nil {
 		return nil, fmt.Errorf("open appender conn: %w", err)
 	}
-	createSQL := fmt.Sprintf(`CREATE TABLE %s (id TEXT, content TEXT, embedding FLOAT[%d], media_refs TEXT)`, table, dim)
+	createSQL := fmt.Sprintf(
+		`CREATE TABLE %s (id TEXT, content TEXT, embedding FLOAT[%d], media_refs TEXT)`,
+		table,
+		dim,
+	)
 	if _, err := conn.ExecContext(ctx, createSQL); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("create appender staging table: %w", err)
@@ -75,7 +80,10 @@ func appendPreparedDocRow(appender *duckdbdriver.Appender, prepared preparedUpse
 		mediaRefsValue = mediaRefsJSON.String
 	}
 	if err := appender.AppendRow(doc.ID, doc.Text, prepared.Embedding, mediaRefsValue); err != nil {
-		return kb.WrapEmbeddingDimensionMismatch(fmt.Errorf("append doc %q: %w", doc.ID, err), "upsert embedding dimension is incompatible with stored vectors")
+		return kb.WrapEmbeddingDimensionMismatch(
+			fmt.Errorf("append doc %q: %w", doc.ID, err),
+			"upsert embedding dimension is incompatible with stored vectors",
+		)
 	}
 	return nil
 }
@@ -90,7 +98,10 @@ func mergePreparedDocsStaging(ctx context.Context, conn *sql.Conn, table string,
 	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO docs (id, content, embedding, media_refs) SELECT id, content, embedding, media_refs FROM %s`, table)); err != nil {
 		tx.Rollback()
-		return kb.WrapEmbeddingDimensionMismatch(fmt.Errorf("bulk insert prepared docs: %w", err), "upsert embedding dimension is incompatible with stored vectors")
+		return kb.WrapEmbeddingDimensionMismatch(
+			fmt.Errorf("bulk insert prepared docs: %w", err),
+			"upsert embedding dimension is incompatible with stored vectors",
+		)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit appender upsert tx: %w", err)
@@ -119,7 +130,13 @@ func deletePreparedDocRows(ctx context.Context, tx *sql.Tx, docs []preparedUpser
 	return nil
 }
 
-func deletePreparedDocRow(ctx context.Context, tx *sql.Tx, stmtDelete *sql.Stmt, stmtUndelete *sql.Stmt, docID string) error {
+func deletePreparedDocRow(
+	ctx context.Context,
+	tx *sql.Tx,
+	stmtDelete *sql.Stmt,
+	stmtUndelete *sql.Stmt,
+	docID string,
+) error {
 	if _, err := stmtDelete.ExecContext(ctx, docID); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("delete existing doc %q before upsert: %w", docID, err)
@@ -131,7 +148,13 @@ func deletePreparedDocRow(ctx context.Context, tx *sql.Tx, stmtDelete *sql.Stmt,
 	return nil
 }
 
-func applyPreparedDocsTx(ctx context.Context, tx *sql.Tx, docs []preparedUpsertDoc, graphResult *kb.GraphBuildResult, ensureGraphTables bool) error {
+func applyPreparedDocsTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	docs []preparedUpsertDoc,
+	graphResult *kb.GraphBuildResult,
+	ensureGraphTables bool,
+) error {
 	if len(docs) == 0 {
 		return commitEmptyPreparedDocsTx(tx)
 	}
@@ -177,7 +200,10 @@ func preparePreparedDocsTxStatements(ctx context.Context, tx *sql.Tx, dim int) (
 		tx.Rollback()
 		return preparedDocsTxStatements{}, fmt.Errorf("prepare docs delete: %w", err)
 	}
-	insertSQL := fmt.Sprintf(`INSERT INTO docs (id, content, embedding, media_refs) VALUES (?, ?, CAST(? AS FLOAT[%d]), ?)`, dim)
+	insertSQL := fmt.Sprintf(
+		`INSERT INTO docs (id, content, embedding, media_refs) VALUES (?, ?, CAST(? AS FLOAT[%d]), ?)`,
+		dim,
+	)
 	stmtInsert, err := tx.PrepareContext(ctx, insertSQL)
 	if err != nil {
 		stmtDelete.Close()
@@ -194,7 +220,12 @@ func preparePreparedDocsTxStatements(ctx context.Context, tx *sql.Tx, dim int) (
 	return preparedDocsTxStatements{delete: stmtDelete, insert: stmtInsert, undelete: stmtUndelete}, nil
 }
 
-func upsertPreparedDocsTx(ctx context.Context, tx *sql.Tx, stmts preparedDocsTxStatements, docs []preparedUpsertDoc) error {
+func upsertPreparedDocsTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	stmts preparedDocsTxStatements,
+	docs []preparedUpsertDoc,
+) error {
 	for _, prepared := range docs {
 		if err := upsertPreparedDocTx(ctx, tx, stmts, prepared); err != nil {
 			return err
@@ -203,7 +234,12 @@ func upsertPreparedDocsTx(ctx context.Context, tx *sql.Tx, stmts preparedDocsTxS
 	return nil
 }
 
-func upsertPreparedDocTx(ctx context.Context, tx *sql.Tx, stmts preparedDocsTxStatements, prepared preparedUpsertDoc) error {
+func upsertPreparedDocTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	stmts preparedDocsTxStatements,
+	prepared preparedUpsertDoc,
+) error {
 	doc := prepared.Doc
 	if _, err := stmts.delete.ExecContext(ctx, doc.ID); err != nil {
 		tx.Rollback()
@@ -216,7 +252,10 @@ func upsertPreparedDocTx(ctx context.Context, tx *sql.Tx, stmts preparedDocsTxSt
 	}
 	if _, err := stmts.insert.ExecContext(ctx, doc.ID, doc.Text, FormatVectorForSQL(prepared.Embedding), mediaRefsJSON); err != nil {
 		tx.Rollback()
-		return kb.WrapEmbeddingDimensionMismatch(fmt.Errorf("upsert doc %q: %w", doc.ID, err), "upsert embedding dimension is incompatible with stored vectors")
+		return kb.WrapEmbeddingDimensionMismatch(
+			fmt.Errorf("upsert doc %q: %w", doc.ID, err),
+			"upsert embedding dimension is incompatible with stored vectors",
+		)
 	}
 	if _, err := stmts.undelete.ExecContext(ctx, doc.ID); err != nil {
 		tx.Rollback()
@@ -225,7 +264,13 @@ func upsertPreparedDocTx(ctx context.Context, tx *sql.Tx, stmts preparedDocsTxSt
 	return nil
 }
 
-func applyPreparedGraphTx(ctx context.Context, tx *sql.Tx, docs []preparedUpsertDoc, graphResult *kb.GraphBuildResult, ensureGraphTables bool) error {
+func applyPreparedGraphTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	docs []preparedUpsertDoc,
+	graphResult *kb.GraphBuildResult,
+	ensureGraphTables bool,
+) error {
 	if graphResult == nil {
 		return nil
 	}
@@ -235,7 +280,7 @@ func applyPreparedGraphTx(ctx context.Context, tx *sql.Tx, docs []preparedUpsert
 			return err
 		}
 	}
-	if err := pruneGraphForDocsTx(ctx, tx, preparedDocIDs(docs), true); err != nil {
+	if err := graph.PruneForDocsTx(ctx, tx, preparedDocIDs(docs), true); err != nil {
 		tx.Rollback()
 		return err
 	}

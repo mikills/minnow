@@ -31,27 +31,46 @@ func mediaGetHandler(deps Dependencies) echo.HandlerFunc {
 
 func handleMediaUpload(c echo.Context, deps Dependencies) error {
 	if deps.AppendMediaUpload == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]any{"error": "media subsystem not configured"})
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "media subsystem not configured"})
 	}
 	if deps.MaxMediaBytes > 0 && c.Request().ContentLength > deps.MaxMediaBytes {
-		return c.JSON(http.StatusRequestEntityTooLarge, map[string]any{"error": "upload exceeds maximum allowed size"})
+		return c.JSON(
+			http.StatusRequestEntityTooLarge,
+			map[string]any{errorResponseKey: "upload exceeds maximum allowed size"},
+		)
 	}
 	input, status, err := mediaUploadInputFromRequest(c, deps.MaxMediaBytes)
 	if err != nil {
-		return c.JSON(status, map[string]any{"error": err.Error()})
+		return c.JSON(status, map[string]any{errorResponseKey: err.Error()})
 	}
 	_, corr := requestIDs(c)
-	evtID, effectiveIdem, err := deps.AppendMediaUpload(c.Request().Context(), input, deps.MaxMediaBytes, input.IdempotencyKey, corr)
+	evtID, effectiveIdem, err := deps.AppendMediaUpload(
+		c.Request().Context(),
+		input,
+		deps.MaxMediaBytes,
+		input.IdempotencyKey,
+		corr,
+	)
 	if err != nil {
 		deps.AppMetrics.RecordMediaUpload(input.KBID, input.ContentType, 0, err)
-		return c.JSON(http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: err.Error()})
 	}
 	deps.AppMetrics.RecordMediaUpload(input.KBID, input.ContentType, 0, nil)
-	return writeAcceptedOperation(c, evtID, effectiveIdem, map[string]any{"event_id": evtID, "status_url": "/rag/operations/" + evtID, "kb_id": input.KBID, "filename": input.Filename})
+	return writeAcceptedOperation(
+		c,
+		evtID,
+		effectiveIdem,
+		map[string]any{
+			eventIDResponseKey: evtID,
+			"status_url":       "/rag/operations/" + evtID,
+			kbIDContextKey:     input.KBID,
+			"filename":         input.Filename,
+		},
+	)
 }
 
 func mediaUploadInputFromRequest(c echo.Context, maxBytes int64) (kb.MediaUploadInput, int, error) {
-	kbID := strings.TrimSpace(c.FormValue("kb_id"))
+	kbID := strings.TrimSpace(c.FormValue(kbIDContextKey))
 	if kbID == "" {
 		kbID = "default"
 	}
@@ -74,7 +93,16 @@ func mediaUploadInputFromRequest(c echo.Context, maxBytes int64) (kb.MediaUpload
 		}
 		return kb.MediaUploadInput{}, http.StatusBadRequest, errors.New("cannot read uploaded file")
 	}
-	input := kb.MediaUploadInput{KBID: kbID, Filename: file.Filename, ContentType: strings.TrimSpace(c.FormValue("content_type")), Source: strings.TrimSpace(c.FormValue("source")), Title: strings.TrimSpace(c.FormValue("title")), UploadedBy: strings.TrimSpace(c.FormValue("uploaded_by")), IdempotencyKey: strings.TrimSpace(c.Request().Header.Get("Idempotency-Key")), Body: body}
+	input := kb.MediaUploadInput{
+		KBID:           kbID,
+		Filename:       file.Filename,
+		ContentType:    strings.TrimSpace(c.FormValue("content_type")),
+		Source:         strings.TrimSpace(c.FormValue("source")),
+		Title:          strings.TrimSpace(c.FormValue("title")),
+		UploadedBy:     strings.TrimSpace(c.FormValue("uploaded_by")),
+		IdempotencyKey: strings.TrimSpace(c.Request().Header.Get("Idempotency-Key")),
+		Body:           body,
+	}
 	if input.ContentType == "" {
 		input.ContentType = file.Header.Get("Content-Type")
 	}
@@ -83,36 +111,36 @@ func mediaUploadInputFromRequest(c echo.Context, maxBytes int64) (kb.MediaUpload
 
 func handleMediaList(c echo.Context, deps Dependencies) error {
 	if deps.ListMedia == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]any{"error": "media subsystem not configured"})
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "media subsystem not configured"})
 	}
-	kbID := strings.TrimSpace(c.QueryParam("kb_id"))
+	kbID := strings.TrimSpace(c.QueryParam(kbIDContextKey))
 	if kbID == "" {
-		return c.JSON(http.StatusBadRequest, map[string]any{"error": "kb_id required"})
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "kb_id required"})
 	}
 	prefix := strings.TrimSpace(c.QueryParam("prefix"))
 	after := strings.TrimSpace(c.QueryParam("after"))
 	limit := parsePositiveInt(c.QueryParam("limit"), 500)
 	page, err := deps.ListMedia(c.Request().Context(), kbID, prefix, after, limit)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return c.JSON(http.StatusInternalServerError, map[string]any{errorResponseKey: err.Error()})
 	}
 	return c.JSON(http.StatusOK, map[string]any{"items": page.Items, "limit": limit, "next": page.NextToken})
 }
 
 func handleMediaGet(c echo.Context, deps Dependencies) error {
 	if deps.GetMedia == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]any{"error": "media subsystem not configured"})
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: "media subsystem not configured"})
 	}
 	id := strings.TrimSpace(c.Param("id"))
 	if id == "" {
-		return c.JSON(http.StatusBadRequest, map[string]any{"error": "id required"})
+		return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "id required"})
 	}
 	m, err := deps.GetMedia(c.Request().Context(), id)
 	if err != nil {
 		if errors.Is(err, kb.ErrMediaNotFound) {
-			return c.JSON(http.StatusNotFound, map[string]any{"error": "not found"})
+			return c.JSON(http.StatusNotFound, map[string]any{errorResponseKey: "not found"})
 		}
-		return c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return c.JSON(http.StatusInternalServerError, map[string]any{errorResponseKey: err.Error()})
 	}
 	return c.JSON(http.StatusOK, m)
 }

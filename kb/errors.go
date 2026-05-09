@@ -4,24 +4,29 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/mikills/minnow/kb/blobstore"
+	"github.com/mikills/minnow/kb/lease"
+	"github.com/mikills/minnow/kb/manifest"
+	"github.com/mikills/minnow/kb/openaiembedder"
 )
 
 var (
-	ErrBlobVersionMismatch = errors.New("blob version mismatch")
-	ErrBlobNotFound        = errors.New("blob not found")
+	ErrBlobVersionMismatch = blobstore.ErrVersionMismatch
+	ErrBlobNotFound        = blobstore.ErrNotFound
 
 	ErrCacheBudgetExceeded   = errors.New("cache budget exceeded")
 	ErrGraphUnavailable      = errors.New("graph extraction is not configured")
 	ErrGraphQueryUnavailable = errors.New("graph query requested but graph data is unavailable")
 	ErrKBUninitialized       = errors.New("kb is not initialized")
 
-	ErrInvalidEmbeddingDimension  = errors.New("invalid embedding dimension")
+	ErrInvalidEmbeddingDimension  = openaiembedder.ErrInvalidEmbeddingDimension
 	ErrEmbeddingDimensionMismatch = errors.New("embedding dimension mismatch")
 	ErrInvalidArtifactFormat      = errors.New("invalid artifact format")
 
-	ErrManifestNotFound            = errors.New("manifest not found")
-	ErrInvalidManifestStore        = errors.New("invalid manifest store")
-	ErrWriteLeaseConflict          = errors.New("write lease conflict")
+	ErrManifestNotFound            = manifest.ErrNotFound
+	ErrInvalidManifestStore        = manifest.ErrInvalidStore
+	ErrWriteLeaseConflict          = lease.ErrConflict
 	ErrInvalidQueryRequest         = errors.New("invalid query request")
 	ErrArtifactFormatNotConfigured = errors.New("artifact format is not configured")
 	ErrFormatNotRegistered         = errors.New("artifact format not registered for this KB's format_kind")
@@ -39,7 +44,12 @@ func WrapEmbeddingDimensionMismatch(err error, operation string) error {
 	if detail == "" {
 		detail = "embedding dimension mismatch"
 	}
-	return fmt.Errorf("%w: %s; existing KB vectors were built with a different embedding configuration, rebuild/re-ingest this KB: %v", ErrEmbeddingDimensionMismatch, detail, err)
+	return fmt.Errorf(
+		"%w: %s; existing KB vectors were built with a different embedding configuration, rebuild/re-ingest this KB: %v",
+		ErrEmbeddingDimensionMismatch,
+		detail,
+		err,
+	)
 }
 
 func isEmbeddingDimensionMismatchErr(err error) bool {
@@ -47,9 +57,6 @@ func isEmbeddingDimensionMismatchErr(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	// Direct DuckDB Binder errors do not always mention the FLOAT[N] type.
-	// the Function call ("array_distance: Array arguments must be of the
-	// same size") is sufficient signal.
 	if isArrayDistanceMismatch(msg) {
 		return true
 	}

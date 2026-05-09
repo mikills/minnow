@@ -1,4 +1,4 @@
-package duckdb
+package duckdb_test
 
 import (
 	"context"
@@ -18,9 +18,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	kb "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/duckdb"
 )
 
-func startCompactionAttempt(wg *sync.WaitGroup, af *DuckDBArtifactFormat, kbID string, i int, results []*kb.CompactionPublishResult, errs []error) {
+func startCompactionAttempt(
+	wg *sync.WaitGroup,
+	af *duckdb.DuckDBArtifactFormat,
+	kbID string,
+	i int,
+	results []*kb.CompactionPublishResult,
+	errs []error,
+) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -31,7 +39,7 @@ func startCompactionAttempt(wg *sync.WaitGroup, af *DuckDBArtifactFormat, kbID s
 func TestDuckDBCompaction(t *testing.T) {
 	t.Run("kb_uninitialized", func(t *testing.T) {
 		h := kb.NewTestHarness(t, "kb-compact-missing").Setup()
-		registerFormatOnHarness(t, h)
+		registerDuckDBFormatOnHarness(t, h)
 		t.Cleanup(h.Cleanup)
 
 		af := requireDuckDBFormat(t, h.KB())
@@ -43,7 +51,7 @@ func TestDuckDBCompaction(t *testing.T) {
 	t.Run("no_compaction_debt", func(t *testing.T) {
 		kbID := "kb-compact-nodebt"
 		h := kb.NewTestHarness(t, kbID).Setup()
-		registerFormatOnHarness(t, h)
+		registerDuckDBFormatOnHarness(t, h)
 		t.Cleanup(h.Cleanup)
 
 		uploadTestShardManifest(t, h.KB(), kbID, 1)
@@ -76,7 +84,7 @@ func TestDuckDBCompaction(t *testing.T) {
 			return locks[id]
 		}
 
-		af, err := NewArtifactFormat(DuckDBArtifactDeps{
+		af, err := duckdb.NewArtifactFormat(duckdb.DuckDBArtifactDeps{
 			BlobStore:     bs,
 			ManifestStore: conflictStore,
 			CacheDir:      cacheDir,
@@ -126,7 +134,7 @@ func TestDuckDBCompaction(t *testing.T) {
 			return locks[id]
 		}
 
-		af, err := NewArtifactFormat(DuckDBArtifactDeps{
+		af, err := duckdb.NewArtifactFormat(duckdb.DuckDBArtifactDeps{
 			BlobStore:     bs,
 			ManifestStore: ms,
 			CacheDir:      cacheDir,
@@ -197,7 +205,7 @@ func TestDuckDBCompaction(t *testing.T) {
 		var gcCalls []gcEnqueueCall
 		var gcMu sync.Mutex
 
-		af, err := NewArtifactFormat(DuckDBArtifactDeps{
+		af, err := duckdb.NewArtifactFormat(duckdb.DuckDBArtifactDeps{
 			BlobStore:     bs,
 			ManifestStore: ms,
 			CacheDir:      cacheDir,
@@ -276,7 +284,12 @@ func (s *casConflictManifestStore) HeadVersion(ctx context.Context, kbID string)
 	return s.inner.HeadVersion(ctx, kbID)
 }
 
-func (s *casConflictManifestStore) UpsertIfMatch(ctx context.Context, kbID string, manifest kb.SnapshotShardManifest, expectedVersion string) (string, error) {
+func (s *casConflictManifestStore) UpsertIfMatch(
+	ctx context.Context,
+	kbID string,
+	manifest kb.SnapshotShardManifest,
+	expectedVersion string,
+) (string, error) {
 	if s.failOnce && s.failed.CompareAndSwap(false, true) {
 		return "", kb.ErrBlobVersionMismatch
 	}
@@ -296,8 +309,8 @@ func uploadRealShardManifest(t *testing.T, bs kb.BlobStore, kbID string, shardCo
 	manifest := kb.SnapshotShardManifest{
 		SchemaVersion:  1,
 		Layout:         kb.ShardManifestLayoutDuckDBs,
-		FormatKind:     DuckDBFormatKind,
-		FormatVersion:  DuckDBFormatVersion,
+		FormatKind:     duckdb.DuckDBFormatKind,
+		FormatVersion:  duckdb.DuckDBFormatVersion,
 		KBID:           kbID,
 		CreatedAt:      time.Now().UTC(),
 		TotalSizeBytes: int64(shardCount),
@@ -328,12 +341,12 @@ func uploadRealShardManifest(t *testing.T, bs kb.BlobStore, kbID string, shardCo
 		}
 		_, err = db.ExecContext(ctx, fmt.Sprintf(
 			`INSERT INTO docs VALUES ('doc-%d', 'content %d', %s::FLOAT[%d], NULL)`,
-			i, i, FormatVectorForSQL(vec), embDim,
+			i, i, duckdb.FormatVectorForSQL(vec), embDim,
 		))
 		require.NoError(t, err)
 
-		require.NoError(t, EnsureGraphTables(ctx, db))
-		require.NoError(t, CheckpointAndCloseDB(ctx, db, "test shard"))
+		require.NoError(t, duckdb.EnsureGraphTables(ctx, db))
+		require.NoError(t, duckdb.CheckpointAndCloseDB(ctx, db, "test shard"))
 
 		// Upload to blob store.
 		info, err := bs.UploadIfMatch(ctx, key, dbPath, "")

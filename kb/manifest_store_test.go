@@ -1,4 +1,4 @@
-package kb
+package kb_test
 
 import (
 	"context"
@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	. "github.com/mikills/minnow/kb"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -231,7 +233,7 @@ func (c *churnOnHeadBlobStore) Head(ctx context.Context, key string) (*BlobObjec
 	}
 
 	// Only churn on manifest keys.
-	if !isManifestKey(key) {
+	if filepath.Ext(key) != ".json" {
 		return info, nil
 	}
 
@@ -274,7 +276,12 @@ func (c *churnOnHeadBlobStore) Download(ctx context.Context, key string, dest st
 	return c.inner.Download(ctx, key, dest)
 }
 
-func (c *churnOnHeadBlobStore) UploadIfMatch(ctx context.Context, key string, src string, expectedVersion string) (*BlobObjectInfo, error) {
+func (c *churnOnHeadBlobStore) UploadIfMatch(
+	ctx context.Context,
+	key string,
+	src string,
+	expectedVersion string,
+) (*BlobObjectInfo, error) {
 	return c.inner.UploadIfMatch(ctx, key, src, expectedVersion)
 }
 
