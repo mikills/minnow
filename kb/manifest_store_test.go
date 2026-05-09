@@ -1,9 +1,8 @@
-package kb
+package kb_test
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	. "github.com/mikills/minnow/kb"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -60,131 +61,86 @@ func runManifestStoreTests(t *testing.T, newStore func(t *testing.T) ManifestSto
 			name: "get_missing",
 			run: func(t *testing.T, store ManifestStore) {
 				_, err := store.Get(ctx, kbID)
-				if !errors.Is(err, ErrManifestNotFound) {
-					t.Fatalf("expected ErrManifestNotFound, got %v", err)
-				}
+				require.ErrorIs(t, err, ErrManifestNotFound)
 			},
 		},
 		{
 			name: "upsert_create_empty_version",
 			run: func(t *testing.T, store ManifestStore) {
 				version, err := store.UpsertIfMatch(ctx, kbID, sampleManifest, "")
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if version == "" {
-					t.Fatal("expected non-empty version")
-				}
+				require.NoError(t, err)
+				require.NotEmpty(t, version)
 			},
 		},
 		{
 			name: "get_after_upsert",
 			run: func(t *testing.T, store ManifestStore) {
 				version, err := store.UpsertIfMatch(ctx, kbID, sampleManifest, "")
-				if err != nil {
-					t.Fatalf("upsert: %v", err)
-				}
+				require.NoError(t, err)
 
 				doc, err := store.Get(ctx, kbID)
-				if err != nil {
-					t.Fatalf("get: %v", err)
-				}
-				if doc.Version != version {
-					t.Fatalf("version mismatch: got %q, want %q", doc.Version, version)
-				}
-				if doc.Manifest.KBID != kbID {
-					t.Fatalf("kbID mismatch: got %q, want %q", doc.Manifest.KBID, kbID)
-				}
-				if len(doc.Manifest.Shards) != len(sampleManifest.Shards) {
-					t.Fatalf("shard count mismatch: got %d, want %d", len(doc.Manifest.Shards), len(sampleManifest.Shards))
-				}
+				require.NoError(t, err)
+				require.Equal(t, version, doc.Version)
+				require.Equal(t, kbID, doc.Manifest.KBID)
+				require.Len(t, doc.Manifest.Shards, len(sampleManifest.Shards))
 			},
 		},
 		{
 			name: "upsert_cas_conflict",
 			run: func(t *testing.T, store ManifestStore) {
 				_, err := store.UpsertIfMatch(ctx, kbID, sampleManifest, "")
-				if err != nil {
-					t.Fatalf("first upsert: %v", err)
-				}
+				require.NoError(t, err)
 
 				_, err = store.UpsertIfMatch(ctx, kbID, sampleManifest, "stale-version")
-				if !errors.Is(err, ErrBlobVersionMismatch) {
-					t.Fatalf("expected ErrBlobVersionMismatch, got %v", err)
-				}
+				require.ErrorIs(t, err, ErrBlobVersionMismatch)
 			},
 		},
 		{
 			name: "upsert_cas_success",
 			run: func(t *testing.T, store ManifestStore) {
 				v1, err := store.UpsertIfMatch(ctx, kbID, sampleManifest, "")
-				if err != nil {
-					t.Fatalf("first upsert: %v", err)
-				}
+				require.NoError(t, err)
 
 				v2, err := store.UpsertIfMatch(ctx, kbID, sampleManifest, v1)
-				if err != nil {
-					t.Fatalf("second upsert: %v", err)
-				}
-				if v2 == "" {
-					t.Fatal("expected non-empty version after CAS update")
-				}
+				require.NoError(t, err)
+				require.NotEmpty(t, v2)
 			},
 		},
 		{
 			name: "head_version_missing",
 			run: func(t *testing.T, store ManifestStore) {
 				version, err := store.HeadVersion(ctx, kbID)
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if version != "" {
-					t.Fatalf("expected empty version for missing manifest, got %q", version)
-				}
+				require.NoError(t, err)
+				require.Empty(t, version)
 			},
 		},
 		{
 			name: "head_version_exists",
 			run: func(t *testing.T, store ManifestStore) {
 				upsertVersion, err := store.UpsertIfMatch(ctx, kbID, sampleManifest, "")
-				if err != nil {
-					t.Fatalf("upsert: %v", err)
-				}
+				require.NoError(t, err)
 
 				headVersion, err := store.HeadVersion(ctx, kbID)
-				if err != nil {
-					t.Fatalf("head: %v", err)
-				}
-				if headVersion != upsertVersion {
-					t.Fatalf("version mismatch: head=%q, upsert=%q", headVersion, upsertVersion)
-				}
+				require.NoError(t, err)
+				require.Equal(t, upsertVersion, headVersion)
 			},
 		},
 		{
 			name: "delete_existing",
 			run: func(t *testing.T, store ManifestStore) {
 				_, err := store.UpsertIfMatch(ctx, kbID, sampleManifest, "")
-				if err != nil {
-					t.Fatalf("upsert: %v", err)
-				}
+				require.NoError(t, err)
 
-				if err := store.Delete(ctx, kbID); err != nil {
-					t.Fatalf("delete: %v", err)
-				}
+				require.NoError(t, store.Delete(ctx, kbID))
 
 				_, err = store.Get(ctx, kbID)
-				if !errors.Is(err, ErrManifestNotFound) {
-					t.Fatalf("expected ErrManifestNotFound after delete, got %v", err)
-				}
+				require.ErrorIs(t, err, ErrManifestNotFound)
 			},
 		},
 		{
 			name: "delete_missing",
 			run: func(t *testing.T, store ManifestStore) {
-				err := store.Delete(ctx, kbID)
-				if err != nil {
-					t.Fatalf("expected nil for deleting missing manifest, got %v", err)
-				}
+				require.NoError(t, store.Delete(ctx, kbID))
 			},
 		},
 	}
@@ -277,7 +233,7 @@ func (c *churnOnHeadBlobStore) Head(ctx context.Context, key string) (*BlobObjec
 	}
 
 	// Only churn on manifest keys.
-	if !isManifestKey(key) {
+	if filepath.Ext(key) != ".json" {
 		return info, nil
 	}
 
@@ -320,7 +276,12 @@ func (c *churnOnHeadBlobStore) Download(ctx context.Context, key string, dest st
 	return c.inner.Download(ctx, key, dest)
 }
 
-func (c *churnOnHeadBlobStore) UploadIfMatch(ctx context.Context, key string, src string, expectedVersion string) (*BlobObjectInfo, error) {
+func (c *churnOnHeadBlobStore) UploadIfMatch(
+	ctx context.Context,
+	key string,
+	src string,
+	expectedVersion string,
+) (*BlobObjectInfo, error) {
 	return c.inner.UploadIfMatch(ctx, key, src, expectedVersion)
 }
 

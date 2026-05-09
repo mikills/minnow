@@ -3,6 +3,8 @@ package sim
 import (
 	"fmt"
 	"sort"
+
+	"github.com/mikills/minnow/kb"
 )
 
 // Invariant is a property that must hold after a scenario runs. Implementations
@@ -15,7 +17,7 @@ type Invariant interface {
 // ManifestMonotonic asserts that every KB's manifest version string, read from
 // the store, is equal to or greater (by lexicographic compare) than the last
 // version observed during the harness run. The harness's existing ingest
-// helpers set lastManifestVers after every Ingest; this invariant just checks
+// helpers set lastManifestVers after every Ingest. this invariant just checks
 // that the observed version never went backwards on disk.
 type manifestMonotonic struct{}
 
@@ -63,43 +65,15 @@ func NoDocLoss(topK int) Invariant {
 func (n noDocLoss) Name() string { return "no_doc_loss" }
 
 func (n noDocLoss) Check(h *Harness) error {
-	h.mu.Lock()
-	snapshot := make(map[string]map[string]struct{}, len(h.ingestedDocs))
-	for kbID, docs := range h.ingestedDocs {
-		ids := make(map[string]struct{}, len(docs))
-		for id := range docs {
-			ids[id] = struct{}{}
-		}
-		snapshot[kbID] = ids
-	}
-	h.mu.Unlock()
+	snapshot := ingestedDocsSnapshot(h)
 
 	for kbID, expected := range snapshot {
 		if len(expected) == 0 {
 			continue
 		}
-		any := pickOne(expected)
-		vec, err := h.kb.Embed(h.ctx, any)
+		missing, err := n.missingDocs(h, kbID, expected)
 		if err != nil {
-			return fmt.Errorf("embed probe %q: %w", any, err)
-		}
-		k := n.topK
-		if k < len(expected) {
-			k = len(expected)
-		}
-		results, err := h.Query(kbID, vec, k)
-		if err != nil {
-			return fmt.Errorf("probe query %s: %w", kbID, err)
-		}
-		seen := make(map[string]struct{}, len(results))
-		for _, r := range results {
-			seen[r.ID] = struct{}{}
-		}
-		missing := make([]string, 0)
-		for id := range expected {
-			if _, ok := seen[id]; !ok {
-				missing = append(missing, id)
-			}
+			return err
 		}
 		if len(missing) > 0 {
 			sort.Strings(missing)
@@ -108,6 +82,51 @@ func (n noDocLoss) Check(h *Harness) error {
 		}
 	}
 	return nil
+}
+
+func ingestedDocsSnapshot(h *Harness) map[string]map[string]struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	snapshot := make(map[string]map[string]struct{}, len(h.ingestedDocs))
+	for kbID, docs := range h.ingestedDocs {
+		snapshot[kbID] = docIDSet(docs)
+	}
+	return snapshot
+}
+
+func docIDSet(docs map[string]kb.Document) map[string]struct{} {
+	ids := make(map[string]struct{}, len(docs))
+	for id := range docs {
+		ids[id] = struct{}{}
+	}
+	return ids
+}
+
+func (n noDocLoss) missingDocs(h *Harness, kbID string, expected map[string]struct{}) ([]string, error) {
+	probe := pickOne(expected)
+	vec, err := h.kb.Embed(h.ctx, probe)
+	if err != nil {
+		return nil, fmt.Errorf("embed probe %q: %w", probe, err)
+	}
+	matches, err := h.Search(kbID, vec, max(n.topK, len(expected)))
+	if err != nil {
+		return nil, fmt.Errorf("probe query %s: %w", kbID, err)
+	}
+	return missingDocIDs(expected, matches), nil
+}
+
+func missingDocIDs(expected map[string]struct{}, matches []kb.ExpandedResult) []string {
+	seen := make(map[string]struct{}, len(matches))
+	for _, result := range matches {
+		seen[result.ID] = struct{}{}
+	}
+	missing := make([]string, 0)
+	for id := range expected {
+		if _, ok := seen[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	return missing
 }
 
 // ShardsInManifestExist asserts that every shard listed in every KB's
@@ -122,7 +141,7 @@ func (shardsInManifestExist) Name() string { return "shards_in_manifest_exist" }
 
 func (shardsInManifestExist) Check(h *Harness) error {
 	for _, kbID := range h.KBIDs() {
-		shards, err := h.ManifestShards(kbID)
+		shards, err := h.ManifestShards(h.ctx, kbID)
 		if err != nil {
 			return fmt.Errorf("read manifest for %s: %w", kbID, err)
 		}

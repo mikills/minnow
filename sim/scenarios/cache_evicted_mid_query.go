@@ -18,13 +18,13 @@ func CacheEvictedMidQuery(h *sim.Harness) {
 	if err != nil {
 		h.Fatalf("embed (seed=%d): %v", h.Seed(), err)
 	}
-	if _, err := h.Query(kbID, probe, 5); err != nil {
+	if _, err := h.Search(kbID, probe, 5); err != nil {
 		h.Fatalf("warm query (seed=%d): %v", h.Seed(), err)
 	}
 	if err := h.WipeCache(); err != nil {
 		h.Fatalf("wipe cache (seed=%d): %v", h.Seed(), err)
 	}
-	if _, err := h.Query(kbID, probe, 5); err != nil {
+	if _, err := h.Search(kbID, probe, 5); err != nil {
 		h.Fatalf("post-wipe query (seed=%d): %v", h.Seed(), err)
 	}
 }

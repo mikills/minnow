@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	kb "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/duckdb/internal/connection"
 )
 
 func TestDuckDBArtifactFormat(t *testing.T) {
@@ -164,13 +165,11 @@ func testEmbeddingDimensionValidation(t *testing.T) {
 }
 
 func testAssertSafeIdentifier(t *testing.T) {
-	// Valid identifiers.
 	for _, good := range []string{"alias", "s0", "tbl_name", "ABC123"} {
-		require.NotPanics(t, func() { AssertSafeIdentifier(good) }, "should not panic on %q", good)
+		require.NoError(t, ValidateSafeIdentifier(good), "should accept %q", good)
 	}
-	// Invalid identifiers.
 	for _, bad := range []string{"", "has space", "tbl;--", "tbl`x", "'inj'", "dotted.name"} {
-		require.Panics(t, func() { AssertSafeIdentifier(bad) }, "should panic on %q", bad)
+		require.Error(t, ValidateSafeIdentifier(bad), "should reject %q", bad)
 	}
 }
 
@@ -184,28 +183,28 @@ func testIsTransientBlobError(t *testing.T) {
 }
 
 func testDuckDBMemoryLimitParse(t *testing.T) {
-	val, err := normalizeDuckDBMemoryLimit("")
+	val, err := connection.NormalizeMemoryLimit("")
 	require.NoError(t, err)
 	assert.Equal(t, "128MB", val)
 
-	val, err = normalizeDuckDBMemoryLimit(" 256 mb ")
+	val, err = connection.NormalizeMemoryLimit(" 256 mb ")
 	require.NoError(t, err)
 	assert.Equal(t, "256 mb", val)
 
-	_, err = normalizeDuckDBMemoryLimit("abc")
+	_, err = connection.NormalizeMemoryLimit("abc")
 	require.Error(t, err)
 }
 
 func testDuckDBExtensionDirParse(t *testing.T) {
 	t.Run("offline_missing", func(t *testing.T) {
-		_, err := normalizeDuckDBExtensionDir(filepath.Join(t.TempDir(), "missing"), true)
+		_, err := connection.NormalizeExtensionDir(filepath.Join(t.TempDir(), "missing"), true)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "offline mode")
 	})
 
 	t.Run("online_missing", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "missing")
-		val, err := normalizeDuckDBExtensionDir(path, false)
+		val, err := connection.NormalizeExtensionDir(path, false)
 		require.NoError(t, err)
 		assert.Equal(t, filepath.Clean(path), val)
 	})
@@ -213,7 +212,7 @@ func testDuckDBExtensionDirParse(t *testing.T) {
 	t.Run("not_directory", func(t *testing.T) {
 		file := filepath.Join(t.TempDir(), "ext-file")
 		require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
-		_, err := normalizeDuckDBExtensionDir(file, true)
+		_, err := connection.NormalizeExtensionDir(file, true)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not a directory")
 	})
@@ -245,9 +244,9 @@ func TestOfflineExtensionLoadAll(t *testing.T) {
 
 			db, err := sql.Open("duckdb", dbPath)
 			require.NoError(t, err)
-			defer db.Close()
+			t.Cleanup(func() { _ = db.Close() })
 
-			_, err = db.Exec(fmt.Sprintf(`SET extension_directory = '%s'`, quoteSQLString(localExtDir)))
+			_, err = db.Exec(fmt.Sprintf(`SET extension_directory = '%s'`, connection.QuoteSQLString(localExtDir)))
 			require.NoError(t, err)
 
 			_, err = db.Exec(`SET autoinstall_known_extensions = false`)
@@ -331,7 +330,7 @@ func TestOfflineExtensionLoad(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			defer db.Close()
+			t.Cleanup(func() { _ = db.Close() })
 
 			var loaded bool
 			err = db.QueryRow(`SELECT installed FROM duckdb_extensions() WHERE extension_name = 'vss'`).Scan(&loaded)

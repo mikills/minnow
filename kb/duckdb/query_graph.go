@@ -3,12 +3,17 @@ package duckdb
 import (
 	"context"
 	"database/sql"
-	"sort"
-
 	kb "github.com/mikills/minnow/kb"
+	graph "github.com/mikills/minnow/kb/duckdb/internal/graph"
 )
 
-func searchExpandedWithDB(ctx context.Context, db *sql.DB, queryVec []float32, topK int, options kb.ExpansionOptions) ([]kb.ExpandedResult, error) {
+func searchExpandedWithDB(
+	ctx context.Context,
+	db *sql.DB,
+	queryVec []float32,
+	topK int,
+	options kb.ExpansionOptions,
+) ([]kb.ExpandedResult, error) {
 	if err := ensureGraphQueryReady(ctx, db); err != nil {
 		return nil, err
 	}
@@ -35,40 +40,29 @@ func searchExpandedWithDB(ctx context.Context, db *sql.DB, queryVec []float32, t
 		entityScores = kb.TopNEntityScores(entityScores, options.MaxEntityResults)
 	}
 
-	return buildExpandedResults(ctx, db, queryVec, topK, seeds, entityScores, options.Alpha)
+	return buildExpandedResults(
+		ctx,
+		db,
+		expandedResultInput{
+			queryVec:     queryVec,
+			topK:         topK,
+			seeds:        seeds,
+			entityScores: entityScores,
+			alpha:        options.Alpha,
+		},
+	)
 }
 
 func mergeExpandedShardResults(shardResults [][]kb.ExpandedResult, topK int) []kb.ExpandedResult {
 	if topK <= 0 {
 		return []kb.ExpandedResult{}
 	}
-	flattened := make([]kb.ExpandedResult, 0)
-	for _, shard := range shardResults {
-		flattened = append(flattened, shard...)
-	}
-	if len(flattened) == 0 {
-		return []kb.ExpandedResult{}
-	}
-
-	sort.SliceStable(flattened, func(i, j int) bool {
-		if flattened[i].Score == flattened[j].Score {
-			if flattened[i].Distance == flattened[j].Distance {
-				return flattened[i].ID < flattened[j].ID
-			}
-			return flattened[i].Distance < flattened[j].Distance
-		}
-		return flattened[i].Score > flattened[j].Score
-	})
-
-	if topK > len(flattened) {
-		topK = len(flattened)
-	}
-	return flattened[:topK]
+	return graph.MergeShardResults(shardResults, topK)
 }
 
 func seedEntityScores(ctx context.Context, db *sql.DB, seeds []kb.QueryResult) (map[string]float64, error) {
-	seedDocIDs := extractSeedDocIDs(seeds)
-	seedEntities, err := queryEntitiesForDocs(ctx, db, seedDocIDs)
+	seedDocIDs := graph.SeedDocIDs(seeds)
+	seedEntities, err := graph.QueryEntitiesForDocs(ctx, db, seedDocIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +73,12 @@ func seedEntityScores(ctx context.Context, db *sql.DB, seeds []kb.QueryResult) (
 	return entityScores, nil
 }
 
-func expandEntityScores(ctx context.Context, db *sql.DB, scores map[string]float64, options kb.ExpansionOptions) (map[string]float64, error) {
+func expandEntityScores(
+	ctx context.Context,
+	db *sql.DB,
+	scores map[string]float64,
+	options kb.ExpansionOptions,
+) (map[string]float64, error) {
 	if options.Hops <= 0 || len(scores) == 0 {
 		return scores, nil
 	}
@@ -89,15 +88,20 @@ func expandEntityScores(ctx context.Context, db *sql.DB, scores map[string]float
 	return expandEntityScoresBFS(ctx, db, scores, options)
 }
 
-func expandEntityScoresBFS(ctx context.Context, db *sql.DB, scores map[string]float64, options kb.ExpansionOptions) (map[string]float64, error) {
-	frontier := copyFloatMap(scores)
+func expandEntityScoresBFS(
+	ctx context.Context,
+	db *sql.DB,
+	scores map[string]float64,
+	options kb.ExpansionOptions,
+) (map[string]float64, error) {
+	frontier := graph.CopyFloatMap(scores)
 	for hop := 0; hop < options.Hops; hop++ {
 		sources := kb.MapKeys(frontier)
 		if len(sources) == 0 {
 			break
 		}
 
-		edges, err := queryEdgesBySources(ctx, db, sources, options.EdgeTypes, options.MaxNeighborsPerNode)
+		edges, err := graph.QueryEdgesBySources(ctx, db, sources, options.EdgeTypes, options.MaxNeighborsPerNode)
 		if err != nil {
 			return nil, err
 		}
@@ -131,14 +135,22 @@ func expandEntityScoresBFS(ctx context.Context, db *sql.DB, scores map[string]fl
 	return scores, nil
 }
 
-func buildExpandedResults(ctx context.Context, db *sql.DB, queryVec []float32, topK int, seeds []kb.QueryResult, entityScores map[string]float64, alpha float64) ([]kb.ExpandedResult, error) {
-	docGraphScore, err := queryDocsForEntities(ctx, db, entityScores)
+type expandedResultInput struct {
+	queryVec     []float32
+	topK         int
+	seeds        []kb.QueryResult
+	entityScores map[string]float64
+	alpha        float64
+}
+
+func buildExpandedResults(ctx context.Context, db *sql.DB, input expandedResultInput) ([]kb.ExpandedResult, error) {
+	docGraphScore, err := graph.QueryDocsForEntities(ctx, db, input.entityScores)
 	if err != nil {
 		return nil, err
 	}
 
-	candidateIDs := candidateIDsFromSeeds(seeds, docGraphScore)
-	docMatches, err := queryDocMatchesForIDs(ctx, db, queryVec, candidateIDs)
+	candidateIDs := graph.CandidateIDs(input.seeds, docGraphScore)
+	docMatches, err := queryDocMatchesForIDs(ctx, db, input.queryVec, candidateIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -146,77 +158,21 @@ func buildExpandedResults(ctx context.Context, db *sql.DB, queryVec []float32, t
 		return []kb.ExpandedResult{}, nil
 	}
 
-	var maxGraphScore float64
-	for _, score := range docGraphScore {
-		if score > maxGraphScore {
-			maxGraphScore = score
-		}
-	}
-
-	results := make([]kb.ExpandedResult, 0, len(docMatches))
-	for id, match := range docMatches {
-		graph := docGraphScore[id]
-		graphNorm := 0.0
-		if maxGraphScore > 0 {
-			graphNorm = graph / maxGraphScore
-		}
-		sim := 1.0 / (1.0 + match.Distance)
-		score := alpha*sim + (1.0-alpha)*graphNorm
-		results = append(results, kb.ExpandedResult{
-			ID:         id,
-			Content:    match.Content,
-			Distance:   match.Distance,
-			GraphScore: graph,
-			Score:      score,
-			MediaRefs:  match.MediaRefs,
-		})
-	}
-
-	sort.Slice(results, func(i, j int) bool {
-		if results[i].Score == results[j].Score {
-			if results[i].Distance == results[j].Distance {
-				return results[i].ID < results[j].ID
-			}
-			return results[i].Distance < results[j].Distance
-		}
-		return results[i].Score > results[j].Score
-	})
-
-	if len(results) > topK {
-		results = results[:topK]
-	}
-
-	return results, nil
+	return graph.BuildExpandedResults(
+		graph.ExpandInput{
+			TopK:          input.topK,
+			Seeds:         input.seeds,
+			DocMatches:    convertDocMatches(docMatches),
+			DocGraphScore: docGraphScore,
+			Alpha:         input.alpha,
+		},
+	), nil
 }
 
-func candidateIDsFromSeeds(seeds []kb.QueryResult, docGraphScore map[string]float64) []string {
-	candidateSet := make(map[string]struct{}, len(seeds)+len(docGraphScore))
-	for _, seed := range seeds {
-		candidateSet[seed.ID] = struct{}{}
+func convertDocMatches(matches map[string]docMatch) map[string]graph.DocMatch {
+	out := make(map[string]graph.DocMatch, len(matches))
+	for id, match := range matches {
+		out[id] = graph.DocMatch{Content: match.Content, Distance: match.Distance, MediaRefs: match.MediaRefs}
 	}
-	for id := range docGraphScore {
-		candidateSet[id] = struct{}{}
-	}
-
-	candidateIDs := make([]string, 0, len(candidateSet))
-	for id := range candidateSet {
-		candidateIDs = append(candidateIDs, id)
-	}
-	return candidateIDs
-}
-
-func extractSeedDocIDs(seeds []kb.QueryResult) []string {
-	seedDocIDs := make([]string, 0, len(seeds))
-	for _, seed := range seeds {
-		seedDocIDs = append(seedDocIDs, seed.ID)
-	}
-	return seedDocIDs
-}
-
-func copyFloatMap(src map[string]float64) map[string]float64 {
-	dst := make(map[string]float64, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
-	return dst
+	return out
 }

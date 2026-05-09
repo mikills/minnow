@@ -24,6 +24,8 @@ var (
 // Harness is a seeded, deterministic test rig for minnow. It wires the KB and
 // its stores against a FakeClock and a FaultableBlobStore so scenarios can
 // drive time forward and inject storage failures while checking invariants.
+var harnessRootContext = context.Background()
+
 type Harness struct {
 	t    *testing.T
 	ctx  context.Context
@@ -111,20 +113,16 @@ func New(t *testing.T, opts ...Option) *Harness {
 	loader.EventInbox = eventInbox
 
 	format, err := duckdb.NewArtifactFormat(duckdb.DuckDBArtifactDeps{
-		BlobStore:      blobs,
-		ManifestStore:  manifest,
-		CacheDir:       cacheDir,
-		MemoryLimit:    "256MB",
-		ShardingPolicy: loader.ShardingPolicy,
-		Embed:          loader.Embed,
-		GraphBuilder:   func() *kb.GraphBuilder { return loader.GraphBuilder },
-		EvictCacheIfNeeded: func(ctx context.Context, protectKBID string) error {
-			return loader.EvictCacheIfNeeded(ctx, protectKBID)
-		},
-		LockFor: loader.LockFor,
-		AcquireWriteLease: func(ctx context.Context, kbID string) (kb.WriteLeaseManager, *kb.WriteLease, error) {
-			return loader.AcquireWriteLease(ctx, kbID)
-		},
+		BlobStore:                  blobs,
+		ManifestStore:              manifest,
+		CacheDir:                   cacheDir,
+		MemoryLimit:                "256MB",
+		ShardingPolicy:             loader.ShardingPolicy,
+		Embed:                      loader.Embed,
+		GraphBuilder:               harnessGraphBuilder(loader),
+		EvictCacheIfNeeded:         loader.EvictCacheIfNeeded,
+		LockFor:                    loader.LockFor,
+		AcquireWriteLease:          loader.AcquireWriteLease,
 		EnqueueReplacedShardsForGC: loader.EnqueueReplacedShardsForGC,
 		Metrics:                    loader,
 	})
@@ -133,7 +131,7 @@ func New(t *testing.T, opts ...Option) *Harness {
 
 	h := &Harness{
 		t:                t,
-		ctx:              context.Background(),
+		ctx:              harnessRootContext,
 		seed:             cfg.seed,
 		rng:              rand.New(rand.NewSource(cfg.seed)),
 		clock:            clock,
@@ -149,6 +147,10 @@ func New(t *testing.T, opts ...Option) *Harness {
 	}
 	t.Cleanup(h.close)
 	return h
+}
+
+func harnessGraphBuilder(loader *kb.KB) func() *kb.GraphBuilder {
+	return func() *kb.GraphBuilder { return loader.GraphBuilder }
 }
 
 func (h *Harness) close() {
@@ -178,7 +180,7 @@ func (h *Harness) GenerateDocs(kbID string, n int) []kb.Document {
 }
 
 // RandomVec returns a pseudo-random unit-length vector of the requested dim.
-// Safe to call from multiple goroutines; rng access is serialised.
+// Safe to call from multiple goroutines. rng access is serialised.
 func (h *Harness) RandomVec(dim int) []float32 {
 	vec := make([]float32, dim)
 	h.mu.Lock()
@@ -208,7 +210,7 @@ func normalize(vec []float32) []float32 {
 // ingested doc IDs (for the no-doc-loss invariant) and the resulting
 // manifest version (for the monotonic-manifest invariant). Scenarios no
 // longer need to call RecordManifestVersion manually after a successful
-// Ingest; doing so is still safe and idempotent.
+// Ingest. doing so is still safe and idempotent.
 func (h *Harness) Ingest(kbID string, docs []kb.Document) error {
 	if err := h.kb.UpsertDocsAndUpload(h.ctx, kbID, docs); err != nil {
 		return err
@@ -229,6 +231,11 @@ func (h *Harness) Ingest(kbID string, docs []kb.Document) error {
 
 // Query runs a top-k vector query against kbID.
 func (h *Harness) Query(kbID string, vec []float32, k int) ([]kb.ExpandedResult, error) {
+	return h.Search(kbID, vec, k)
+}
+
+// Search runs a top-k vector search against kbID.
+func (h *Harness) Search(kbID string, vec []float32, k int) ([]kb.ExpandedResult, error) {
 	return h.format.QueryRag(h.ctx, kb.RagQueryRequest{
 		KBID:     kbID,
 		QueryVec: vec,
@@ -313,7 +320,7 @@ func (h *Harness) WipeCache() error {
 		}
 	}
 	// Close any pooled shard connections so the in-DuckDB cache is also
-	// dropped; otherwise the next query can hit a stale file handle.
+	// dropped. otherwise the next query can hit a stale file handle.
 	h.format.Close()
 	return nil
 }
@@ -345,8 +352,8 @@ func (h *Harness) KBIDs() []string {
 
 // ManifestShards returns the shard metadata for kbID from the current manifest,
 // or nil if the KB has no manifest.
-func (h *Harness) ManifestShards(kbID string) ([]kb.SnapshotShardMetadata, error) {
-	doc, err := h.manifest.Get(h.ctx, kbID)
+func (h *Harness) ManifestShards(ctx context.Context, kbID string) ([]kb.SnapshotShardMetadata, error) {
+	doc, err := h.manifest.Get(ctx, kbID)
 	if err != nil {
 		return nil, err
 	}

@@ -59,23 +59,30 @@ func testAppEndpoints(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			req, err := http.NewRequest(tc.method, base+tc.path, nil)
-			require.NoError(t, err)
-
-			resp, err := http.DefaultClient.Do(req)
-			require.NoError(t, err)
-			defer resp.Body.Close()
-
-			assert.Equal(t, tc.status, resp.StatusCode)
-		})
+		t.Run(tc.name, func(t *testing.T) { assertAppEndpoint(t, base, tc.method, tc.path, tc.status) })
 	}
+}
+
+func assertAppEndpoint(t *testing.T, base, method, path string, status int) {
+	t.Helper()
+	req, err := http.NewRequest(method, base+path, nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	assert.Equal(t, status, resp.StatusCode)
 }
 
 func testAppMCPHTTPMount(t *testing.T) {
 	tmp := t.TempDir()
 	loader := kb.NewKB(&kb.LocalBlobStore{Root: filepath.Join(tmp, "blobs")}, filepath.Join(tmp, "cache"))
-	app := NewApp(loader, AppConfig{Address: "127.0.0.1:0", MCP: mcpserver.Config{Enabled: true, HTTPEnabled: true, HTTPPath: "/mcp", HTTPJSONResponse: true}})
+	app := NewApp(
+		loader,
+		AppConfig{
+			Address: "127.0.0.1:0",
+			MCP:     mcpserver.Config{Enabled: true, HTTPEnabled: true, HTTPPath: "/mcp", HTTPJSONResponse: true},
+		},
+	)
 	require.NoError(t, app.Start())
 	t.Cleanup(func() {
 		_ = app.Stop(context.Background())
@@ -84,7 +91,7 @@ func testAppMCPHTTPMount(t *testing.T) {
 
 	resp, err := http.Get("http://" + app.Address() + "/mcp")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	assert.NotEqual(t, http.StatusNotFound, resp.StatusCode)
 }
 
@@ -96,7 +103,7 @@ func testAppUIContentType(t *testing.T) {
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
@@ -137,26 +144,27 @@ func testAppKBIDMiddleware(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req, err := http.NewRequest(http.MethodGet, base+"/healthz", nil)
-			require.NoError(t, err)
-
-			if tc.sendHeader != "" {
-				req.Header.Set("X-KB-ID", tc.sendHeader)
-			}
-
-			resp, err := http.DefaultClient.Do(req)
-			require.NoError(t, err)
-			defer resp.Body.Close()
-
-			assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-			got := resp.Header.Get("X-KB-ID")
-			if tc.expectHeaderSet {
-				assert.Equal(t, tc.expectHeader, got)
-			} else {
-				assert.Empty(t, got)
-			}
+			assertKBIDMiddlewareCase(t, base, tc.sendHeader, tc.expectHeaderSet, tc.expectHeader)
 		})
+	}
+}
+
+func assertKBIDMiddlewareCase(t *testing.T, base, sendHeader string, expectHeaderSet bool, expectHeader string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, base+"/healthz", nil)
+	require.NoError(t, err)
+	if sendHeader != "" {
+		req.Header.Set("X-KB-ID", sendHeader)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	got := resp.Header.Get("X-KB-ID")
+	if expectHeaderSet {
+		assert.Equal(t, expectHeader, got)
+	} else {
+		assert.Empty(t, got)
 	}
 }
 

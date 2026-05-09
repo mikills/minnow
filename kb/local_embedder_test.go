@@ -1,9 +1,11 @@
-package kb
+package kb_test
 
 import (
 	"context"
 	"math"
 	"testing"
+
+	"github.com/mikills/minnow/kb"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -11,13 +13,13 @@ import (
 
 func TestLocalEmbedder(t *testing.T) {
 	t.Run("constructor_validation", func(t *testing.T) {
-		_, err := NewLocalEmbedder(0)
+		_, err := kb.NewLocalEmbedder(0)
 		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrInvalidEmbeddingDimension)
+		assert.ErrorIs(t, err, kb.ErrInvalidEmbeddingDimension)
 	})
 
 	t.Run("empty_input", func(t *testing.T) {
-		e, err := NewLocalEmbedder(64)
+		e, err := kb.NewLocalEmbedder(64)
 		require.NoError(t, err)
 		_, err = e.Embed(context.Background(), "   ")
 		require.Error(t, err)
@@ -25,14 +27,14 @@ func TestLocalEmbedder(t *testing.T) {
 	})
 
 	t.Run("zero_value_returns_error_not_panic", func(t *testing.T) {
-		var e LocalEmbedder
+		var e kb.LocalEmbedder
 		_, err := e.Embed(context.Background(), "hello")
 		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrInvalidEmbeddingDimension)
+		assert.ErrorIs(t, err, kb.ErrInvalidEmbeddingDimension)
 	})
 
 	t.Run("deterministic", func(t *testing.T) {
-		e, err := NewLocalEmbedder(128)
+		e, err := kb.NewLocalEmbedder(128)
 		require.NoError(t, err)
 		v1, err := e.Embed(context.Background(), "Golang vector search")
 		require.NoError(t, err)
@@ -42,7 +44,7 @@ func TestLocalEmbedder(t *testing.T) {
 	})
 
 	t.Run("dimension", func(t *testing.T) {
-		e, err := NewLocalEmbedder(384)
+		e, err := kb.NewLocalEmbedder(384)
 		require.NoError(t, err)
 		vec, err := e.Embed(context.Background(), "semantic retrieval system")
 		require.NoError(t, err)
@@ -50,7 +52,7 @@ func TestLocalEmbedder(t *testing.T) {
 	})
 
 	t.Run("normalized", func(t *testing.T) {
-		e, err := NewLocalEmbedder(256)
+		e, err := kb.NewLocalEmbedder(256)
 		require.NoError(t, err)
 		vec, err := e.Embed(context.Background(), "query ranking model")
 		require.NoError(t, err)
@@ -59,7 +61,7 @@ func TestLocalEmbedder(t *testing.T) {
 	})
 
 	t.Run("token_overlap_similarity", func(t *testing.T) {
-		e, err := NewLocalEmbedder(384)
+		e, err := kb.NewLocalEmbedder(384)
 		require.NoError(t, err)
 
 		a, err := e.Embed(context.Background(), "golang vector search")
@@ -75,7 +77,7 @@ func TestLocalEmbedder(t *testing.T) {
 	})
 
 	t.Run("morphological_similarity", func(t *testing.T) {
-		e, err := NewLocalEmbedder(384)
+		e, err := kb.NewLocalEmbedder(384)
 		require.NoError(t, err)
 
 		// Words sharing subword structure should be closer than unrelated words.
@@ -92,7 +94,7 @@ func TestLocalEmbedder(t *testing.T) {
 	})
 
 	t.Run("l2_distance_ordering", func(t *testing.T) {
-		e, err := NewLocalEmbedder(384)
+		e, err := kb.NewLocalEmbedder(384)
 		require.NoError(t, err)
 
 		query, err := e.Embed(context.Background(), "vector database indexing")

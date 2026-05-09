@@ -76,7 +76,7 @@ func UserConfigPath() (string, error) {
 
 // ResolveDefaultPath returns the config path used when the caller does not pass
 // an explicit path. The local working-directory file wins so repo/dev runs keep
-// their existing behavior; the user config makes `go install` usable globally.
+// their existing behavior. the user config makes `go install` usable globally.
 func ResolveDefaultPath() (string, error) {
 	if _, err := os.Stat(DefaultPath); err == nil {
 		return DefaultPath, nil
@@ -94,7 +94,11 @@ func ResolveDefaultPath() (string, error) {
 		return "", fmt.Errorf("stat config %q: %w", userPath, err)
 	}
 
-	return "", fmt.Errorf("read config: neither %q nor %q exists; set MINNOW_CONFIG or run `minnow config init dev-openai`", DefaultPath, userPath)
+	return "", fmt.Errorf(
+		"read config: neither %q nor %q exists; set MINNOW_CONFIG or run `minnow config init dev-openai`",
+		DefaultPath,
+		userPath,
+	)
 }
 
 // decodeStrict decodes YAML bytes into a Config, rejecting any unknown keys.
@@ -125,7 +129,7 @@ func decodeStrict(data []byte) (*Config, error) {
 // via template-substituted `../../etc/foo`) lets a misconfigured operator
 // trick minnow into reading or writing state at an arbitrary filesystem
 // location. Explicit absolute paths remain allowed because there is no
-// authoritative base dir to compare against; the operator's choice is
+// authoritative base dir to compare against. the operator's choice is
 // final, and we only audit-log it.
 func (c *Config) resolvePaths(baseDir string) error {
 	fields := []struct {
@@ -148,7 +152,12 @@ func (c *Config) resolvePaths(baseDir string) error {
 		resolved := filepath.Clean(filepath.Join(baseDir, *f.p))
 		base := filepath.Clean(baseDir)
 		if resolved != base && !strings.HasPrefix(resolved, base+string(filepath.Separator)) {
-			return fmt.Errorf("%s resolves outside the config's base directory (got %q, base %q)", f.name, resolved, base)
+			return fmt.Errorf(
+				"%s resolves outside the config's base directory (got %q, base %q)",
+				f.name,
+				resolved,
+				base,
+			)
 		}
 		*f.p = resolved
 	}

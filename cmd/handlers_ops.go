@@ -75,45 +75,68 @@ func registerOpsRoutes(e *echo.Echo, deps Dependencies) {
 	})
 
 	operationsLimiter := newIPRateLimiter(operationsPollRate, operationsPollBurst)
-	e.GET("/rag/operations/:id", func(c echo.Context) error {
+	e.GET("/rag/operations/:id", operationStatusHandler(deps, operationsLimiter))
+}
+
+func operationStatusHandler(deps Dependencies, operationsLimiter *ipRateLimiter) echo.HandlerFunc {
+	return func(c echo.Context) error {
 		if !operationsLimiter.Allow(c.RealIP()) {
 			c.Response().Header().Set("Retry-After", "1")
-			return c.JSON(http.StatusTooManyRequests, map[string]any{"error": "rate limit exceeded"})
+			return c.JSON(http.StatusTooManyRequests, map[string]any{errorResponseKey: "rate limit exceeded"})
 		}
 		if deps.GetEvent == nil {
-			return c.JSON(http.StatusServiceUnavailable, map[string]any{"error": "event subsystem not configured"})
+			return c.JSON(
+				http.StatusServiceUnavailable,
+				map[string]any{errorResponseKey: "event subsystem not configured"},
+			)
 		}
 		id := strings.TrimSpace(c.Param("id"))
 		if id == "" {
-			return c.JSON(http.StatusBadRequest, map[string]any{"error": "id required"})
+			return c.JSON(http.StatusBadRequest, map[string]any{errorResponseKey: "id required"})
 		}
 		ev, err := deps.GetEvent(c.Request().Context(), id)
 		if err != nil {
 			if errors.Is(err, kb.ErrEventNotFound) {
-				return c.JSON(http.StatusNotFound, map[string]any{"error": "not found"})
+				return c.JSON(http.StatusNotFound, map[string]any{errorResponseKey: "not found"})
 			}
-			return c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return c.JSON(http.StatusInternalServerError, map[string]any{errorResponseKey: err.Error()})
 		}
-		var terminal map[string]any
-		if deps.FindOperationTerminal != nil {
-			if child, childErr := deps.FindOperationTerminal(c.Request().Context(), id); childErr == nil && child != nil {
-				terminal = eventStatusPayload(child)
-			}
-		}
-		var stages []map[string]any
-		if deps.OperationStages != nil {
-			if snapshots, stageErr := deps.OperationStages(c.Request().Context(), id); stageErr == nil {
-				stages = make([]map[string]any, 0, len(snapshots))
-				for _, snapshot := range snapshots {
-					stages = append(stages, operationStagePayload(snapshot))
-				}
-			}
-		}
-		root := eventStatusPayload(ev)
-		root["stages"] = stages
-		root["terminal"] = terminal
+		root := operationStatusPayload(c, deps, id, ev)
 		return c.JSON(http.StatusOK, root)
-	})
+	}
+}
+
+func operationStatusPayload(c echo.Context, deps Dependencies, id string, ev *kb.KBEvent) map[string]any {
+	root := eventStatusPayload(ev)
+	root["stages"] = operationStagesPayload(c, deps, id)
+	root["terminal"] = operationTerminalPayload(c, deps, id)
+	return root
+}
+
+func operationTerminalPayload(c echo.Context, deps Dependencies, id string) map[string]any {
+	if deps.FindOperationTerminal == nil {
+		return nil
+	}
+	child, err := deps.FindOperationTerminal(c.Request().Context(), id)
+	if err != nil || child == nil {
+		return nil
+	}
+	return eventStatusPayload(child)
+}
+
+func operationStagesPayload(c echo.Context, deps Dependencies, id string) []map[string]any {
+	if deps.OperationStages == nil {
+		return nil
+	}
+	snapshots, err := deps.OperationStages(c.Request().Context(), id)
+	if err != nil {
+		return nil
+	}
+	stages := make([]map[string]any, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		stages = append(stages, operationStagePayload(snapshot))
+	}
+	return stages
 }
 
 func eventStatusPayload(ev *kb.KBEvent) map[string]any {
@@ -121,15 +144,15 @@ func eventStatusPayload(ev *kb.KBEvent) map[string]any {
 		return nil
 	}
 	out := map[string]any{
-		"event_id":       ev.EventID,
-		"kb_id":          ev.KBID,
-		"kind":           ev.Kind,
-		"status":         ev.Status,
-		"attempt":        ev.Attempt,
-		"correlation_id": ev.CorrelationID,
-		"causation_id":   ev.CausationID,
-		"created_at":     ev.CreatedAt,
-		"last_error":     ev.LastError,
+		eventIDResponseKey: ev.EventID,
+		kbIDContextKey:     ev.KBID,
+		"kind":             ev.Kind,
+		"status":           ev.Status,
+		"attempt":          ev.Attempt,
+		"correlation_id":   ev.CorrelationID,
+		"causation_id":     ev.CausationID,
+		"created_at":       ev.CreatedAt,
+		"last_error":       ev.LastError,
 	}
 	switch ev.Kind {
 	case kb.EventKBPublished:

@@ -75,7 +75,12 @@ func (s *FaultableBlobStore) Download(ctx context.Context, key string, dest stri
 	return s.inner.Download(ctx, key, dest)
 }
 
-func (s *FaultableBlobStore) UploadIfMatch(ctx context.Context, key string, src string, expectedVersion string) (*kb.BlobObjectInfo, error) {
+func (s *FaultableBlobStore) UploadIfMatch(
+	ctx context.Context,
+	key string,
+	src string,
+	expectedVersion string,
+) (*kb.BlobObjectInfo, error) {
 	if s.rollFault(func(f BlobFaults) float64 { return f.UploadFailRate }) {
 		return nil, ErrInjected
 	}

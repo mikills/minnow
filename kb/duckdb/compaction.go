@@ -2,41 +2,38 @@ package duckdb
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	kb "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/duckdb/internal/centroid"
+	"github.com/mikills/minnow/kb/duckdb/internal/reconstruct"
 )
 
 func (f *DuckDBArtifactFormat) CompactIfNeeded(ctx context.Context, kbID string) (*kb.CompactionPublishResult, error) {
 	if strings.TrimSpace(kbID) == "" {
-		return nil, fmt.Errorf("kbID cannot be empty")
+		return nil, fmt.Errorf(errEmptyKBID)
 	}
 
 	lock := f.lockFor(kbID)
 	lock.Lock()
 	defer lock.Unlock()
 
-	// Acquire cluster-wide write lease to prevent concurrent compactors
-	// from duplicating expensive shard builds.
-	if f.deps.AcquireWriteLease != nil {
-		leaseManager, lease, err := f.deps.AcquireWriteLease(ctx, kbID)
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = leaseManager.Release(context.Background(), lease) }()
+	releaseLease, err := f.acquireCompactionLease(ctx, kbID)
+	if err != nil {
+		return nil, err
 	}
+	defer releaseLease()
 
 	doc, err := f.deps.ManifestStore.Get(ctx, kbID)
 	if err != nil {
-		if errors.Is(err, kb.ErrManifestNotFound) {
-			return nil, kb.ErrKBUninitialized
-		}
-		return nil, err
+		return nil, manifestGetError(err)
 	}
 
 	manifest := &doc.Manifest
@@ -63,11 +60,7 @@ func (f *DuckDBArtifactFormat) CompactIfNeeded(ctx context.Context, kbID string)
 		return nil, err
 	}
 
-	if f.deps.EnqueueReplacedShardsForGC != nil {
-		f.deps.EnqueueReplacedShardsForGC(kbID, candidates, time.Now().UTC())
-	}
-
-	f.deps.Metrics.RecordShardCount(kbID, len(nextManifest.Shards))
+	f.afterCompactionPublish(kbID, candidates, nextManifest)
 
 	return &kb.CompactionPublishResult{
 		Performed:          true,
@@ -78,7 +71,45 @@ func (f *DuckDBArtifactFormat) CompactIfNeeded(ctx context.Context, kbID string)
 	}, nil
 }
 
-func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(ctx context.Context, kbID string, shards []kb.SnapshotShardMetadata) (kb.SnapshotShardMetadata, error) {
+func (f *DuckDBArtifactFormat) acquireCompactionLease(ctx context.Context, kbID string) (func(), error) {
+	if f.deps.AcquireWriteLease == nil {
+		return func() {}, nil
+	}
+	leaseManager, lease, err := f.deps.AcquireWriteLease(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	release := func() {
+		if err := leaseManager.Release(context.WithoutCancel(ctx), lease); err != nil {
+			slog.Default().Warn("compaction lease release failed", logKeyKBID, kbID, logKeyError, err)
+		}
+	}
+	return release, nil
+}
+
+func manifestGetError(err error) error {
+	if errors.Is(err, kb.ErrManifestNotFound) {
+		return kb.ErrKBUninitialized
+	}
+	return err
+}
+
+func (f *DuckDBArtifactFormat) afterCompactionPublish(
+	kbID string,
+	candidates []kb.SnapshotShardMetadata,
+	nextManifest kb.SnapshotShardManifest,
+) {
+	if f.deps.EnqueueReplacedShardsForGC != nil {
+		f.deps.EnqueueReplacedShardsForGC(kbID, candidates, time.Now().UTC())
+	}
+	f.deps.Metrics.RecordShardCount(kbID, len(nextManifest.Shards))
+}
+
+func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(
+	ctx context.Context,
+	kbID string,
+	shards []kb.SnapshotShardMetadata,
+) (kb.SnapshotShardMetadata, error) {
 	tmpDir, err := os.MkdirTemp("", "minnow-compact-*")
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, err
@@ -92,29 +123,17 @@ func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(ctx context.C
 	}
 	defer db.Close()
 
-	vectorRows := int64(0)
-	for i, shard := range shards {
-		partPath := filepath.Join(tmpDir, fmt.Sprintf("in-%05d.duckdb", i))
-		if err := f.deps.BlobStore.Download(ctx, shard.Key, partPath); err != nil {
-			return kb.SnapshotShardMetadata{}, err
-		}
-
-		alias := fmt.Sprintf("s%d", i)
-		if err := mergeShardIntoDB(ctx, db, alias, partPath, i == 0); err != nil {
-			return kb.SnapshotShardMetadata{}, err
-		}
-
-		vectorRows += shard.VectorRows
-	}
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs`).Scan(&vectorRows); err != nil {
+	if err := f.mergeCompactionShards(ctx, db, tmpDir, shards); err != nil {
 		return kb.SnapshotShardMetadata{}, err
 	}
-
-	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`); err != nil {
+	vectorRows, err := countCompactedDocs(ctx, db)
+	if err != nil {
 		return kb.SnapshotShardMetadata{}, err
 	}
-
-	centroid, err := computeShardCentroid(ctx, db)
+	if err := createDocsVectorIndex(ctx, db); err != nil {
+		return kb.SnapshotShardMetadata{}, err
+	}
+	centroid, err := centroid.Compute(ctx, db)
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, err
 	}
@@ -124,12 +143,7 @@ func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(ctx context.C
 		return kb.SnapshotShardMetadata{}, err
 	}
 
-	sha, err := kb.FileContentSHA256(combinedPath)
-	if err != nil {
-		return kb.SnapshotShardMetadata{}, err
-	}
-
-	info, err := os.Stat(combinedPath)
+	sha, info, err := compactedShardFileInfo(ctx, combinedPath)
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, err
 	}
@@ -157,7 +171,54 @@ func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(ctx context.C
 	}, nil
 }
 
+func (f *DuckDBArtifactFormat) mergeCompactionShards(
+	ctx context.Context,
+	db *sql.DB,
+	tmpDir string,
+	shards []kb.SnapshotShardMetadata,
+) error {
+	for i, shard := range shards {
+		partPath := filepath.Join(tmpDir, fmt.Sprintf("in-%05d.duckdb", i))
+		if err := f.deps.BlobStore.Download(ctx, shard.Key, partPath); err != nil {
+			return err
+		}
+		if err := reconstruct.MergeShardIntoDB(ctx, db, reconstruct.MergeOptions{Alias: fmt.Sprintf("s%d", i), PartPath: partPath, IsFirst: i == 0, EnsureGraphTables: EnsureGraphTables}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func countCompactedDocs(ctx context.Context, db *sql.DB) (int64, error) {
+	var vectorRows int64
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs`).Scan(&vectorRows); err != nil {
+		return 0, err
+	}
+	return vectorRows, nil
+}
+
+func createDocsVectorIndex(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS docs_vec_idx ON docs USING HNSW (embedding)`)
+	return err
+}
+
+func compactedShardFileInfo(ctx context.Context, path string) (string, os.FileInfo, error) {
+	sha, err := kb.FileContentSHA256(ctx, path)
+	if err != nil {
+		return "", nil, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", nil, err
+	}
+	return sha, info, nil
+}
+
 // BuildAndUploadCompactionReplacement merges the given shards into one replacement shard and uploads it.
-func (f *DuckDBArtifactFormat) BuildAndUploadCompactionReplacement(ctx context.Context, kbID string, shards []kb.SnapshotShardMetadata) (kb.SnapshotShardMetadata, error) {
+func (f *DuckDBArtifactFormat) BuildAndUploadCompactionReplacement(
+	ctx context.Context,
+	kbID string,
+	shards []kb.SnapshotShardMetadata,
+) (kb.SnapshotShardMetadata, error) {
 	return f.buildAndUploadCompactionReplacement(ctx, kbID, shards)
 }

@@ -3,7 +3,6 @@ package duckdb
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,16 +13,13 @@ import (
 	"strings"
 	"time"
 
-	duckdbdriver "github.com/duckdb/duckdb-go/v2"
 	kb "github.com/mikills/minnow/kb"
+	graph "github.com/mikills/minnow/kb/duckdb/internal/graph"
 )
 
 func (f *DuckDBArtifactFormat) Ingest(ctx context.Context, req kb.IngestUpsertRequest) (kb.IngestResult, error) {
-	if req.KBID == "" {
-		return kb.IngestResult{}, fmt.Errorf("kbID cannot be empty")
-	}
-	if len(req.Docs) == 0 {
-		return kb.IngestResult{}, nil
+	if empty, err := validateMutationDocs(req.KBID, len(req.Docs)); err != nil || empty {
+		return kb.IngestResult{}, err
 	}
 
 	preparedDocs, err := f.prepareDocsForUpsert(ctx, req.Docs)
@@ -31,32 +27,16 @@ func (f *DuckDBArtifactFormat) Ingest(ctx context.Context, req kb.IngestUpsertRe
 		return kb.IngestResult{}, err
 	}
 
-	graphBuilder := f.deps.GraphBuilder()
-	if req.Options.GraphEnabled != nil {
-		if *req.Options.GraphEnabled {
-			if graphBuilder == nil {
-				return kb.IngestResult{}, kb.ErrGraphUnavailable
-			}
-		} else {
-			graphBuilder = nil
-		}
+	graphBuilder, err := f.graphBuilderForUpsert(req.Options)
+	if err != nil {
+		return kb.IngestResult{}, err
 	}
 
 	lock := f.lockFor(req.KBID)
 	lock.Lock()
 	defer lock.Unlock()
 
-	kbDir := filepath.Join(f.deps.CacheDir, req.KBID)
-	dbPath := filepath.Join(kbDir, "vectors.duckdb")
-	seedVec := preparedDocs[0].Embedding
-	if len(seedVec) == 0 {
-		return kb.IngestResult{}, fmt.Errorf("embed doc %q for shard bootstrap: empty embedding", req.Docs[0].ID)
-	}
-	if err := f.ensureMutableShardDBLocked(ctx, req.KBID, kbDir, dbPath, len(seedVec), true); err != nil {
-		return kb.IngestResult{}, err
-	}
-
-	db, err := f.openConfiguredDB(ctx, dbPath)
+	db, err := f.openPreparedMutationDB(ctx, req.KBID, preparedDocs, req.Docs[0].ID)
 	if err != nil {
 		return kb.IngestResult{}, err
 	}
@@ -73,22 +53,69 @@ func (f *DuckDBArtifactFormat) Ingest(ctx context.Context, req kb.IngestUpsertRe
 		return kb.IngestResult{}, err
 	}
 
-	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
-	if err := f.postMutationCommit(ctx, db, req.KBID, req.Upload, policy.TargetShardBytes); err != nil {
+	if err := f.commitUpsertMutation(ctx, db, req); err != nil {
 		return kb.IngestResult{}, err
 	}
-	if req.Upload {
-		if err := f.cleanupPreShardSnapshotObjectsBestEffort(ctx, req.KBID); err != nil {
-			return kb.IngestResult{}, err
-		}
-	}
-
 	return kb.IngestResult{MutatedCount: len(req.Docs)}, nil
+}
+
+func (f *DuckDBArtifactFormat) commitUpsertMutation(ctx context.Context, db *sql.DB, req kb.IngestUpsertRequest) error {
+	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
+	if err := f.postMutationCommit(ctx, db, req.KBID, req.Upload, policy.TargetShardBytes); err != nil {
+		return err
+	}
+	return f.cleanupUploadedPreShardSnapshot(ctx, req)
+}
+
+func validateMutationDocs(kbID string, docCount int) (bool, error) {
+	if kbID == "" {
+		return false, fmt.Errorf(errEmptyKBID)
+	}
+	return docCount == 0, nil
+}
+
+func (f *DuckDBArtifactFormat) openPreparedMutationDB(
+	ctx context.Context,
+	kbID string,
+	preparedDocs []preparedUpsertDoc,
+	firstDocID string,
+) (*sql.DB, error) {
+	kbDir := filepath.Join(f.deps.CacheDir, kbID)
+	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
+	seedVec := preparedDocs[0].Embedding
+	if len(seedVec) == 0 {
+		return nil, fmt.Errorf("embed doc %q for shard bootstrap: empty embedding", firstDocID)
+	}
+	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: kbID, kbDir: kbDir, dbPath: dbPath, embeddingDim: len(seedVec), allowBootstrap: true}); err != nil {
+		return nil, err
+	}
+	return f.openConfiguredDB(ctx, dbPath)
+}
+
+func (f *DuckDBArtifactFormat) graphBuilderForUpsert(opts kb.UpsertDocsOptions) (*kb.GraphBuilder, error) {
+	graphBuilder := f.deps.GraphBuilder()
+	if opts.GraphEnabled == nil {
+		return graphBuilder, nil
+	}
+	if !*opts.GraphEnabled {
+		return nil, nil
+	}
+	if graphBuilder == nil {
+		return nil, kb.ErrGraphUnavailable
+	}
+	return graphBuilder, nil
+}
+
+func (f *DuckDBArtifactFormat) cleanupUploadedPreShardSnapshot(ctx context.Context, req kb.IngestUpsertRequest) error {
+	if !req.Upload {
+		return nil
+	}
+	return f.cleanupPreShardSnapshotObjectsBestEffort(ctx, req.KBID)
 }
 
 func (f *DuckDBArtifactFormat) Delete(ctx context.Context, req kb.IngestDeleteRequest) (kb.IngestResult, error) {
 	if req.KBID == "" {
-		return kb.IngestResult{}, fmt.Errorf("kbID cannot be empty")
+		return kb.IngestResult{}, fmt.Errorf(errEmptyKBID)
 	}
 	if len(req.DocIDs) == 0 {
 		return kb.IngestResult{}, nil
@@ -108,8 +135,8 @@ func (f *DuckDBArtifactFormat) Delete(ctx context.Context, req kb.IngestDeleteRe
 	defer lock.Unlock()
 
 	kbDir := filepath.Join(f.deps.CacheDir, req.KBID)
-	dbPath := filepath.Join(kbDir, "vectors.duckdb")
-	if err := f.ensureMutableShardDBLocked(ctx, req.KBID, kbDir, dbPath, 0, false); err != nil {
+	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
+	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: req.KBID, kbDir: kbDir, dbPath: dbPath}); err != nil {
 		return kb.IngestResult{}, err
 	}
 
@@ -131,12 +158,12 @@ func (f *DuckDBArtifactFormat) Delete(ctx context.Context, req kb.IngestDeleteRe
 	return kb.IngestResult{MutatedCount: len(cleanIDs)}, nil
 }
 
-func (f *DuckDBArtifactFormat) PublishPrepared(ctx context.Context, req kb.PreparedPublishRequest) (kb.IngestResult, error) {
-	if req.KBID == "" {
-		return kb.IngestResult{}, fmt.Errorf("kbID cannot be empty")
-	}
-	if len(req.Docs) == 0 {
-		return kb.IngestResult{}, nil
+func (f *DuckDBArtifactFormat) PublishPrepared(
+	ctx context.Context,
+	req kb.PreparedPublishRequest,
+) (kb.IngestResult, error) {
+	if empty, err := validateMutationDocs(req.KBID, len(req.Docs)); err != nil || empty {
+		return kb.IngestResult{}, err
 	}
 
 	preparedDocs, err := embeddedToPreparedDocs(req.Docs)
@@ -148,17 +175,7 @@ func (f *DuckDBArtifactFormat) PublishPrepared(ctx context.Context, req kb.Prepa
 	lock.Lock()
 	defer lock.Unlock()
 
-	kbDir := filepath.Join(f.deps.CacheDir, req.KBID)
-	dbPath := filepath.Join(kbDir, "vectors.duckdb")
-	seedVec := preparedDocs[0].Embedding
-	if len(seedVec) == 0 {
-		return kb.IngestResult{}, fmt.Errorf("embed doc %q for shard bootstrap: empty embedding", req.Docs[0].ID)
-	}
-	if err := f.ensureMutableShardDBLocked(ctx, req.KBID, kbDir, dbPath, len(seedVec), true); err != nil {
-		return kb.IngestResult{}, err
-	}
-
-	db, err := f.openConfiguredDB(ctx, dbPath)
+	db, err := f.openPreparedMutationDB(ctx, req.KBID, preparedDocs, req.Docs[0].ID)
 	if err != nil {
 		return kb.IngestResult{}, err
 	}
@@ -176,121 +193,158 @@ func (f *DuckDBArtifactFormat) PublishPrepared(ctx context.Context, req kb.Prepa
 	}
 
 	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
-	if err := f.postMutationCommitWithRetry(ctx, db, req.KBID, req.Upload, policy.TargetShardBytes, 5); err != nil {
+	if err := f.postMutationCommitWithRetry(ctx, db, mutationCommitOptions{kbID: req.KBID, upload: req.Upload, targetShardBytes: policy.TargetShardBytes, maxAttempts: 5}); err != nil {
 		return kb.IngestResult{}, err
 	}
-	if req.Upload {
-		if err := f.cleanupPreShardSnapshotObjectsBestEffort(ctx, req.KBID); err != nil {
-			return kb.IngestResult{}, err
-		}
+	if err := f.cleanupPreparedPublishUpload(ctx, req); err != nil {
+		return kb.IngestResult{}, err
 	}
-
 	return kb.IngestResult{MutatedCount: len(req.Docs)}, nil
 }
 
-func (f *DuckDBArtifactFormat) PublishPreparedStream(ctx context.Context, req kb.PreparedStreamRequest) (kb.IngestResult, error) {
-	if req.KBID == "" {
-		return kb.IngestResult{}, fmt.Errorf("kbID cannot be empty")
-	}
-	if req.Next == nil {
-		return kb.IngestResult{}, fmt.Errorf("prepared stream next cannot be nil")
-	}
-	firstDocs, err := req.Next(ctx)
-	if err != nil {
-		return kb.IngestResult{}, err
-	}
-	if len(firstDocs) == 0 {
-		return kb.IngestResult{}, nil
-	}
-	firstPrepared, err := embeddedToPreparedDocs(firstDocs)
-	if err != nil {
-		return kb.IngestResult{}, err
-	}
-	seedVec := firstPrepared[0].Embedding
-	if len(seedVec) == 0 {
-		return kb.IngestResult{}, fmt.Errorf("embed doc %q for shard bootstrap: empty embedding", firstDocs[0].ID)
-	}
-
-	kbDir := filepath.Join(f.deps.CacheDir, req.KBID)
-	dbPath := filepath.Join(kbDir, "vectors.duckdb")
-	mutated := 0
-	applyBatch := func(prepared []preparedUpsertDoc) error {
-		if len(prepared) == 0 {
-			return nil
-		}
-		lock := f.lockFor(req.KBID)
-		lock.Lock()
-		defer lock.Unlock()
-		if err := f.ensureMutableShardDBLocked(ctx, req.KBID, kbDir, dbPath, len(prepared[0].Embedding), true); err != nil {
-			return err
-		}
-		db, err := f.openConfiguredDB(ctx, dbPath)
-		if err != nil {
-			return err
-		}
-		defer db.Close()
-		expectedDim, err := duckDBEmbeddingDimension(ctx, db)
-		if err != nil {
-			return err
-		}
-		if err := validatePreparedDocDimensions(prepared, expectedDim, "prepared embedding dimension is incompatible with stored vectors"); err != nil {
-			return err
-		}
-		writeStarted := time.Now()
-		if err := f.applyPreparedUpsert(ctx, db, prepared, nil); err != nil {
-			return err
-		}
-		mutated += len(prepared)
-		slog.Default().InfoContext(ctx, "code index write batch complete", "kb_id", req.KBID, "chunks", len(prepared), "total_chunks", mutated, "duration_ms", time.Since(writeStarted).Milliseconds())
+func (f *DuckDBArtifactFormat) cleanupPreparedPublishUpload(ctx context.Context, req kb.PreparedPublishRequest) error {
+	if !req.Upload {
 		return nil
 	}
-	if err := applyBatch(firstPrepared); err != nil {
+	return f.cleanupPreShardSnapshotObjectsBestEffort(ctx, req.KBID)
+}
+
+func (f *DuckDBArtifactFormat) PublishPreparedStream(
+	ctx context.Context,
+	req kb.PreparedStreamRequest,
+) (kb.IngestResult, error) {
+	if err := validatePreparedStreamRequest(req); err != nil {
 		return kb.IngestResult{}, err
 	}
-	for {
-		docs, err := req.Next(ctx)
-		if err != nil {
-			return kb.IngestResult{}, err
-		}
-		if len(docs) == 0 {
-			break
-		}
-		prepared, err := embeddedToPreparedDocs(docs)
-		if err != nil {
-			return kb.IngestResult{}, err
-		}
-		if err := applyBatch(prepared); err != nil {
-			return kb.IngestResult{}, err
-		}
-	}
-	lock := f.lockFor(req.KBID)
-	lock.Lock()
-	defer lock.Unlock()
-	db, err := f.openConfiguredDB(ctx, dbPath)
+	kbDir := filepath.Join(f.deps.CacheDir, req.KBID)
+	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
+	mutated, err := f.applyPreparedStream(ctx, req, kbDir, dbPath)
 	if err != nil {
 		return kb.IngestResult{}, err
 	}
-	defer db.Close()
-	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
-	if err := f.postMutationCommitWithRetry(ctx, db, req.KBID, true, policy.TargetShardBytes, 5); err != nil {
-		return kb.IngestResult{}, err
-	}
-	if err := f.cleanupPreShardSnapshotObjectsBestEffort(ctx, req.KBID); err != nil {
+	if err := f.commitPreparedStream(ctx, req.KBID, dbPath); err != nil {
 		return kb.IngestResult{}, err
 	}
 	return kb.IngestResult{MutatedCount: mutated}, nil
 }
 
+func validatePreparedStreamRequest(req kb.PreparedStreamRequest) error {
+	if req.KBID == "" {
+		return fmt.Errorf(errEmptyKBID)
+	}
+	if req.Next == nil {
+		return fmt.Errorf("prepared stream next cannot be nil")
+	}
+	return nil
+}
+
+func (f *DuckDBArtifactFormat) applyPreparedStream(
+	ctx context.Context,
+	req kb.PreparedStreamRequest,
+	kbDir string,
+	dbPath string,
+) (int, error) {
+	mutated := 0
+	for {
+		docs, err := req.Next(ctx)
+		if err != nil || len(docs) == 0 {
+			return mutated, err
+		}
+		prepared, err := embeddedToPreparedDocs(docs)
+		if err != nil {
+			return mutated, err
+		}
+		if err := ensurePreparedSeedVector(prepared, docs); err != nil {
+			return mutated, err
+		}
+		if err := f.applyPreparedStreamBatch(ctx, preparedStreamBatch{kbID: req.KBID, kbDir: kbDir, dbPath: dbPath, prepared: prepared, mutatedBefore: mutated}); err != nil {
+			return mutated, err
+		}
+		mutated += len(prepared)
+	}
+}
+
+func ensurePreparedSeedVector(prepared []preparedUpsertDoc, docs []kb.EmbeddedDocument) error {
+	if len(prepared) == 0 || len(prepared[0].Embedding) > 0 {
+		return nil
+	}
+	return fmt.Errorf("embed doc %q for shard bootstrap: empty embedding", docs[0].ID)
+}
+
+type preparedStreamBatch struct {
+	kbID          string
+	kbDir         string
+	dbPath        string
+	prepared      []preparedUpsertDoc
+	mutatedBefore int
+}
+
+func (f *DuckDBArtifactFormat) applyPreparedStreamBatch(ctx context.Context, batch preparedStreamBatch) error {
+	lock := f.lockFor(batch.kbID)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: batch.kbID, kbDir: batch.kbDir, dbPath: batch.dbPath, embeddingDim: len(batch.prepared[0].Embedding), allowBootstrap: true}); err != nil {
+		return err
+	}
+	db, err := f.openConfiguredDB(ctx, batch.dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := f.validatePreparedBatchDimensions(ctx, db, batch.prepared); err != nil {
+		return err
+	}
+	writeStarted := time.Now()
+	if err := f.applyPreparedUpsert(ctx, db, batch.prepared, nil); err != nil {
+		return err
+	}
+	slog.Default().
+		InfoContext(ctx, "code index write batch complete", logKeyKBID, batch.kbID, "chunks", len(batch.prepared), "total_chunks", batch.mutatedBefore+len(batch.prepared), "duration_ms", time.Since(writeStarted).Milliseconds())
+	return nil
+}
+
+func (f *DuckDBArtifactFormat) validatePreparedBatchDimensions(
+	ctx context.Context,
+	db *sql.DB,
+	prepared []preparedUpsertDoc,
+) error {
+	expectedDim, err := duckDBEmbeddingDimension(ctx, db)
+	if err != nil {
+		return err
+	}
+	return validatePreparedDocDimensions(
+		prepared,
+		expectedDim,
+		"prepared embedding dimension is incompatible with stored vectors",
+	)
+}
+
+func (f *DuckDBArtifactFormat) commitPreparedStream(ctx context.Context, kbID string, dbPath string) error {
+	lock := f.lockFor(kbID)
+	lock.Lock()
+	defer lock.Unlock()
+	db, err := f.openConfiguredDB(ctx, dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
+	if err := f.postMutationCommitWithRetry(ctx, db, mutationCommitOptions{kbID: kbID, upload: true, targetShardBytes: policy.TargetShardBytes, maxAttempts: 5}); err != nil {
+		return err
+	}
+	return f.cleanupPreShardSnapshotObjectsBestEffort(ctx, kbID)
+}
+
 func (f *DuckDBArtifactFormat) CommitPrepared(ctx context.Context, kbID string) error {
 	if kbID == "" {
-		return fmt.Errorf("kbID cannot be empty")
+		return fmt.Errorf(errEmptyKBID)
 	}
 	lock := f.lockFor(kbID)
 	lock.Lock()
 	defer lock.Unlock()
 
 	kbDir := filepath.Join(f.deps.CacheDir, kbID)
-	dbPath := filepath.Join(kbDir, "vectors.duckdb")
+	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
 	if _, err := os.Stat(dbPath); err != nil {
 		return err
 	}
@@ -300,7 +354,7 @@ func (f *DuckDBArtifactFormat) CommitPrepared(ctx context.Context, kbID string) 
 	}
 	defer db.Close()
 	policy := kb.NormalizeShardingPolicy(f.deps.ShardingPolicy)
-	if err := f.postMutationCommitWithRetry(ctx, db, kbID, true, policy.TargetShardBytes, 5); err != nil {
+	if err := f.postMutationCommitWithRetry(ctx, db, mutationCommitOptions{kbID: kbID, upload: true, targetShardBytes: policy.TargetShardBytes, maxAttempts: 5}); err != nil {
 		return err
 	}
 	return f.cleanupPreShardSnapshotObjectsBestEffort(ctx, kbID)
@@ -313,8 +367,8 @@ func (f *DuckDBArtifactFormat) PrepareAndOpenDB(ctx context.Context, kbID string
 	defer lock.Unlock()
 
 	kbDir := filepath.Join(f.deps.CacheDir, kbID)
-	dbPath := filepath.Join(kbDir, "vectors.duckdb")
-	if err := f.ensureMutableShardDBLocked(ctx, kbID, kbDir, dbPath, 0, false); err != nil {
+	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
+	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: kbID, kbDir: kbDir, dbPath: dbPath}); err != nil {
 		return nil, err
 	}
 	if err := f.deps.EvictCacheIfNeeded(ctx, kbID); err != nil {
@@ -323,60 +377,98 @@ func (f *DuckDBArtifactFormat) PrepareAndOpenDB(ctx context.Context, kbID string
 	return f.openConfiguredDB(ctx, dbPath)
 }
 
-func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(
+type mutableShardRequest struct {
+	kbID           string
+	kbDir          string
+	dbPath         string
+	embeddingDim   int
+	allowBootstrap bool
+}
+
+func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(ctx context.Context, req mutableShardRequest) error {
+	if strings.TrimSpace(req.kbID) == "" {
+		return fmt.Errorf(errEmptyKBID)
+	}
+
+	manifestVersion, err := f.deps.ManifestStore.HeadVersion(ctx, req.kbID)
+	if err != nil {
+		return err
+	}
+	if manifestVersion == "" {
+		return f.bootstrapMutableShardDB(ctx, req.kbDir, req.dbPath, req.embeddingDim, req.allowBootstrap)
+	}
+	localVersionPath := localShardManifestVersionPath(req.kbDir)
+	fresh, err := localShardDBIsFresh(req.kbDir, req.dbPath, localVersionPath, manifestVersion)
+	if err != nil || fresh {
+		return err
+	}
+	return f.refreshMutableShardDB(
+		ctx,
+		mutableShardRefresh{
+			kbID:             req.kbID,
+			kbDir:            req.kbDir,
+			dbPath:           req.dbPath,
+			localVersionPath: localVersionPath,
+			manifestVersion:  manifestVersion,
+		},
+	)
+}
+
+func (f *DuckDBArtifactFormat) bootstrapMutableShardDB(
 	ctx context.Context,
-	kbID string,
 	kbDir string,
 	dbPath string,
 	embeddingDim int,
 	allowBootstrap bool,
 ) error {
-	if strings.TrimSpace(kbID) == "" {
-		return fmt.Errorf("kbID cannot be empty")
+	if !allowBootstrap {
+		return kb.ErrKBUninitialized
 	}
-
-	manifestVersion, err := f.deps.ManifestStore.HeadVersion(ctx, kbID)
-	if err != nil {
-		return err
+	if embeddingDim <= 0 {
+		return fmt.Errorf("embedding dimension must be > 0")
 	}
-	if manifestVersion == "" {
-		if !allowBootstrap {
-			return kb.ErrKBUninitialized
-		}
-		if embeddingDim <= 0 {
-			return fmt.Errorf("embedding dimension must be > 0")
-		}
-		return f.createEmptyMutableShardDBLocked(ctx, kbDir, dbPath, embeddingDim)
-	}
-
-	localVersionPath := localShardManifestVersionPath(kbDir)
-	localVersion, readErr := readLocalShardManifestVersion(localVersionPath)
-	hasLocalVersion := readErr == nil
-	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return readErr
-	}
-	if hasLocalVersion && localVersion == manifestVersion {
-		if _, statErr := os.Stat(dbPath); statErr == nil {
-			return nil
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return statErr
-		}
-	}
-
-	if err := os.MkdirAll(kbDir, 0o755); err != nil {
-		return err
-	}
-	if _, err := f.downloadSnapshotFromShards(ctx, kbID, dbPath); err != nil {
-		return err
-	}
-	if err := writeLocalShardManifestVersion(localVersionPath, manifestVersion); err != nil {
-		return err
-	}
-
-	return nil
+	return f.createEmptyMutableShardDBLocked(ctx, kbDir, dbPath, embeddingDim)
 }
 
-func (f *DuckDBArtifactFormat) createEmptyMutableShardDBLocked(ctx context.Context, kbDir, dbPath string, embeddingDim int) error {
+func localShardDBIsFresh(kbDir string, dbPath string, localVersionPath string, manifestVersion string) (bool, error) {
+	localVersion, readErr := readLocalShardManifestVersion(localVersionPath)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return false, readErr
+	}
+	if readErr != nil || localVersion != manifestVersion {
+		return false, nil
+	}
+	if _, statErr := os.Stat(dbPath); statErr == nil {
+		return true, nil
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return false, statErr
+	}
+	return false, nil
+}
+
+type mutableShardRefresh struct {
+	kbID             string
+	kbDir            string
+	dbPath           string
+	localVersionPath string
+	manifestVersion  string
+}
+
+func (f *DuckDBArtifactFormat) refreshMutableShardDB(ctx context.Context, req mutableShardRefresh) error {
+	if err := os.MkdirAll(req.kbDir, 0o755); err != nil {
+		return err
+	}
+	if _, err := f.downloadSnapshotFromShards(ctx, req.kbID, req.dbPath); err != nil {
+		return err
+	}
+	return writeLocalShardManifestVersion(req.localVersionPath, req.manifestVersion)
+}
+
+func (f *DuckDBArtifactFormat) createEmptyMutableShardDBLocked(
+	ctx context.Context,
+	kbDir, dbPath string,
+	embeddingDim int,
+) error {
 	if embeddingDim <= 0 {
 		return fmt.Errorf("embedding dimension must be > 0")
 	}
@@ -398,16 +490,13 @@ func (f *DuckDBArtifactFormat) createEmptyMutableShardDBLocked(ctx context.Conte
 		)
 	`
 	if _, err := db.ExecContext(ctx, createDocsSQL); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("create docs table for shard bootstrap: %w", err)
+		return closeMutableBootstrapDB(db, fmt.Errorf("create docs table for shard bootstrap: %w", err))
 	}
 	if err := ensureDocTombstonesTable(ctx, db); err != nil {
-		_ = db.Close()
-		return err
+		return closeMutableBootstrapDB(db, err)
 	}
 	if err := EnsureGraphTables(ctx, db); err != nil {
-		_ = db.Close()
-		return err
+		return closeMutableBootstrapDB(db, err)
 	}
 
 	if err := CheckpointAndCloseDB(ctx, db, "close db after shard bootstrap"); err != nil {
@@ -416,36 +505,66 @@ func (f *DuckDBArtifactFormat) createEmptyMutableShardDBLocked(ctx context.Conte
 	return nil
 }
 
-func (f *DuckDBArtifactFormat) postMutationCommit(ctx context.Context, db *sql.DB, kbID string, upload bool, targetShardBytes int64) error {
-	return f.postMutationCommitWithRetry(ctx, db, kbID, upload, targetShardBytes, 1)
+func (f *DuckDBArtifactFormat) postMutationCommit(
+	ctx context.Context,
+	db *sql.DB,
+	kbID string,
+	upload bool,
+	targetShardBytes int64,
+) error {
+	return f.postMutationCommitWithRetry(
+		ctx,
+		db,
+		mutationCommitOptions{kbID: kbID, upload: upload, targetShardBytes: targetShardBytes, maxAttempts: 1},
+	)
 }
 
-func (f *DuckDBArtifactFormat) postMutationCommitWithRetry(ctx context.Context, db *sql.DB, kbID string, upload bool, targetShardBytes int64, maxAttempts int) error {
-	kbDir := filepath.Join(f.deps.CacheDir, kbID)
-	dbPath := filepath.Join(kbDir, "vectors.duckdb")
+type mutationCommitOptions struct {
+	kbID             string
+	upload           bool
+	targetShardBytes int64
+	maxAttempts      int
+}
+
+func (f *DuckDBArtifactFormat) postMutationCommitWithRetry(
+	ctx context.Context,
+	db *sql.DB,
+	opts mutationCommitOptions,
+) error {
+	kbDir := filepath.Join(f.deps.CacheDir, opts.kbID)
+	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
 
 	if err := checkpointAndCloseMutationDB(ctx, db); err != nil {
 		return err
 	}
 
-	if upload {
-		if err := f.publishMutationSnapshotWithBackoff(ctx, kbID, kbDir, dbPath, targetShardBytes, maxAttempts); err != nil {
+	if opts.upload {
+		if err := f.publishMutationSnapshotWithBackoff(ctx, mutationPublishRequest{kbID: opts.kbID, kbDir: kbDir, dbPath: dbPath, targetShardBytes: opts.targetShardBytes, maxAttempts: opts.maxAttempts}); err != nil {
 			return err
 		}
 	}
 
-	if err := f.deps.EvictCacheIfNeeded(ctx, kbID); err != nil {
+	if err := f.deps.EvictCacheIfNeeded(ctx, opts.kbID); err != nil {
 		return err
 	}
 
 	return nil
 }
 
+func closeMutableBootstrapDB(db *sql.DB, cause error) error {
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("%w; close mutable bootstrap db: %v", cause, err)
+	}
+	return cause
+}
+
 func checkpointAndCloseMutationDB(ctx context.Context, db *sql.DB) error {
 	dbClosed := false
 	defer func() {
 		if !dbClosed {
-			_ = db.Close()
+			if err := db.Close(); err != nil {
+				slog.Default().Warn("close mutation db after failed checkpoint failed", logKeyError, err)
+			}
 		}
 	}()
 	if err := CheckpointDB(ctx, db); err != nil {
@@ -458,71 +577,83 @@ func checkpointAndCloseMutationDB(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func (f *DuckDBArtifactFormat) publishMutationSnapshotWithBackoff(ctx context.Context, kbID, kbDir, dbPath string, targetShardBytes int64, maxAttempts int) error {
-	if maxAttempts <= 0 {
-		maxAttempts = 1
+type mutationPublishRequest struct {
+	kbID             string
+	kbDir            string
+	dbPath           string
+	targetShardBytes int64
+	maxAttempts      int
+}
+
+func (f *DuckDBArtifactFormat) publishMutationSnapshotWithBackoff(
+	ctx context.Context,
+	req mutationPublishRequest,
+) error {
+	if req.maxAttempts <= 0 {
+		req.maxAttempts = 1
 	}
-	const (
-		transientMaxAttempts = 5
-		transientBaseDelay   = 100 * time.Millisecond
-		transientCapDelay    = 2 * time.Second
-	)
-	var lastOrphanedKeys []string
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		expectedManifestVersion, err := f.deps.ManifestStore.HeadVersion(ctx, kbID)
+	state := mutationPublishRetry{maxAttempts: req.maxAttempts}
+	for attempt := 1; attempt <= state.maxAttempts; attempt++ {
+		newVersion, artifactCount, err := f.publishMutationSnapshotAttempt(
+			ctx,
+			req.kbID,
+			req.dbPath,
+			req.targetShardBytes,
+		)
 		if err != nil {
-			if isTransientBlobError(err) && attempt < maxAttempts {
-				sleepBackoff(attempt, transientBaseDelay, transientCapDelay)
+			if state.retry(ctx, req.kbID, attempt, err) {
 				continue
 			}
 			return err
 		}
-
-		artifacts, err := f.BuildArtifacts(ctx, kbID, dbPath, targetShardBytes)
-		if err != nil {
-			return err
-		}
-		lastOrphanedKeys = lastOrphanedKeys[:0]
-		for _, a := range artifacts {
-			lastOrphanedKeys = append(lastOrphanedKeys, a.Key)
-		}
-		if auditErr := f.auditStagedShardBlobs(ctx, artifacts); auditErr != nil {
-			if isTransientBlobError(auditErr) && attempt < maxAttempts {
-				sleepBackoff(attempt, transientBaseDelay, transientCapDelay)
-				continue
-			}
-			return auditErr
-		}
-
-		newVersion, err := f.publishMutationManifest(ctx, kbID, artifacts, expectedManifestVersion)
-		if err != nil {
-			shouldRetry := errors.Is(err, kb.ErrBlobVersionMismatch) || isTransientBlobError(err)
-			if attempt >= maxAttempts && attempt >= transientMaxAttempts {
-				logOrphanedShardBlobs(ctx, kbID, attempt, err, lastOrphanedKeys)
-				return err
-			}
-			if !shouldRetry {
-				return err
-			}
-			// Allow more attempts for transient blob errors than the CAS-only
-			// path by extending maxAttempts when triggered by network shape.
-			if isTransientBlobError(err) && attempt >= maxAttempts && attempt < transientMaxAttempts {
-				sleepBackoff(attempt, transientBaseDelay, transientCapDelay)
-				// Bump attempt ceiling so we keep retrying up to
-				// transientMaxAttempts on network-shaped errors.
-				maxAttempts = transientMaxAttempts
-				continue
-			}
-			sleepBackoff(attempt, transientBaseDelay, transientCapDelay)
-			continue
-		}
-		f.deps.Metrics.RecordShardCount(kbID, len(artifacts))
-		if err := writeLocalShardManifestVersion(localShardManifestVersionPath(kbDir), newVersion); err != nil {
-			return err
-		}
-		return nil
+		f.deps.Metrics.RecordShardCount(req.kbID, artifactCount)
+		return writeLocalShardManifestVersion(localShardManifestVersionPath(req.kbDir), newVersion)
 	}
 	return nil
+}
+
+type mutationPublishRetry struct{ maxAttempts int }
+
+const (
+	transientPublishMaxAttempts = 5
+	transientPublishBaseDelay   = 100 * time.Millisecond
+	transientPublishCapDelay    = 2 * time.Second
+)
+
+func (s *mutationPublishRetry) retry(ctx context.Context, kbID string, attempt int, err error) bool {
+	shouldRetry := errors.Is(err, kb.ErrBlobVersionMismatch) || isTransientBlobError(err)
+	if !shouldRetry {
+		return false
+	}
+	if attempt >= s.maxAttempts && attempt >= transientPublishMaxAttempts {
+		logOrphanedShardBlobs(ctx, kbID, attempt, err, nil)
+		return false
+	}
+	if isTransientBlobError(err) && attempt >= s.maxAttempts && attempt < transientPublishMaxAttempts {
+		s.maxAttempts = transientPublishMaxAttempts
+	}
+	sleepBackoff(attempt, transientPublishBaseDelay, transientPublishCapDelay)
+	return true
+}
+
+func (f *DuckDBArtifactFormat) publishMutationSnapshotAttempt(
+	ctx context.Context,
+	kbID, dbPath string,
+	targetShardBytes int64,
+) (string, int, error) {
+	expectedManifestVersion, err := f.deps.ManifestStore.HeadVersion(ctx, kbID)
+	if err != nil {
+		return "", 0, err
+	}
+	artifacts, err := f.BuildArtifacts(ctx, kbID, dbPath, targetShardBytes)
+	if err != nil {
+		return "", 0, err
+	}
+	if err := f.auditStagedShardBlobs(ctx, artifacts); err != nil {
+		return "", 0, err
+	}
+	newVersion, err := f.publishMutationManifest(ctx, kbID, artifacts, expectedManifestVersion)
+	return newVersion, len(artifacts), err
 }
 
 func (f *DuckDBArtifactFormat) auditStagedShardBlobs(ctx context.Context, artifacts []kb.SnapshotShardMetadata) error {
@@ -534,7 +665,12 @@ func (f *DuckDBArtifactFormat) auditStagedShardBlobs(ctx context.Context, artifa
 	return nil
 }
 
-func (f *DuckDBArtifactFormat) publishMutationManifest(ctx context.Context, kbID string, artifacts []kb.SnapshotShardMetadata, expectedManifestVersion string) (string, error) {
+func (f *DuckDBArtifactFormat) publishMutationManifest(
+	ctx context.Context,
+	kbID string,
+	artifacts []kb.SnapshotShardMetadata,
+	expectedManifestVersion string,
+) (string, error) {
 	totalSize := int64(0)
 	for _, a := range artifacts {
 		totalSize += a.SizeBytes
@@ -554,15 +690,15 @@ func (f *DuckDBArtifactFormat) publishMutationManifest(ctx context.Context, kbID
 
 func logOrphanedShardBlobs(ctx context.Context, kbID string, attempt int, err error, orphanedKeys []string) {
 	slog.Default().WarnContext(ctx, "manifest publish failed; orphaned shard blobs may exist",
-		"kb_id", kbID,
+		logKeyKBID, kbID,
 		"attempts", attempt,
-		"error", err,
+		logKeyError, err,
 		"orphaned_keys", orphanedKeys,
 	)
 }
 
 // isTransientBlobError reports whether err looks like a retriable
-// network/blob error. context.DeadlineExceeded is deliberately excluded;
+// network/blob error. context.DeadlineExceeded is deliberately excluded.
 // that's a caller-imposed timeout, and retrying inside the same context
 // just wastes work.
 func isTransientBlobError(err error) bool {
@@ -641,7 +777,10 @@ func embeddedToPreparedDocs(docs []kb.EmbeddedDocument) ([]preparedUpsertDoc, er
 	return prepared, nil
 }
 
-func (f *DuckDBArtifactFormat) prepareDocsForUpsert(ctx context.Context, docs []kb.Document) ([]preparedUpsertDoc, error) {
+func (f *DuckDBArtifactFormat) prepareDocsForUpsert(
+	ctx context.Context,
+	docs []kb.Document,
+) ([]preparedUpsertDoc, error) {
 	prepared := make([]preparedUpsertDoc, 0, len(docs))
 	for _, doc := range docs {
 		if strings.TrimSpace(doc.ID) == "" {
@@ -664,7 +803,12 @@ func (f *DuckDBArtifactFormat) prepareDocsForUpsert(ctx context.Context, docs []
 	return prepared, nil
 }
 
-func (f *DuckDBArtifactFormat) applyUpsert(ctx context.Context, db *sql.DB, docs []preparedUpsertDoc, graphBuilder *kb.GraphBuilder) error {
+func (f *DuckDBArtifactFormat) applyUpsert(
+	ctx context.Context,
+	db *sql.DB,
+	docs []preparedUpsertDoc,
+	graphBuilder *kb.GraphBuilder,
+) error {
 
 	if err := ensureDocTombstonesTable(ctx, db); err != nil {
 		return err
@@ -693,7 +837,12 @@ func (f *DuckDBArtifactFormat) applyUpsert(ctx context.Context, db *sql.DB, docs
 	return applyPreparedDocsTx(ctx, tx, docs, graphResult, graphResult != nil)
 }
 
-func (f *DuckDBArtifactFormat) applyPreparedUpsert(ctx context.Context, db *sql.DB, docs []preparedUpsertDoc, graphResult *kb.GraphBuildResult) error {
+func (f *DuckDBArtifactFormat) applyPreparedUpsert(
+	ctx context.Context,
+	db *sql.DB,
+	docs []preparedUpsertDoc,
+	graphResult *kb.GraphBuildResult,
+) error {
 	if err := ensureDocTombstonesTable(ctx, db); err != nil {
 		return err
 	}
@@ -706,177 +855,6 @@ func (f *DuckDBArtifactFormat) applyPreparedUpsert(ctx context.Context, db *sql.
 		return fmt.Errorf("begin upsert tx: %w", err)
 	}
 	return applyPreparedDocsTx(ctx, tx, docs, graphResult, graphResult != nil)
-}
-
-func applyPreparedDocsAppender(ctx context.Context, db *sql.DB, docs []preparedUpsertDoc) error {
-	if len(docs) == 0 {
-		return nil
-	}
-	dim := len(docs[0].Embedding)
-	table := fmt.Sprintf("_minnow_docs_upsert_%d", time.Now().UnixNano())
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("open appender conn: %w", err)
-	}
-	defer conn.Close()
-	createSQL := fmt.Sprintf(`CREATE TABLE %s (id TEXT, content TEXT, embedding FLOAT[%d], media_refs TEXT)`, table, dim)
-	if _, err := conn.ExecContext(ctx, createSQL); err != nil {
-		return fmt.Errorf("create appender staging table: %w", err)
-	}
-	defer conn.ExecContext(context.Background(), fmt.Sprintf(`DROP TABLE IF EXISTS %s`, table))
-
-	if err := conn.Raw(func(raw any) error {
-		driverConn, ok := raw.(driver.Conn)
-		if !ok {
-			return fmt.Errorf("duckdb raw connection has type %T", raw)
-		}
-		appender, err := duckdbdriver.NewAppenderFromConn(driverConn, "", table)
-		if err != nil {
-			return fmt.Errorf("create docs appender: %w", err)
-		}
-		closed := false
-		defer func() {
-			if !closed {
-				_ = appender.Close()
-			}
-		}()
-		for _, prepared := range docs {
-			doc := prepared.Doc
-			mediaRefsJSON, err := encodeMediaRefs(doc.MediaIDs, doc.MediaRefs)
-			if err != nil {
-				return fmt.Errorf("encode media refs for doc %q: %w", doc.ID, err)
-			}
-			var mediaRefsValue any
-			if mediaRefsJSON.Valid {
-				mediaRefsValue = mediaRefsJSON.String
-			}
-			if err := appender.AppendRow(doc.ID, doc.Text, prepared.Embedding, mediaRefsValue); err != nil {
-				return kb.WrapEmbeddingDimensionMismatch(fmt.Errorf("append doc %q: %w", doc.ID, err), "upsert embedding dimension is incompatible with stored vectors")
-			}
-		}
-		closed = true
-		if err := appender.Close(); err != nil {
-			return fmt.Errorf("close docs appender: %w", err)
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin appender upsert tx: %w", err)
-	}
-	stmtDelete, err := tx.PrepareContext(ctx, `DELETE FROM docs WHERE id = ?`)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("prepare docs delete: %w", err)
-	}
-	defer stmtDelete.Close()
-	stmtUndelete, err := tx.PrepareContext(ctx, `DELETE FROM doc_tombstones WHERE doc_id = ?`)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("prepare doc_tombstones delete: %w", err)
-	}
-	defer stmtUndelete.Close()
-	for _, prepared := range docs {
-		docID := prepared.Doc.ID
-		if _, err := stmtDelete.ExecContext(ctx, docID); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("delete existing doc %q before upsert: %w", docID, err)
-		}
-		if _, err := stmtUndelete.ExecContext(ctx, docID); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("clear tombstone for doc %q: %w", docID, err)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO docs (id, content, embedding, media_refs) SELECT id, content, embedding, media_refs FROM %s`, table)); err != nil {
-		tx.Rollback()
-		return kb.WrapEmbeddingDimensionMismatch(fmt.Errorf("bulk insert prepared docs: %w", err), "upsert embedding dimension is incompatible with stored vectors")
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit appender upsert tx: %w", err)
-	}
-	return nil
-}
-
-func applyPreparedDocsTx(ctx context.Context, tx *sql.Tx, docs []preparedUpsertDoc, graphResult *kb.GraphBuildResult, ensureGraphTables bool) error {
-	if len(docs) == 0 {
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit empty upsert tx: %w", err)
-		}
-		return nil
-	}
-	stmtDelete, err := tx.PrepareContext(ctx, `DELETE FROM docs WHERE id = ?`)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("prepare docs delete: %w", err)
-	}
-	defer stmtDelete.Close()
-
-	insertSQL := fmt.Sprintf(`INSERT INTO docs (id, content, embedding, media_refs) VALUES (?, ?, CAST(? AS FLOAT[%d]), ?)`, len(docs[0].Embedding))
-	stmtInsert, err := tx.PrepareContext(ctx, insertSQL)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("prepare docs insert: %w", err)
-	}
-	defer stmtInsert.Close()
-
-	stmtUndelete, err := tx.PrepareContext(ctx, `DELETE FROM doc_tombstones WHERE doc_id = ?`)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("prepare doc_tombstones delete: %w", err)
-	}
-	defer stmtUndelete.Close()
-
-	for _, prepared := range docs {
-		doc := prepared.Doc
-		vec := prepared.Embedding
-		vecStr := FormatVectorForSQL(vec)
-		if _, err := stmtDelete.ExecContext(ctx, doc.ID); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("delete existing doc %q before upsert: %w", doc.ID, err)
-		}
-		mediaRefsJSON, err := encodeMediaRefs(doc.MediaIDs, doc.MediaRefs)
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("encode media refs for doc %q: %w", doc.ID, err)
-		}
-		if _, err := stmtInsert.ExecContext(ctx, doc.ID, doc.Text, vecStr, mediaRefsJSON); err != nil {
-			tx.Rollback()
-			return kb.WrapEmbeddingDimensionMismatch(fmt.Errorf("upsert doc %q: %w", doc.ID, err), "upsert embedding dimension is incompatible with stored vectors")
-		}
-		if _, err := stmtUndelete.ExecContext(ctx, doc.ID); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("clear tombstone for doc %q: %w", doc.ID, err)
-		}
-	}
-
-	if graphResult != nil {
-		docIDs := make([]string, 0, len(docs))
-		for _, prepared := range docs {
-			docIDs = append(docIDs, prepared.Doc.ID)
-		}
-		if ensureGraphTables {
-			if err := ensureGraphTablesForTx(ctx, tx); err != nil {
-				tx.Rollback()
-				return err
-			}
-		}
-		if err := pruneGraphForDocsTx(ctx, tx, docIDs, true); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err := InsertGraphBuildResultTx(ctx, tx, graphResult); err != nil {
-			tx.Rollback()
-			return err
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit upsert tx: %w", err)
-	}
-	return nil
 }
 
 func ensureGraphTablesForTx(ctx context.Context, tx *sql.Tx) error {
@@ -896,7 +874,57 @@ func ensureGraphTablesForTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-func (f *DuckDBArtifactFormat) applyDelete(ctx context.Context, db *sql.DB, cleanIDs []string, opts kb.DeleteDocsOptions) error {
+func applyDocDeleteTx(ctx context.Context, tx *sql.Tx, cleanIDs []string, hardDelete bool) error {
+	if hardDelete {
+		return applyHardDocDeleteTx(ctx, tx, cleanIDs)
+	}
+	return applySoftDocDeleteTx(ctx, tx, cleanIDs)
+}
+
+func applyHardDocDeleteTx(ctx context.Context, tx *sql.Tx, cleanIDs []string) error {
+	placeholders := kb.BuildInClausePlaceholders(len(cleanIDs))
+	args := stringArgs(cleanIDs)
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM docs WHERE id IN (%s)`, placeholders), args...); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("hard delete docs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM doc_tombstones WHERE doc_id IN (%s)`, placeholders), args...); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("remove tombstones: %w", err)
+	}
+	return nil
+}
+
+func applySoftDocDeleteTx(ctx context.Context, tx *sql.Tx, cleanIDs []string) error {
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR REPLACE INTO doc_tombstones (doc_id, deleted_at) VALUES (?, NOW())`)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("prepare tombstone upsert: %w", err)
+	}
+	defer stmt.Close()
+	for _, id := range cleanIDs {
+		if _, err := stmt.ExecContext(ctx, id); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("soft delete doc %q: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func stringArgs(values []string) []any {
+	args := make([]any, 0, len(values))
+	for _, value := range values {
+		args = append(args, value)
+	}
+	return args
+}
+
+func (f *DuckDBArtifactFormat) applyDelete(
+	ctx context.Context,
+	db *sql.DB,
+	cleanIDs []string,
+	opts kb.DeleteDocsOptions,
+) error {
 	if err := ensureDocTombstonesTable(ctx, db); err != nil {
 		return err
 	}
@@ -906,41 +934,11 @@ func (f *DuckDBArtifactFormat) applyDelete(ctx context.Context, db *sql.DB, clea
 		return fmt.Errorf("begin delete docs tx: %w", err)
 	}
 
-	placeholders := kb.BuildInClausePlaceholders(len(cleanIDs))
-	args := make([]any, 0, len(cleanIDs))
-	for _, id := range cleanIDs {
-		args = append(args, id)
+	if err := applyDocDeleteTx(ctx, tx, cleanIDs, opts.HardDelete); err != nil {
+		return err
 	}
 
-	if opts.HardDelete {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM docs WHERE id IN (%s)`, placeholders), args...); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("hard delete docs: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM doc_tombstones WHERE doc_id IN (%s)`, placeholders), args...); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("remove tombstones: %w", err)
-		}
-	} else {
-		stmt, err := tx.PrepareContext(ctx, `INSERT OR REPLACE INTO doc_tombstones (doc_id, deleted_at) VALUES (?, NOW())`)
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("prepare tombstone upsert: %w", err)
-		}
-		for _, id := range cleanIDs {
-			if _, err := stmt.ExecContext(ctx, id); err != nil {
-				stmt.Close()
-				tx.Rollback()
-				return fmt.Errorf("soft delete doc %q: %w", id, err)
-			}
-		}
-		if err := stmt.Close(); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("close tombstone stmt: %w", err)
-		}
-	}
-
-	if err := pruneGraphForDocsTx(ctx, tx, cleanIDs, opts.HardDelete && opts.CleanupGraph); err != nil {
+	if err := graph.PruneForDocsTx(ctx, tx, cleanIDs, opts.HardDelete && opts.CleanupGraph); err != nil {
 		tx.Rollback()
 		return err
 	}

@@ -20,12 +20,12 @@ func DimMismatchQuery(h *sim.Harness) {
 	}
 	h.RecordManifestVersion(kbID)
 
-	// Default harness embedder is 32-dim; 1024 guarantees a mismatch.
+	// Default harness embedder is 32-dim. 1024 guarantees a mismatch.
 	badVec := make([]float32, 1024)
 	for i := range badVec {
 		badVec[i] = 0.1
 	}
-	_, err := h.Query(kbID, badVec, 5)
+	_, err := h.Search(kbID, badVec, 5)
 	if err == nil {
 		h.Errorf("expected error on dim mismatch, got nil (seed=%d)", h.Seed())
 		return

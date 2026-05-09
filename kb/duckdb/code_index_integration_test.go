@@ -1,4 +1,4 @@
-package duckdb
+package duckdb_test
 
 import (
 	"context"
@@ -16,10 +16,10 @@ func TestCodeIndex(t *testing.T) {
 	t.Run("incremental", func(t *testing.T) {
 		ctx := context.Background()
 		kbID := "code-index-incremental"
-		embedder := &countingCodeEmbedder{base: newFixtureEmbedder(16)}
+		embedder := &countingCodeEmbedder{base: mustLocalEmbedder(t, 16)}
 		h := kb.NewTestHarness(t, kbID).WithEmbedder(embedder).Setup()
 		t.Cleanup(h.Cleanup)
-		registerFormatOnHarness(t, h)
+		registerDuckDBFormatOnHarness(t, h)
 
 		root := t.TempDir()
 		writeCodeTestFile(t, filepath.Join(root, "main.go"), "package main\nfunc Alpha() string { return \"alpha\" }\n")
@@ -27,7 +27,8 @@ func TestCodeIndex(t *testing.T) {
 		runCodeGit(t, root, "init")
 		runCodeGit(t, root, "add", ".")
 
-		first, err := h.KB().IndexCodebase(ctx, kb.CodeIndexOptions{KBID: kbID, IndexKey: "default", Description: "Primary Minnow codebase", Root: root, IncludeUntracked: true})
+		first, err := h.KB().
+			IndexCodebase(ctx, kb.CodeIndexOptions{KBID: kbID, IndexKey: "default", Description: "Primary Minnow codebase", Root: root, IncludeUntracked: true})
 		require.NoError(t, err)
 		require.Equal(t, "default", first.IndexKey)
 		require.Equal(t, "Primary Minnow codebase", first.Description)
@@ -45,13 +46,18 @@ func TestCodeIndex(t *testing.T) {
 		require.Equal(t, 0, second.IndexedFiles)
 		require.Equal(t, firstCalls, embedder.Calls())
 
-		writeCodeTestFile(t, filepath.Join(root, "util.go"), "package main\nfunc Beta() string { return \"changed\" }\n")
+		writeCodeTestFile(
+			t,
+			filepath.Join(root, "util.go"),
+			"package main\nfunc Beta() string { return \"changed\" }\n",
+		)
 		third, err := h.KB().IndexCodebase(ctx, kb.CodeIndexOptions{KBID: kbID, Root: root, IncludeUntracked: true})
 		require.NoError(t, err)
 		require.Equal(t, 1, third.IndexedFiles)
 		require.Greater(t, embedder.Calls(), firstCalls)
 
-		results, err := h.KB().SearchCode(ctx, kbID, "changed beta", kb.CodeSearchOptions{TopK: 5, Path: "util.go", Language: "go"})
+		results, err := h.KB().
+			SearchCode(ctx, kbID, "changed beta", kb.CodeSearchOptions{TopK: 5, Path: "util.go", Language: "go"})
 		require.NoError(t, err)
 		require.NotEmpty(t, results)
 		require.Equal(t, "util.go", results[0].Path)

@@ -33,7 +33,7 @@ type BuildOptions struct {
 }
 
 // Runtime is a fully wired but not-yet-started deployment. Call Start to
-// take traffic; call Stop to shut down cleanly.
+// take traffic. call Stop to shut down cleanly.
 type Runtime struct {
 	cfg         *config.Config
 	logger      *slog.Logger
@@ -72,65 +72,9 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 
 	rt := &Runtime{cfg: cfg, logger: logger, dryRun: opts.DryRun}
 
-	blobStore, err := buildBlobStore(cfg)
+	k, err := rt.buildKB(ctx, cfg)
 	if err != nil {
 		return nil, err
-	}
-
-	embedder, err := buildEmbedder(cfg, logger)
-	if err != nil {
-		return nil, err
-	}
-
-	kbOpts := []kb.KBOption{
-		kb.WithEmbedder(embedder),
-		kb.WithShardingPolicy(cfg.ShardingPolicy()),
-		kb.WithMediaGCConfig(cfg.MediaGCConfig()),
-		kb.WithMediaContentTypeAllowlist(cfg.Media.ContentTypeAllowlist),
-	}
-
-	if cfg.Graph.Enabled {
-		grapher := kb.NewOllamaGrapher(cfg.Graph.URL, cfg.Graph.Model)
-		grapher.MaxParallel = cfg.GraphParallelism()
-		kbOpts = append(kbOpts, kb.WithGraphBuilder(&kb.GraphBuilder{
-			Chunker: &kb.TextChunker{ChunkSize: kb.DefaultTextChunkSize},
-			Grapher: grapher,
-		}))
-		logger.Info("configured ollama grapher", "url", cfg.Graph.URL, "model", cfg.Graph.Model, "parallelism", cfg.GraphParallelism())
-	}
-
-	mongoOpts, err := rt.wireMongo(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	kbOpts = append(kbOpts, mongoOpts...)
-
-	// Event pipeline: minnow is event-driven everywhere. When Mongo is not
-	// configured (or we're in DryRun), wire the in-memory implementations so
-	// /rag/ingest, worker pools, and operation polling all work locally.
-	// Mongo, when present, has already installed its own EventStore/Inbox
-	// via wireMongo - we don't stomp it here.
-	if !hasEventStore(mongoOpts) {
-		kbOpts = append(kbOpts, kb.WithEventStore(kb.NewInMemoryEventStore()))
-	}
-	if !hasEventInbox(mongoOpts) {
-		kbOpts = append(kbOpts, kb.WithEventInbox(kb.NewInMemoryEventInbox()))
-	}
-
-	// Media store: only wire one when cfg.Media.Enabled is true. With media
-	// disabled the routes return 503 (cmd/app.go gates the Dependencies
-	// closures on KB.MediaStore being non-nil). Mongo media wiring is
-	// likewise skipped inside wireMongo when media is disabled.
-	if cfg.Media.Enabled && !hasMediaStore(mongoOpts) {
-		kbOpts = append(kbOpts, kb.WithMediaStore(kb.NewInMemoryMediaStore()))
-	}
-
-	k := kb.NewKB(blobStore, cfg.Storage.Cache.Dir, kbOpts...)
-	if cfg.Storage.Cache.MaxBytes > 0 {
-		k.SetMaxCacheBytes(cfg.Storage.Cache.MaxBytes)
-	}
-	if d := cfg.Storage.Cache.EntryTTL.AsDuration(); d > 0 {
-		k.SetCacheEntryTTL(d)
 	}
 	rt.kb = k
 
@@ -146,7 +90,95 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 		return nil, fmt.Errorf("register artifact format: %w", err)
 	}
 
-	appCfg := appcmd.AppConfig{
+	rt.app = appcmd.NewApp(k, appConfigFromConfig(cfg, logger))
+	if err := rt.wireSchedulerAndWorkers(cfg); err != nil {
+		return nil, err
+	}
+	return rt, nil
+}
+
+func (r *Runtime) buildKB(ctx context.Context, cfg *config.Config) (*kb.KB, error) {
+	blobStore, err := buildBlobStore(cfg)
+	if err != nil {
+		return nil, err
+	}
+	kbOpts, err := r.buildKBOptions(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	k := kb.NewKB(blobStore, cfg.Storage.Cache.Dir, kbOpts...)
+	if cfg.Storage.Cache.MaxBytes > 0 {
+		k.SetMaxCacheBytes(cfg.Storage.Cache.MaxBytes)
+	}
+	if d := cfg.Storage.Cache.EntryTTL.AsDuration(); d > 0 {
+		k.SetCacheEntryTTL(d)
+	}
+	return k, nil
+}
+
+func (r *Runtime) buildKBOptions(ctx context.Context, cfg *config.Config) ([]kb.KBOption, error) {
+	embedder, err := buildEmbedder(cfg, r.logger)
+	if err != nil {
+		return nil, err
+	}
+	kbOpts := baseKBOptions(cfg, embedder)
+	kbOpts = append(kbOpts, graphKBOptions(cfg, r.logger)...)
+	mongoOpts, err := r.wireMongo(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	kbOpts = append(kbOpts, mongoOpts...)
+	kbOpts = append(kbOpts, fallbackKBOptions(cfg, mongoOpts)...)
+	return kbOpts, nil
+}
+
+func baseKBOptions(cfg *config.Config, embedder kb.Embedder) []kb.KBOption {
+	return []kb.KBOption{
+		kb.WithEmbedder(embedder),
+		kb.WithShardingPolicy(cfg.ShardingPolicy()),
+		kb.WithMediaGCConfig(cfg.MediaGCConfig()),
+		kb.WithMediaContentTypeAllowlist(cfg.Media.ContentTypeAllowlist),
+	}
+}
+
+func graphKBOptions(cfg *config.Config, logger *slog.Logger) []kb.KBOption {
+	if !cfg.Graph.Enabled {
+		return nil
+	}
+	grapher := kb.NewOllamaGrapher(cfg.Graph.URL, cfg.Graph.Model)
+	grapher.MaxParallel = cfg.GraphParallelism()
+	logger.Info(
+		"configured ollama grapher",
+		"url",
+		cfg.Graph.URL,
+		"model",
+		cfg.Graph.Model,
+		"parallelism",
+		cfg.GraphParallelism(),
+	)
+	return []kb.KBOption{
+		kb.WithGraphBuilder(
+			&kb.GraphBuilder{Chunker: &kb.TextChunker{ChunkSize: kb.DefaultTextChunkSize}, Grapher: grapher},
+		),
+	}
+}
+
+func fallbackKBOptions(cfg *config.Config, mongoOpts []kb.KBOption) []kb.KBOption {
+	var opts []kb.KBOption
+	if !hasEventStore(mongoOpts) {
+		opts = append(opts, kb.WithEventStore(kb.NewInMemoryEventStore()))
+	}
+	if !hasEventInbox(mongoOpts) {
+		opts = append(opts, kb.WithEventInbox(kb.NewInMemoryEventInbox()))
+	}
+	if cfg.Media.Enabled && !hasMediaStore(mongoOpts) {
+		opts = append(opts, kb.WithMediaStore(kb.NewInMemoryMediaStore()))
+	}
+	return opts
+}
+
+func appConfigFromConfig(cfg *config.Config, logger *slog.Logger) appcmd.AppConfig {
+	return appcmd.AppConfig{
 		Address:               cfg.HTTP.Address,
 		ReadHeaderTimeout:     cfg.HTTPReadHeaderTimeout(),
 		ShutdownTimeout:       cfg.HTTPShutdownTimeout(),
@@ -155,24 +187,24 @@ func Build(ctx context.Context, cfg *config.Config, opts BuildOptions) (*Runtime
 		MCP:                   mcpConfigFromConfig(cfg),
 		Logger:                logger,
 	}
-	rt.app = appcmd.NewApp(k, appCfg)
+}
 
+func (r *Runtime) wireSchedulerAndWorkers(cfg *config.Config) error {
 	if cfg.Scheduler.Enabled {
-		rt.scheduler = kb.NewScheduler(k.WriteLeaseManager, cfg.SchedulerTick(), cfg.Scheduler.DisabledJobs, nil)
-		if err := k.RegisterDefaultJobs(rt.scheduler); err != nil {
-			return nil, fmt.Errorf("register scheduler jobs: %w", err)
+		r.scheduler = kb.NewScheduler(r.kb.WriteLeaseManager, cfg.SchedulerTick(), cfg.Scheduler.DisabledJobs, nil)
+		if err := r.kb.RegisterDefaultJobs(r.scheduler); err != nil {
+			return fmt.Errorf("register scheduler jobs: %w", err)
 		}
 	}
-
-	if k.EventStore != nil {
-		pools, err := buildWorkerPools(k, cfg, rt.app)
-		if err != nil {
-			return nil, err
-		}
-		rt.workerPools = pools
+	if r.kb.EventStore == nil {
+		return nil
 	}
-
-	return rt, nil
+	pools, err := buildWorkerPools(r.kb, cfg, r.app)
+	if err != nil {
+		return err
+	}
+	r.workerPools = pools
+	return nil
 }
 
 // Start takes the runtime live: ensures filesystem state, starts the
@@ -318,7 +350,15 @@ func buildEmbedder(cfg *config.Config, logger *slog.Logger) (kb.Embedder, error)
 		if err != nil {
 			return nil, fmt.Errorf("build openai compatible embedder: %w", err)
 		}
-		logger.Info("configured openai compatible embedder", "base_url", oc.BaseURL, "model", oc.Model, "dimensions", oc.Dimensions)
+		logger.Info(
+			"configured openai compatible embedder",
+			"base_url",
+			oc.BaseURL,
+			"model",
+			oc.Model,
+			"dimensions",
+			oc.Dimensions,
+		)
 		return e, nil
 	default:
 		return nil, fmt.Errorf("configruntime: embedder provider %q not supported", cfg.Embedder.Provider)
@@ -368,7 +408,17 @@ func (r *Runtime) wireMongo(ctx context.Context, cfg *config.Config) ([]kb.KBOpt
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := client.Ping(pingCtx, nil); err != nil {
-		_ = client.Disconnect(context.Background())
+		disconnectCtx, disconnectCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer disconnectCancel()
+		if disconnectErr := client.Disconnect(disconnectCtx); disconnectErr != nil {
+			r.logger.Warn(
+				"mongo disconnect after ping failure failed",
+				"uri",
+				redactedURI,
+				"error",
+				disconnectErr.Error(),
+			)
+		}
 		r.logger.Error("mongo ping failed", "uri", redactedURI, "error", err.Error())
 		return nil, errors.New("mongo ping failed: check MINNOW_MONGO_URI and network reachability")
 	}
@@ -455,7 +505,7 @@ func buildWorkerPools(k *kb.KB, cfg *config.Config, app *appcmd.App) ([]*kb.Work
 		worker kb.Worker
 		pool   config.WorkerPool
 	}
-	// Document workers are unconditional; media-upload is only constructed
+	// Document workers are unconditional. media-upload is only constructed
 	// when media is enabled. Constructing the worker without a wired
 	// MediaStore would let it claim media.upload events from the queue and
 	// fail every Handle call with "media subsystem not configured", driving
@@ -463,11 +513,28 @@ func buildWorkerPools(k *kb.KB, cfg *config.Config, app *appcmd.App) ([]*kb.Work
 	entries := []entry{
 		{&kb.DocumentUpsertWorker{KB: k, ID: "document-upsert-worker"}, cfg.Workers.DocumentUpsert},
 		{&kb.DocumentChunkedWorker{KB: k, ID: "document-chunked-worker"}, cfg.Workers.DocumentChunked},
-		{&kb.DocumentPublishWorker{KB: k, ID: "document-publish-embedded-worker", KindValue: kb.EventDocumentEmbedded}, cfg.Workers.DocumentPublish},
-		{&kb.DocumentPublishWorker{KB: k, ID: "document-publish-graph-worker", KindValue: kb.EventDocumentGraphExtracted}, cfg.Workers.DocumentPublish},
+		{
+			&kb.DocumentPublishWorker{
+				KB:        k,
+				ID:        "document-publish-embedded-worker",
+				KindValue: kb.EventDocumentEmbedded,
+			},
+			cfg.Workers.DocumentPublish,
+		},
+		{
+			&kb.DocumentPublishWorker{
+				KB:        k,
+				ID:        "document-publish-graph-worker",
+				KindValue: kb.EventDocumentGraphExtracted,
+			},
+			cfg.Workers.DocumentPublish,
+		},
 	}
 	if cfg.Media.Enabled {
-		entries = append(entries, entry{&kb.MediaUploadWorker{KB: k, ID: "media-upload-worker"}, cfg.Workers.MediaUpload})
+		entries = append(
+			entries,
+			entry{&kb.MediaUploadWorker{KB: k, ID: "media-upload-worker"}, cfg.Workers.MediaUpload},
+		)
 	}
 
 	pools := make([]*kb.WorkerPool, 0, len(entries))
@@ -504,6 +571,11 @@ func redactMongoURI(uri string) string {
 // workerMetricsAdapter bridges kb.WorkerMetrics to appcmd.AppMetrics.
 type workerMetricsAdapter struct{ m kb.AppMetrics }
 
-func (a workerMetricsAdapter) OnWorkerTick(kind kb.EventKind, workerID, outcome string, duration time.Duration, _ error) {
+func (a workerMetricsAdapter) OnWorkerTick(
+	kind kb.EventKind,
+	workerID, outcome string,
+	duration time.Duration,
+	_ error,
+) {
 	a.m.RecordWorkerTick(string(kind), workerID, outcome, duration.Milliseconds())
 }

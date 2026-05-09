@@ -1,13 +1,19 @@
-package kb
+package kb_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
+
+	. "github.com/mikills/minnow/kb"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -79,12 +85,14 @@ func testKBTopKCases(t *testing.T) {
 		{
 			name: "basic",
 			setup: func(t *testing.T) (*KB, string, []float32, int) {
-				mock := &mockArtifactFormat{queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
-					if req.Options.TopK < len(canned) {
-						return canned[:req.Options.TopK], nil
-					}
-					return canned, nil
-				}}
+				mock := &mockArtifactFormat{
+					queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
+						if req.Options.TopK < len(canned) {
+							return canned[:req.Options.TopK], nil
+						}
+						return canned, nil
+					},
+				}
 				loader := newMockKBWithManifest(t, "kb-topk", mock)
 				return loader, "kb-topk", []float32{0.1, 0.2, 0.3}, 1
 			},
@@ -93,9 +101,11 @@ func testKBTopKCases(t *testing.T) {
 		{
 			name: "k_exceeds_total",
 			setup: func(t *testing.T) (*KB, string, []float32, int) {
-				mock := &mockArtifactFormat{queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
-					return canned, nil
-				}}
+				mock := &mockArtifactFormat{
+					queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
+						return canned, nil
+					},
+				}
 				loader := newMockKBWithManifest(t, "kb-topk-exceed", mock)
 				return loader, "kb-topk-exceed", []float32{0.1, 0.2, 0.3}, 100
 			},
@@ -113,9 +123,11 @@ func testKBTopKCases(t *testing.T) {
 		{
 			name: "invalid_vector_empty",
 			setup: func(t *testing.T) (*KB, string, []float32, int) {
-				mock := &mockArtifactFormat{queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
-					return nil, fmt.Errorf("%w: query vector cannot be empty", ErrInvalidQueryRequest)
-				}}
+				mock := &mockArtifactFormat{
+					queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
+						return nil, fmt.Errorf("%w: query vector cannot be empty", ErrInvalidQueryRequest)
+					},
+				}
 				loader := newMockKBWithManifest(t, "kb-topk-empty", mock)
 				return loader, "kb-topk-empty", []float32{}, 1
 			},
@@ -124,9 +136,11 @@ func testKBTopKCases(t *testing.T) {
 		{
 			name: "invalid_vector_nil",
 			setup: func(t *testing.T) (*KB, string, []float32, int) {
-				mock := &mockArtifactFormat{queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
-					return nil, fmt.Errorf("%w: query vector cannot be empty", ErrInvalidQueryRequest)
-				}}
+				mock := &mockArtifactFormat{
+					queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
+						return nil, fmt.Errorf("%w: query vector cannot be empty", ErrInvalidQueryRequest)
+					},
+				}
 				loader := newMockKBWithManifest(t, "kb-topk-nil", mock)
 				return loader, "kb-topk-nil", nil, 1
 			},
@@ -175,9 +189,11 @@ func testKBSearchByDistanceCases(t *testing.T) {
 		{
 			name: "basic",
 			setup: func(t *testing.T) (*KB, string, []float32, float64) {
-				mock := &mockArtifactFormat{queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
-					return canned, nil
-				}}
+				mock := &mockArtifactFormat{
+					queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
+						return canned, nil
+					},
+				}
 				loader := newMockKBWithManifest(t, "kb-dist-basic", mock)
 				return loader, "kb-dist-basic", []float32{0.1, 0.2, 0.3}, 10.0
 			},
@@ -186,9 +202,11 @@ func testKBSearchByDistanceCases(t *testing.T) {
 		{
 			name: "invalid_threshold_zero",
 			setup: func(t *testing.T) (*KB, string, []float32, float64) {
-				mock := &mockArtifactFormat{queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
-					return nil, fmt.Errorf("%w: max_distance must be > 0", ErrInvalidQueryRequest)
-				}}
+				mock := &mockArtifactFormat{
+					queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
+						return nil, fmt.Errorf("%w: max_distance must be > 0", ErrInvalidQueryRequest)
+					},
+				}
 				loader := newMockKBWithManifest(t, "kb-dist-zero", mock)
 				return loader, "kb-dist-zero", []float32{0.1, 0.2, 0.3}, 0
 			},
@@ -197,9 +215,11 @@ func testKBSearchByDistanceCases(t *testing.T) {
 		{
 			name: "invalid_vector",
 			setup: func(t *testing.T) (*KB, string, []float32, float64) {
-				mock := &mockArtifactFormat{queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
-					return nil, fmt.Errorf("%w: query vector cannot be empty", ErrInvalidQueryRequest)
-				}}
+				mock := &mockArtifactFormat{
+					queryRagFn: func(_ context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
+						return nil, fmt.Errorf("%w: query vector cannot be empty", ErrInvalidQueryRequest)
+					},
+				}
 				loader := newMockKBWithManifest(t, "kb-dist-emptyvec", mock)
 				return loader, "kb-dist-emptyvec", []float32{}, 1.0
 			},
@@ -260,7 +280,12 @@ func testKBResultOrdering(t *testing.T) {
 
 	t.Run("SearchByDistance", func(t *testing.T) {
 		maxDist := 10.0
-		results, err := loader.Search(ctx, kbID, []float32{0.1, 0.2, 0.3}, &SearchOptions{TopK: 1000, MaxDistance: &maxDist})
+		results, err := loader.Search(
+			ctx,
+			kbID,
+			[]float32{0.1, 0.2, 0.3},
+			&SearchOptions{TopK: 1000, MaxDistance: &maxDist},
+		)
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, len(results), 2)
 		for i := 1; i < len(results); i++ {
@@ -315,9 +340,11 @@ func testKBGraphModeUnavailableScenarios(t *testing.T) {
 			name: "graph_unavailable",
 			setup: func(t *testing.T) (*KB, string, []float32) {
 				kbID := "kb-graph-unavail"
-				mock := &mockArtifactFormat{queryGraphFn: func(_ context.Context, req GraphQueryRequest) ([]ExpandedResult, error) {
-					return nil, ErrGraphQueryUnavailable
-				}}
+				mock := &mockArtifactFormat{
+					queryGraphFn: func(_ context.Context, req GraphQueryRequest) ([]ExpandedResult, error) {
+						return nil, ErrGraphQueryUnavailable
+					},
+				}
 				loader := newMockKBWithManifest(t, kbID, mock)
 				return loader, kbID, []float32{0.1, 0.2, 0.3}
 			},
@@ -326,9 +353,11 @@ func testKBGraphModeUnavailableScenarios(t *testing.T) {
 			name: "no_edges",
 			setup: func(t *testing.T) (*KB, string, []float32) {
 				kbID := "kb-graph-no-edges"
-				mock := &mockArtifactFormat{queryGraphFn: func(_ context.Context, req GraphQueryRequest) ([]ExpandedResult, error) {
-					return nil, ErrGraphQueryUnavailable
-				}}
+				mock := &mockArtifactFormat{
+					queryGraphFn: func(_ context.Context, req GraphQueryRequest) ([]ExpandedResult, error) {
+						return nil, ErrGraphQueryUnavailable
+					},
+				}
 				loader := newMockKBWithManifest(t, kbID, mock)
 				return loader, kbID, []float32{0.1, 0.2, 0.3}
 			},
@@ -571,7 +600,7 @@ func testKBUpsertEmbedOnce(t *testing.T) {
 		{ID: "b", Text: "second doc"},
 	})
 	require.NoError(t, err)
-	// The mock format receives the docs; the KB layer does not embed on its own.
+	// The mock format receives the docs. the KB layer does not embed on its own.
 	// countingEmbedder.Calls() == 0 because embedding is the format's responsibility.
 	// We verify the upsert went through without error.
 }
@@ -805,7 +834,13 @@ func testSnapshotShardedManifestCAS(t *testing.T) {
 	mock := &mockArtifactFormat{
 		buildArtifactsFn: func(_ context.Context, kbIDArg, srcPath string, targetBytes int64) ([]SnapshotShardMetadata, error) {
 			return []SnapshotShardMetadata{
-				{ShardID: "s-0", Key: kbIDArg + "/s-0.mock", SizeBytes: 100, VectorRows: 10, CreatedAt: time.Now().UTC()},
+				{
+					ShardID:    "s-0",
+					Key:        kbIDArg + "/s-0.mock",
+					SizeBytes:  100,
+					VectorRows: 10,
+					CreatedAt:  time.Now().UTC(),
+				},
 			}, nil
 		},
 	}
@@ -899,15 +934,16 @@ func TestCacheQueryBudget(t *testing.T) {
 
 // mockArtifactFormat is a callback-based mock implementing ArtifactFormat
 // for testing KB orchestration logic without any DuckDB dependency.
-type mockArtifactFormat struct {
-	kind    string
-	version int
 
-	queryRagFn       func(context.Context, RagQueryRequest) ([]ExpandedResult, error)
-	queryGraphFn     func(context.Context, GraphQueryRequest) ([]ExpandedResult, error)
-	ingestFn         func(context.Context, IngestUpsertRequest) (IngestResult, error)
-	deleteFn         func(context.Context, IngestDeleteRequest) (IngestResult, error)
-	buildArtifactsFn func(context.Context, string, string, int64) ([]SnapshotShardMetadata, error)
+type mockArtifactFormat struct {
+	kind                  string
+	version               int
+	queryRagFn            func(context.Context, RagQueryRequest) ([]ExpandedResult, error)
+	queryGraphFn          func(context.Context, GraphQueryRequest) ([]ExpandedResult, error)
+	ingestFn              func(context.Context, IngestUpsertRequest) (IngestResult, error)
+	deleteFn              func(context.Context, IngestDeleteRequest) (IngestResult, error)
+	buildArtifactsFn      func(context.Context, string, string, int64) ([]SnapshotShardMetadata, error)
+	publishPreparedStream func(context.Context, PreparedStreamRequest) (IngestResult, error)
 }
 
 func (m *mockArtifactFormat) Kind() string {
@@ -916,37 +952,31 @@ func (m *mockArtifactFormat) Kind() string {
 	}
 	return m.kind
 }
-
 func (m *mockArtifactFormat) Version() int {
 	if m.version == 0 {
 		return 1
 	}
 	return m.version
 }
-
 func (m *mockArtifactFormat) FileExt() string { return ".mock" }
-
 func (m *mockArtifactFormat) QueryRag(ctx context.Context, req RagQueryRequest) ([]ExpandedResult, error) {
 	if m.queryRagFn != nil {
 		return m.queryRagFn(ctx, req)
 	}
 	return nil, nil
 }
-
 func (m *mockArtifactFormat) QueryGraph(ctx context.Context, req GraphQueryRequest) ([]ExpandedResult, error) {
 	if m.queryGraphFn != nil {
 		return m.queryGraphFn(ctx, req)
 	}
 	return nil, nil
 }
-
 func (m *mockArtifactFormat) Ingest(ctx context.Context, req IngestUpsertRequest) (IngestResult, error) {
 	if m.ingestFn != nil {
 		return m.ingestFn(ctx, req)
 	}
 	return IngestResult{}, nil
 }
-
 func (m *mockArtifactFormat) Delete(ctx context.Context, req IngestDeleteRequest) (IngestResult, error) {
 	if m.deleteFn != nil {
 		return m.deleteFn(ctx, req)
@@ -954,9 +984,119 @@ func (m *mockArtifactFormat) Delete(ctx context.Context, req IngestDeleteRequest
 	return IngestResult{}, nil
 }
 
-func (m *mockArtifactFormat) BuildArtifacts(ctx context.Context, kbID, srcPath string, targetBytes int64) ([]SnapshotShardMetadata, error) {
+func (m *mockArtifactFormat) BuildArtifacts(
+	ctx context.Context,
+	kbID, srcPath string,
+	targetBytes int64,
+) ([]SnapshotShardMetadata, error) {
 	if m.buildArtifactsFn != nil {
 		return m.buildArtifactsFn(ctx, kbID, srcPath, targetBytes)
 	}
 	return nil, nil
+}
+
+func (m *mockArtifactFormat) PublishPreparedStream(
+	ctx context.Context,
+	req PreparedStreamRequest,
+) (IngestResult, error) {
+	if m.publishPreparedStream != nil {
+		return m.publishPreparedStream(ctx, req)
+	}
+	return IngestResult{}, nil
+}
+
+type fixtureEmbedder struct{ dim int }
+
+func newFixtureEmbedder(dim int) Embedder { return fixtureEmbedder{dim: dim} }
+func (e fixtureEmbedder) Embed(_ context.Context, input string) ([]float32, error) {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(input))
+	seed := h.Sum32()
+	vec := make([]float32, e.dim)
+	for i := range vec {
+		vec[i] = float32((seed>>uint(i%24))&0xff) + 1
+	}
+	return normalizeVector(vec), nil
+}
+func normalizeVector(vec []float32) []float32 {
+	var sum float64
+	for _, v := range vec {
+		sum += float64(v * v)
+	}
+	norm := float32(math.Sqrt(sum))
+	out := make([]float32, len(vec))
+	if norm == 0 {
+		return out
+	}
+	for i, v := range vec {
+		out[i] = v / norm
+	}
+	return out
+}
+
+type countingEmbedder struct {
+	base  Embedder
+	mu    sync.Mutex
+	calls int
+}
+
+func (e *countingEmbedder) Embed(ctx context.Context, input string) ([]float32, error) {
+	e.mu.Lock()
+	e.calls++
+	e.mu.Unlock()
+	return e.base.Embed(ctx, input)
+}
+func (e *countingEmbedder) Calls() int { e.mu.Lock(); defer e.mu.Unlock(); return e.calls }
+
+type captureRetryObserver struct {
+	mu    sync.Mutex
+	stats []MutationRetryStats
+}
+
+func (o *captureRetryObserver) ObserveMutationRetry(s MutationRetryStats) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.stats = append(o.stats, s)
+}
+func (o *captureRetryObserver) Last() (MutationRetryStats, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(o.stats) == 0 {
+		return MutationRetryStats{}, false
+	}
+	return o.stats[len(o.stats)-1], true
+}
+
+func seedManifest(t *testing.T, ctx context.Context, bs BlobStore, kbID string, shards []SnapshotShardMetadata) string {
+	t.Helper()
+	now := time.Now().UTC()
+	manifest := SnapshotShardManifest{
+		SchemaVersion: 1,
+		Layout:        ShardManifestLayoutDuckDBs,
+		FormatKind:    "mock",
+		FormatVersion: 1,
+		KBID:          kbID,
+		CreatedAt:     now,
+		Shards:        shards,
+	}
+	for _, s := range shards {
+		manifest.TotalSizeBytes += s.SizeBytes
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	require.NoError(t, err)
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	require.NoError(t, os.WriteFile(manifestPath, data, 0o644))
+	info, err := bs.UploadIfMatch(ctx, ShardManifestKey(kbID), manifestPath, "")
+	require.NoError(t, err)
+	return info.Version
+}
+
+func requireResultContainsID(t *testing.T, results []ExpandedResult, id string) {
+	t.Helper()
+	for _, result := range results {
+		if result.ID == id {
+			return
+		}
+	}
+	require.Failf(t, "missing result", "id %s not found", id)
 }

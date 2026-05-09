@@ -328,7 +328,7 @@ sharding:
 
 	t.Run("explicit compaction_enabled true also sets the sentinel", func(t *testing.T) {
 		// The third state matters because kb.DefaultShardingPolicy() already
-		// has CompactionEnabled=true; we still need CompactionEnabledSet to
+		// has CompactionEnabled=true. we still need CompactionEnabledSet to
 		// flip so downstream code can tell user-confirmed-true from default.
 		dir := t.TempDir()
 		path := filepath.Join(dir, "minnow.yaml")

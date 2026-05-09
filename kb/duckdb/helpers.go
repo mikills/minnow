@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	kb "github.com/mikills/minnow/kb"
+	"github.com/mikills/minnow/kb/duckdb/internal/dimension"
 )
 
 func FormatVectorForSQL(vec []float32) string {
@@ -42,7 +43,7 @@ func QueryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int)
 	if err != nil {
 		return nil, err
 	}
-	if err := validateVectorDimension(queryVec, expectedDim, "query vector dimension is incompatible with stored vectors"); err != nil {
+	if err := dimension.ValidateVector(queryVec, expectedDim, "query vector dimension is incompatible with stored vectors"); err != nil {
 		return nil, err
 	}
 
@@ -86,7 +87,12 @@ type docMatch struct {
 	MediaRefs []kb.ChunkMediaRef
 }
 
-func queryDocMatchesForIDs(ctx context.Context, db *sql.DB, queryVec []float32, ids []string) (map[string]docMatch, error) {
+func queryDocMatchesForIDs(
+	ctx context.Context,
+	db *sql.DB,
+	queryVec []float32,
+	ids []string,
+) (map[string]docMatch, error) {
 	if len(ids) == 0 {
 		return map[string]docMatch{}, nil
 	}
@@ -94,7 +100,7 @@ func queryDocMatchesForIDs(ctx context.Context, db *sql.DB, queryVec []float32, 
 	if err != nil {
 		return nil, err
 	}
-	if err := validateVectorDimension(queryVec, expectedDim, "distance query vector dimension is incompatible with stored vectors"); err != nil {
+	if err := dimension.ValidateVector(queryVec, expectedDim, "distance query vector dimension is incompatible with stored vectors"); err != nil {
 		return nil, err
 	}
 
@@ -193,21 +199,20 @@ func ensureDocTombstonesTable(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// AssertSafeIdentifier panics if s contains anything outside [A-Za-z0-9_].
+// ValidateSafeIdentifier rejects strings outside [A-Za-z0-9_].
 // Used as defense in depth at every call site that interpolates SQL
-// identifiers via fmt.Sprintf. Callers today pass internal constants only;
-// this guard catches regressions where a future change routes user input
-// through the interpolation path.
-func AssertSafeIdentifier(s string) {
+// identifiers via fmt.Sprintf.
+func ValidateSafeIdentifier(s string) error {
 	if s == "" {
-		panic(fmt.Sprintf("unsafe empty SQL identifier"))
+		return fmt.Errorf("unsafe empty SQL identifier")
 	}
 	for _, r := range s {
 		ok := (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_'
 		if !ok {
-			panic(fmt.Sprintf("unsafe SQL identifier: %q", s))
+			return fmt.Errorf("unsafe SQL identifier: %q", s)
 		}
 	}
+	return nil
 }
 
 func CheckpointDB(ctx context.Context, db *sql.DB) error {
@@ -219,7 +224,9 @@ func CheckpointDB(ctx context.Context, db *sql.DB) error {
 
 func CheckpointAndCloseDB(ctx context.Context, db *sql.DB, closeContext string) error {
 	if err := CheckpointDB(ctx, db); err != nil {
-		_ = db.Close()
+		if closeErr := db.Close(); closeErr != nil {
+			return fmt.Errorf("checkpoint db: %w; close db after checkpoint failure: %v", err, closeErr)
+		}
 		return err
 	}
 	if err := db.Close(); err != nil {

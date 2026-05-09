@@ -29,7 +29,7 @@ type Dependencies struct {
 	UninstallCodeHooks  func(context.Context, string) (kb.CodeHookStatus, error)
 	CodeHookStatus      func(context.Context, string) (kb.CodeHookStatus, error)
 
-	// Media subsystem (optional; when nil the media endpoints 503).
+	// Media subsystem (optional. when nil the media endpoints 503).
 	AppendMediaUpload func(context.Context, kb.MediaUploadInput, int64, string, string) (string, string, error)
 	GetMedia          func(context.Context, string) (*kb.MediaObject, error)
 	ListMedia         func(ctx context.Context, kbID, prefix, after string, limit int) (kb.MediaPage, error)
@@ -60,8 +60,15 @@ func Register(e *echo.Echo, deps Dependencies) {
 }
 
 func requestIDs(c echo.Context) (string, string) {
-	return strings.TrimSpace(c.Request().Header.Get("Idempotency-Key")), strings.TrimSpace(c.Request().Header.Get("X-Correlation-Id"))
+	return strings.TrimSpace(
+			c.Request().Header.Get("Idempotency-Key"),
+		), strings.TrimSpace(
+			c.Request().Header.Get("X-Correlation-Id"),
+		)
 }
+
+const errorResponseKey = "error"
+const eventIDResponseKey = "event_id"
 
 func writeAcceptedOperation(c echo.Context, evtID, effectiveIdem string, body map[string]any) error {
 	c.Response().Header().Set("X-Source-Event-Id", evtID)
@@ -72,9 +79,9 @@ func writeAcceptedOperation(c echo.Context, evtID, effectiveIdem string, body ma
 func WriteError(c echo.Context, err error, isBudgetExceeded func(error) bool) error {
 	if isBudgetExceeded != nil && isBudgetExceeded(err) {
 		c.Response().Header().Set("Retry-After", "1")
-		return c.JSON(http.StatusServiceUnavailable, map[string]any{"error": err.Error()})
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{errorResponseKey: err.Error()})
 	}
-	return c.JSON(http.StatusInternalServerError, map[string]any{"error": err.Error()})
+	return c.JSON(http.StatusInternalServerError, map[string]any{errorResponseKey: err.Error()})
 }
 
 func parsePositiveInt(raw string, fallback int) int {

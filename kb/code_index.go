@@ -2,151 +2,33 @@ package kb
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
+
+	"github.com/mikills/minnow/kb/codeindex"
 )
 
 const (
-	DefaultCodeChunkSize    = 1200
-	DefaultCodeChunkOverlap = 120
-	DefaultCodeMaxFileBytes = 1024 * 1024
+	DefaultCodeChunkSize    = codeindex.DefaultChunkSize
+	DefaultCodeChunkOverlap = codeindex.DefaultChunkOverlap
+	DefaultCodeMaxFileBytes = codeindex.DefaultMaxFileBytes
 	CodeIndexManifestSchema = "minnow.code_index/v1"
 )
 
-var defaultCodeExcludePatterns = []string{
-	".git/**",
-	".minnow/**",
-	"node_modules/**",
-	"vendor/**",
-	"**/vendor/**",
-	"dist/**",
-	"build/**",
-	"coverage/**",
-	"fixtures/**",
-	"**/fixtures/**",
-	"data/**",
-	"**/data/**",
-	".next/**",
-	".turbo/**",
-	"target/**",
-	"extensions/**",
-	"examples/extensions/**",
-	"**/*.duckdb",
-	"**/*.duckdb_extension",
-	"**/*.parquet",
-	"**/*.min.js",
-	"**/*.min.css",
-	"**/*.map",
-	"*.lock",
-	".gitignore",
-}
+type CodeIndexOptions = codeindex.Options
+type CodeIndexResult = codeindex.Result
+type CodeIndexStatus = codeindex.Status
+type CodeSearchOptions = codeindex.SearchOptions
+type CodeSearchResult = codeindex.SearchResult
+type CodebaseIndexRegistry = codeindex.Registry
+type CodebaseIndexRegistryEntry = codeindex.RegistryEntry
 
-var defaultCodeIncludePatterns = []string{
-	"**/*.go",
-	"**/*.js",
-	"**/*.jsx",
-	"**/*.ts",
-	"**/*.tsx",
-	"**/*.mjs",
-	"**/*.cjs",
-	"**/*.py",
-	"**/*.rs",
-	"**/*.java",
-	"**/*.rb",
-	"**/*.php",
-	"**/*.c",
-	"**/*.cc",
-	"**/*.cpp",
-	"**/*.h",
-	"**/*.hpp",
-	"**/*.cs",
-	"**/*.swift",
-	"**/*.kt",
-	"**/*.kts",
-	"**/*.sh",
-	"**/*.bash",
-	"**/*.zsh",
-	"**/*.md",
-	"**/*.mdx",
-	"**/*.yaml",
-	"**/*.yml",
-	"**/*.json",
-	"**/*.toml",
-	"**/*.xml",
-	"**/Dockerfile",
-}
-
-type CodeIndexOptions struct {
-	KBID             string
-	IndexKey         string
-	Description      string
-	Root             string
-	Include          []string
-	Exclude          []string
-	MaxFileBytes     int64
-	ChunkSize        int
-	ChunkOverlap     int
-	IncludeUntracked bool
-	EmbedBatchSize   int
-	MaxBatchBytes    int
-	Throttle         time.Duration
-	MaxHeapBytes     uint64
-	MaxRSSBytes      uint64
-	LargeRepoFiles   int
-	RequireConfirm   bool
-	ConfirmedLarge   bool
-}
-
-type CodeIndexResult struct {
-	KBID           string `json:"kb_id"`
-	IndexKey       string `json:"index_key"`
-	Description    string `json:"description,omitempty"`
-	Root           string `json:"root"`
-	ScannedFiles   int    `json:"scanned_files"`
-	SkippedFiles   int    `json:"skipped_files"`
-	IndexedFiles   int    `json:"indexed_files"`
-	DeletedFiles   int    `json:"deleted_files"`
-	UnchangedFiles int    `json:"unchanged_files"`
-	ChunksIndexed  int    `json:"chunks_indexed"`
-	ChunksDeleted  int    `json:"chunks_deleted"`
-	ManifestKey    string `json:"manifest_key"`
-}
-
-type CodeIndexStatus struct {
-	KBID        string     `json:"kb_id"`
-	IndexKey    string     `json:"index_key,omitempty"`
-	Description string     `json:"description,omitempty"`
-	Indexed     bool       `json:"indexed"`
-	Root        string     `json:"root,omitempty"`
-	RepoID      string     `json:"repo_id,omitempty"`
-	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
-	FileCount   int        `json:"file_count"`
-	ChunkCount  int        `json:"chunk_count"`
-	ManifestKey string     `json:"manifest_key"`
-}
-
-type CodeSearchOptions struct {
-	TopK     int
-	Path     string
-	Language string
-}
-
-type CodeSearchResult struct {
-	ID        string  `json:"id"`
-	Content   string  `json:"content"`
-	Distance  float64 `json:"distance"`
-	Path      string  `json:"path,omitempty"`
-	Language  string  `json:"language,omitempty"`
-	Symbol    string  `json:"symbol,omitempty"`
-	Kind      string  `json:"kind,omitempty"`
-	StartLine int     `json:"start_line,omitempty"`
-	EndLine   int     `json:"end_line,omitempty"`
-}
-
-var ErrCodeIndexRequiresConfirmation = errors.New("code index requires confirmation for large repository")
+var ErrCodeIndexRequiresConfirmation = codeindex.ErrRequiresConfirmation
 
 type codeIndexManifest struct {
 	SchemaVersion string                       `json:"schema_version"`
@@ -158,18 +40,6 @@ type codeIndexManifest struct {
 	Chunks        map[string]CodeChunkMetadata `json:"chunks"`
 }
 
-type CodebaseIndexRegistry struct {
-	SchemaVersion string                                `json:"schema_version"`
-	Indexes       map[string]CodebaseIndexRegistryEntry `json:"codebase_indexes"`
-}
-
-type CodebaseIndexRegistryEntry struct {
-	KBID             string `json:"kb_id"`
-	Root             string `json:"root"`
-	Description      string `json:"description,omitempty"`
-	IncludeUntracked bool   `json:"include_untracked"`
-}
-
 type codeIndexedFile struct {
 	Path      string   `json:"path"`
 	Hash      string   `json:"hash"`
@@ -178,70 +48,34 @@ type codeIndexedFile struct {
 	ChunkIDs  []string `json:"chunk_ids"`
 }
 
-type CodeChunkMetadata struct {
-	ID        string `json:"id"`
-	Path      string `json:"path"`
-	Hash      string `json:"hash"`
-	Language  string `json:"language,omitempty"`
-	Symbol    string `json:"symbol,omitempty"`
-	Kind      string `json:"kind,omitempty"`
-	StartLine int    `json:"start_line"`
-	EndLine   int    `json:"end_line"`
-}
-
-type codeScannedFile struct {
-	AbsPath   string
-	RelPath   string
-	Hash      string
-	SizeBytes int64
-	Language  string
-}
-
-type codeChunk struct {
-	Text      string
-	Symbol    string
-	Kind      string
-	StartLine int
-	EndLine   int
-}
-
-type resolvedCodeIndexTarget struct {
-	Root         string
-	RepoRoot     string
-	RegistryRoot string
-	RepoID       string
-	KBID         string
-	IndexKey     string
-	Description  string
-	Registry     CodebaseIndexRegistry
-	Options      CodeIndexOptions
-}
+type resolvedCodeIndexTarget = codeindex.Target
 
 func (k *KB) IndexCodebase(ctx context.Context, opts CodeIndexOptions) (CodeIndexResult, error) {
 	started := time.Now()
 	if k == nil || k.BlobStore == nil {
 		return CodeIndexResult{}, errors.New("code index: BlobStore not configured")
 	}
-	target, err := resolveCodeIndexTarget(opts)
+	target, err := codeindex.ResolveTarget(opts)
 	if err != nil {
 		return CodeIndexResult{}, err
 	}
-	slog.Default().InfoContext(ctx, "code index start", "kb_id", target.KBID, "index_key", target.IndexKey, "root", target.Root, "repo_root", target.RepoRoot, "include_untracked", target.Options.IncludeUntracked)
+	slog.Default().
+		InfoContext(ctx, "code index start", logKeyKBID, target.KBID, "index_key", target.IndexKey, "root", target.Root, "repo_root", target.RepoRoot, "include_untracked", target.Options.IncludeUntracked)
 
 	manifest, version, err := k.loadPreparedCodeIndexManifest(ctx, target.KBID)
 	if err != nil {
 		return CodeIndexResult{}, err
 	}
-	scanned, skipped, err := scanCodebase(ctx, target.Root, target.Options)
+	scanned, skipped, err := codeindex.Scan(ctx, target.Root, target.Options, codeindex.DefaultExcludePatterns)
 	if err != nil {
 		return CodeIndexResult{}, err
 	}
-	if target.Options.RequireConfirm && !target.Options.ConfirmedLarge && len(scanned) > target.Options.LargeRepoFiles {
-		return CodeIndexResult{}, fmt.Errorf("%w: scanned %d files exceeds threshold %d; rerun with confirmation or lower the threshold", ErrCodeIndexRequiresConfirmation, len(scanned), target.Options.LargeRepoFiles)
+	if err := codeindex.ValidateConfirmation(target.Options, len(scanned)); err != nil {
+		return CodeIndexResult{}, err
 	}
 
 	result, deleteIDs, nextFiles, nextChunks := diffCodeIndexManifest(target, manifest, scanned, skipped)
-	if err := k.publishCodeIndexChanges(ctx, target, scanned, nextFiles, nextChunks, &result); err != nil {
+	if err := k.publishCodeIndexChanges(ctx, target, codeIndexPublishState{scanned: scanned, nextFiles: nextFiles, nextChunks: nextChunks, result: &result}); err != nil {
 		return CodeIndexResult{}, err
 	}
 	if err := k.deleteRemovedCodeChunks(ctx, target.KBID, deleteIDs); err != nil {
@@ -250,46 +84,9 @@ func (k *KB) IndexCodebase(ctx context.Context, opts CodeIndexOptions) (CodeInde
 	if err := k.saveCodeIndexState(ctx, target, nextFiles, nextChunks, version); err != nil {
 		return CodeIndexResult{}, err
 	}
-	slog.Default().InfoContext(ctx, "code index complete", "kb_id", target.KBID, "indexed_files", result.IndexedFiles, "unchanged_files", result.UnchangedFiles, "chunks_indexed", result.ChunksIndexed, "total_duration_ms", time.Since(started).Milliseconds())
+	slog.Default().
+		InfoContext(ctx, "code index complete", logKeyKBID, target.KBID, "indexed_files", result.IndexedFiles, "unchanged_files", result.UnchangedFiles, "chunks_indexed", result.ChunksIndexed, "total_duration_ms", time.Since(started).Milliseconds())
 	return result, nil
-}
-
-func resolveCodeIndexTarget(opts CodeIndexOptions) (resolvedCodeIndexTarget, error) {
-	root, err := resolveRequestedCodeRoot(opts.Root)
-	if err != nil {
-		return resolvedCodeIndexTarget{}, err
-	}
-	repoRoot, err := resolveCodeRoot(root)
-	if err != nil {
-		return resolvedCodeIndexTarget{}, err
-	}
-	opts = normalizeCodeIndexOptions(opts)
-	registry, err := loadCodebaseIndexRegistry(repoRoot)
-	if err != nil {
-		return resolvedCodeIndexTarget{}, err
-	}
-	entry, hasEntry := registry.Indexes[opts.IndexKey]
-	if hasEntry {
-		root = rootFromRegistryEntry(repoRoot, entry)
-	}
-	kbID := strings.TrimSpace(opts.KBID)
-	if kbID == "" && hasEntry {
-		kbID = entry.KBID
-	}
-	if kbID == "" {
-		kbID = defaultKBIDForIndexKey(opts.IndexKey)
-	}
-	description := strings.TrimSpace(opts.Description)
-	if description == "" && hasEntry {
-		description = entry.Description
-	}
-	if description == "" {
-		description = defaultCodeIndexDescription(root, opts.IndexKey)
-	}
-	if !opts.IncludeUntracked && hasEntry && entry.IncludeUntracked {
-		opts.IncludeUntracked = true
-	}
-	return resolvedCodeIndexTarget{Root: root, RepoRoot: repoRoot, RegistryRoot: repoRoot, RepoID: codeRepoID(repoRoot), KBID: kbID, IndexKey: opts.IndexKey, Description: description, Registry: registry, Options: opts}, nil
 }
 
 func (k *KB) loadPreparedCodeIndexManifest(ctx context.Context, kbID string) (codeIndexManifest, string, error) {
@@ -304,16 +101,30 @@ func (k *KB) loadPreparedCodeIndexManifest(ctx context.Context, kbID string) (co
 	if manifest.Chunks == nil {
 		manifest.Chunks = map[string]CodeChunkMetadata{}
 	}
-	slog.Default().InfoContext(ctx, "code index manifest loaded", "kb_id", kbID, "files", len(manifest.Files), "chunks", len(manifest.Chunks), "duration_ms", time.Since(loadStarted).Milliseconds())
+	slog.Default().
+		InfoContext(ctx, "code index manifest loaded", logKeyKBID, kbID, "files", len(manifest.Files), "chunks", len(manifest.Chunks), logKeyDurationMS, time.Since(loadStarted).Milliseconds())
 	return manifest, version, nil
 }
 
-func diffCodeIndexManifest(target resolvedCodeIndexTarget, manifest codeIndexManifest, scanned []codeScannedFile, skipped int) (CodeIndexResult, []string, map[string]codeIndexedFile, map[string]CodeChunkMetadata) {
+func diffCodeIndexManifest(
+	target resolvedCodeIndexTarget,
+	manifest codeIndexManifest,
+	scanned []codeScannedFile,
+	skipped int,
+) (CodeIndexResult, []string, map[string]codeIndexedFile, map[string]CodeChunkMetadata) {
 	current := make(map[string]codeScannedFile, len(scanned))
 	for _, file := range scanned {
 		current[file.RelPath] = file
 	}
-	result := CodeIndexResult{KBID: target.KBID, IndexKey: target.IndexKey, Description: target.Description, Root: target.Root, ScannedFiles: len(scanned), SkippedFiles: skipped, ManifestKey: codeIndexManifestKey(target.KBID)}
+	result := CodeIndexResult{
+		KBID:         target.KBID,
+		IndexKey:     target.IndexKey,
+		Description:  target.Description,
+		Root:         target.Root,
+		ScannedFiles: len(scanned),
+		SkippedFiles: skipped,
+		ManifestKey:  codeIndexManifestKey(target.KBID),
+	}
 	var deleteIDs []string
 	nextFiles := make(map[string]codeIndexedFile, len(current))
 	nextChunks := make(map[string]CodeChunkMetadata)
@@ -327,7 +138,11 @@ func diffCodeIndexManifest(target resolvedCodeIndexTarget, manifest codeIndexMan
 		}
 		if old.Hash == file.Hash && old.Language == file.Language {
 			nextFiles[relPath] = old
-			copyExistingCodeChunks(nextChunks, manifest.Chunks, old.ChunkIDs)
+			for _, id := range old.ChunkIDs {
+				if chunk, ok := manifest.Chunks[id]; ok {
+					nextChunks[id] = chunk
+				}
+			}
 			result.UnchangedFiles++
 			continue
 		}
@@ -337,22 +152,26 @@ func diffCodeIndexManifest(target resolvedCodeIndexTarget, manifest codeIndexMan
 	return result, deleteIDs, nextFiles, nextChunks
 }
 
-func copyExistingCodeChunks(dst map[string]CodeChunkMetadata, src map[string]CodeChunkMetadata, ids []string) {
-	for _, id := range ids {
-		if chunk, ok := src[id]; ok {
-			dst[id] = chunk
-		}
-	}
+type codeIndexPublishState struct {
+	scanned    []codeScannedFile
+	nextFiles  map[string]codeIndexedFile
+	nextChunks map[string]CodeChunkMetadata
+	result     *CodeIndexResult
 }
 
-func (k *KB) publishCodeIndexChanges(ctx context.Context, target resolvedCodeIndexTarget, scanned []codeScannedFile, nextFiles map[string]codeIndexedFile, nextChunks map[string]CodeChunkMetadata, result *CodeIndexResult) error {
+func (k *KB) publishCodeIndexChanges(
+	ctx context.Context,
+	target resolvedCodeIndexTarget,
+	state codeIndexPublishState,
+) error {
 	streamStarted := time.Now()
-	streamer := newCodeDocumentStreamer(k, target.Root, target.RepoID, scanned, target.Options, nextFiles, nextChunks, result)
+	streamer := newCodeDocumentStreamer(k, target, state)
 	graphEnabled := false
 	if err := k.publishPreparedStream(ctx, PreparedStreamRequest{KBID: target.KBID, Options: UpsertDocsOptions{GraphEnabled: &graphEnabled}, Next: streamer.Next}); err != nil {
 		return err
 	}
-	slog.Default().InfoContext(ctx, "code index stream publish complete", "kb_id", target.KBID, "indexed_files", result.IndexedFiles, "chunks_indexed", result.ChunksIndexed, "duration_ms", time.Since(streamStarted).Milliseconds())
+	slog.Default().
+		InfoContext(ctx, "code index stream publish complete", logKeyKBID, target.KBID, "indexed_files", state.result.IndexedFiles, "chunks_indexed", state.result.ChunksIndexed, logKeyDurationMS, time.Since(streamStarted).Milliseconds())
 	return nil
 }
 
@@ -364,38 +183,52 @@ func (k *KB) deleteRemovedCodeChunks(ctx context.Context, kbID string, deleteIDs
 	if err := k.DeleteDocsAndUpload(ctx, kbID, deleteIDs, DeleteDocsOptions{HardDelete: true, CleanupGraph: true}); err != nil {
 		return err
 	}
-	slog.Default().InfoContext(ctx, "code index delete complete", "kb_id", kbID, "chunks_deleted", len(deleteIDs), "duration_ms", time.Since(deleteStarted).Milliseconds())
+	slog.Default().
+		InfoContext(ctx, "code index delete complete", logKeyKBID, kbID, "chunks_deleted", len(deleteIDs), logKeyDurationMS, time.Since(deleteStarted).Milliseconds())
 	return nil
 }
 
-func (k *KB) saveCodeIndexState(ctx context.Context, target resolvedCodeIndexTarget, nextFiles map[string]codeIndexedFile, nextChunks map[string]CodeChunkMetadata, version string) error {
-	nextManifest := codeIndexManifest{SchemaVersion: CodeIndexManifestSchema, KBID: target.KBID, Root: target.Root, RepoID: target.RepoID, UpdatedAt: k.Clock.Now(), Files: nextFiles, Chunks: nextChunks}
+func (k *KB) saveCodeIndexState(
+	ctx context.Context,
+	target resolvedCodeIndexTarget,
+	nextFiles map[string]codeIndexedFile,
+	nextChunks map[string]CodeChunkMetadata,
+	version string,
+) error {
+	nextManifest := codeIndexManifest{
+		SchemaVersion: CodeIndexManifestSchema,
+		KBID:          target.KBID,
+		Root:          target.Root,
+		RepoID:        target.RepoID,
+		UpdatedAt:     k.Clock.Now(),
+		Files:         nextFiles,
+		Chunks:        nextChunks,
+	}
 	manifestSaveStarted := time.Now()
 	if err := k.saveCodeIndexManifest(ctx, nextManifest, version); err != nil {
 		return err
 	}
-	slog.Default().InfoContext(ctx, "code index manifest saved", "kb_id", target.KBID, "duration_ms", time.Since(manifestSaveStarted).Milliseconds())
+	slog.Default().
+		InfoContext(ctx, "code index manifest saved", logKeyKBID, target.KBID, logKeyDurationMS, time.Since(manifestSaveStarted).Milliseconds())
 	registry := target.Registry
-	registry.Indexes[target.IndexKey] = CodebaseIndexRegistryEntry{KBID: target.KBID, Root: registryRelativeRoot(target.RegistryRoot, target.Root), Description: target.Description, IncludeUntracked: target.Options.IncludeUntracked}
-	return saveCodebaseIndexRegistry(target.RegistryRoot, registry)
+	registry.Indexes[target.IndexKey] = CodebaseIndexRegistryEntry{
+		KBID:             target.KBID,
+		Root:             codeindex.RelativeRoot(target.RegistryRoot, target.Root),
+		Description:      target.Description,
+		IncludeUntracked: target.Options.IncludeUntracked,
+	}
+	return codeindex.SaveRegistry(target.RegistryRoot, registry)
 }
 
 func (k *KB) embedCodeDocuments(ctx context.Context, docs []Document, batchSize int) ([]EmbeddedDocument, error) {
 	if len(docs) == 0 {
 		return nil, nil
 	}
-	out := make([]EmbeddedDocument, 0, len(docs))
 	batcher, ok := k.Embedder.(BatchEmbedder)
 	if !ok {
-		for _, doc := range docs {
-			vec, err := k.Embed(ctx, doc.Text)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, EmbeddedDocument{ID: doc.ID, Text: doc.Text, Metadata: doc.Metadata, Embedding: vec})
-		}
-		return out, nil
+		return k.embedCodeDocumentsOneByOne(ctx, docs)
 	}
+	out := make([]EmbeddedDocument, 0, len(docs))
 	if batchSize <= 0 {
 		batchSize = DefaultCodeEmbedBatchSize
 	}
@@ -404,7 +237,7 @@ func (k *KB) embedCodeDocuments(ctx context.Context, docs []Document, batchSize 
 		if end > len(docs) {
 			end = len(docs)
 		}
-		inputs := make([]string, end-start)
+		inputs := make([]string, len(docs[start:end]))
 		for i, doc := range docs[start:end] {
 			inputs[i] = doc.Text
 		}
@@ -416,8 +249,23 @@ func (k *KB) embedCodeDocuments(ctx context.Context, docs []Document, batchSize 
 			return nil, fmt.Errorf("batch embed returned %d vectors for %d code chunks", len(vectors), len(inputs))
 		}
 		for i, doc := range docs[start:end] {
-			out = append(out, EmbeddedDocument{ID: doc.ID, Text: doc.Text, Metadata: doc.Metadata, Embedding: vectors[i]})
+			out = append(
+				out,
+				EmbeddedDocument{ID: doc.ID, Text: doc.Text, Metadata: doc.Metadata, Embedding: vectors[i]},
+			)
 		}
+	}
+	return out, nil
+}
+
+func (k *KB) embedCodeDocumentsOneByOne(ctx context.Context, docs []Document) ([]EmbeddedDocument, error) {
+	out := make([]EmbeddedDocument, 0, len(docs))
+	for _, doc := range docs {
+		vec, err := k.Embed(ctx, doc.Text)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, EmbeddedDocument{ID: doc.ID, Text: doc.Text, Metadata: doc.Metadata, Embedding: vec})
 	}
 	return out, nil
 }
@@ -436,40 +284,35 @@ type codeDocumentStreamer struct {
 	pending    []Document
 }
 
-func newCodeDocumentStreamer(k *KB, root, repoID string, files []codeScannedFile, opts CodeIndexOptions, nextFiles map[string]codeIndexedFile, nextChunks map[string]CodeChunkMetadata, result *CodeIndexResult) *codeDocumentStreamer {
-	return &codeDocumentStreamer{k: k, root: root, repoID: repoID, files: files, opts: opts, policy: codeIndexResourcePolicyFromOptions(opts), nextFiles: nextFiles, nextChunks: nextChunks, result: result}
+func newCodeDocumentStreamer(k *KB, target resolvedCodeIndexTarget, state codeIndexPublishState) *codeDocumentStreamer {
+	return &codeDocumentStreamer{
+		k:          k,
+		root:       target.Root,
+		repoID:     target.RepoID,
+		files:      state.scanned,
+		opts:       target.Options,
+		policy:     codeindex.ResourcePolicyFromOptions(target.Options),
+		nextFiles:  state.nextFiles,
+		nextChunks: state.nextChunks,
+		result:     state.result,
+	}
 }
 
 func (s *codeDocumentStreamer) Next(ctx context.Context) ([]EmbeddedDocument, error) {
 	if err := s.policy.Check(ctx); err != nil {
 		return nil, err
 	}
-	for len(s.pending) < s.policy.EmbedBatchSize && documentsTextBytes(s.pending) < s.policy.MaxBatchBytes && s.filePos < len(s.files) {
-		file := s.files[s.filePos]
-		s.filePos++
-		if _, ok := s.nextFiles[file.RelPath]; ok {
-			continue
-		}
-		docs, metas, err := buildCodeDocuments(ctx, s.root, s.repoID, file, s.opts)
-		if err != nil {
-			return nil, err
-		}
-		chunkIDs := make([]string, 0, len(docs))
-		for _, doc := range docs {
-			chunkIDs = append(chunkIDs, doc.ID)
-			s.pending = append(s.pending, doc)
-		}
-		for _, meta := range metas {
-			s.nextChunks[meta.ID] = meta
-		}
-		s.nextFiles[file.RelPath] = codeIndexedFile{Path: file.RelPath, Hash: file.Hash, SizeBytes: file.SizeBytes, Language: file.Language, ChunkIDs: chunkIDs}
-		s.result.IndexedFiles++
-		s.result.ChunksIndexed += len(docs)
+	if err := s.fillPending(ctx); err != nil {
+		return nil, err
 	}
 	if len(s.pending) == 0 {
 		return nil, nil
 	}
-	end := s.policy.BatchEnd(s.pending)
+	lengths := make([]int, len(s.pending))
+	for i, doc := range s.pending {
+		lengths[i] = len(doc.Text)
+	}
+	end := s.policy.BatchEndByTextBytes(lengths)
 	if end <= 0 {
 		end = 1
 	}
@@ -480,7 +323,8 @@ func (s *codeDocumentStreamer) Next(ctx context.Context) ([]EmbeddedDocument, er
 	if err != nil {
 		return nil, err
 	}
-	slog.Default().InfoContext(ctx, "code index embed batch complete", "chunks", len(batch), "files_seen", s.filePos, "pending_chunks", len(s.pending), "duration_ms", time.Since(embedStarted).Milliseconds())
+	slog.Default().
+		InfoContext(ctx, "code index embed batch complete", "chunks", len(batch), "files_seen", s.filePos, "pending_chunks", len(s.pending), logKeyDurationMS, time.Since(embedStarted).Milliseconds())
 	if err := s.policy.Check(ctx); err != nil {
 		return nil, err
 	}
@@ -490,7 +334,59 @@ func (s *codeDocumentStreamer) Next(ctx context.Context) ([]EmbeddedDocument, er
 	return embedded, nil
 }
 
-func (k *KB) publishCodeDocumentStream(ctx context.Context, kbID string, docs []Document, opts UpsertDocsOptions) error {
+func (s *codeDocumentStreamer) fillPending(ctx context.Context) error {
+	for s.shouldReadMoreFiles() {
+		file := s.files[s.filePos]
+		s.filePos++
+		if _, ok := s.nextFiles[file.RelPath]; ok {
+			continue
+		}
+		if err := s.addCodeFile(ctx, file); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *codeDocumentStreamer) shouldReadMoreFiles() bool {
+	total := 0
+	for _, doc := range s.pending {
+		total += len(doc.Text)
+	}
+	return len(s.pending) < s.policy.EmbedBatchSize && total < s.policy.MaxBatchBytes && s.filePos < len(s.files)
+}
+
+func (s *codeDocumentStreamer) addCodeFile(ctx context.Context, file codeScannedFile) error {
+	docs, metas, err := buildCodeDocuments(ctx, s.root, s.repoID, file, s.opts)
+	if err != nil {
+		return err
+	}
+	chunkIDs := make([]string, 0, len(docs))
+	for _, doc := range docs {
+		chunkIDs = append(chunkIDs, doc.ID)
+		s.pending = append(s.pending, doc)
+	}
+	for _, meta := range metas {
+		s.nextChunks[meta.ID] = meta
+	}
+	s.nextFiles[file.RelPath] = codeIndexedFile{
+		Path:      file.RelPath,
+		Hash:      file.Hash,
+		SizeBytes: file.SizeBytes,
+		Language:  file.Language,
+		ChunkIDs:  chunkIDs,
+	}
+	s.result.IndexedFiles++
+	s.result.ChunksIndexed += len(docs)
+	return nil
+}
+
+func (k *KB) publishCodeDocumentStream(
+	ctx context.Context,
+	kbID string,
+	docs []Document,
+	opts UpsertDocsOptions,
+) error {
 	pos := 0
 	return k.publishPreparedStream(ctx, PreparedStreamRequest{
 		KBID:    kbID,
@@ -510,39 +406,234 @@ func (k *KB) publishCodeDocumentStream(ctx context.Context, kbID string, docs []
 			if err != nil {
 				return nil, err
 			}
-			slog.Default().InfoContext(ctx, "code index embed batch complete", "kb_id", kbID, "chunks", len(batch), "duration_ms", time.Since(embedStarted).Milliseconds())
+			slog.Default().
+				InfoContext(ctx, "code index embed batch complete", logKeyKBID, kbID, "chunks", len(batch), logKeyDurationMS, time.Since(embedStarted).Milliseconds())
 			return embedded, nil
 		},
 	})
 }
 
-func normalizeCodeIndexOptions(opts CodeIndexOptions) CodeIndexOptions {
-	if strings.TrimSpace(opts.IndexKey) == "" {
-		opts.IndexKey = "default"
-	} else {
-		opts.IndexKey = sanitizeCodeIndexKey(opts.IndexKey)
+func ResolveCodeIndexSelection(root, indexKey, kbID string) (CodeIndexOptions, error) {
+	return codeindex.ResolveSelection(root, indexKey, kbID)
+}
+
+func LoadCodebaseIndexRegistry(root string) (CodebaseIndexRegistry, error) {
+	return codeindex.LoadRegistry(root)
+}
+
+func codeIndexManifestKey(kbID string) string { return kbID + ".code-index.json" }
+
+func (k *KB) loadCodeIndexManifest(ctx context.Context, kbID string) (codeIndexManifest, string, error) {
+	key := codeIndexManifestKey(kbID)
+	info, err := k.BlobStore.Head(ctx, key)
+	if err != nil {
+		return emptyCodeIndexManifestForHeadError(kbID, err)
 	}
-	if opts.MaxFileBytes <= 0 {
-		opts.MaxFileBytes = DefaultCodeMaxFileBytes
+	tmp, err := os.CreateTemp("", "minnow-code-index-*.json")
+	if err != nil {
+		return codeIndexManifest{}, "", err
 	}
-	if opts.ChunkSize <= 0 {
-		opts.ChunkSize = DefaultCodeChunkSize
+	path := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		return codeIndexManifest{}, "", err
 	}
-	if opts.ChunkOverlap < 0 {
-		opts.ChunkOverlap = 0
+	defer removeCodeIndexManifestTemp(path)
+	if err := k.BlobStore.Download(ctx, key, path); err != nil {
+		return codeIndexManifest{}, "", err
 	}
-	if opts.ChunkOverlap == 0 {
-		opts.ChunkOverlap = DefaultCodeChunkOverlap
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return codeIndexManifest{}, "", err
 	}
-	if opts.ChunkOverlap >= opts.ChunkSize {
-		opts.ChunkOverlap = opts.ChunkSize / 10
+	var manifest codeIndexManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return codeIndexManifest{}, "", err
 	}
-	if len(opts.Include) == 0 {
-		opts.Include = append([]string(nil), defaultCodeIncludePatterns...)
+	if manifest.SchemaVersion != CodeIndexManifestSchema {
+		return codeIndexManifest{}, "", fmt.Errorf("unsupported code index manifest schema %q", manifest.SchemaVersion)
 	}
-	if len(opts.Exclude) == 0 {
-		opts.Exclude = append([]string(nil), defaultCodeExcludePatterns...)
+	normalizeLoadedCodeIndexManifest(&manifest)
+	return manifest, info.Version, nil
+}
+
+func emptyCodeIndexManifestForHeadError(kbID string, err error) (codeIndexManifest, string, error) {
+	if !errors.Is(err, os.ErrNotExist) {
+		return codeIndexManifest{}, "", err
 	}
-	opts = codeIndexResourcePolicyFromOptions(opts).ApplyToOptions(opts)
+	return codeIndexManifest{
+		SchemaVersion: CodeIndexManifestSchema,
+		KBID:          kbID,
+		Files:         map[string]codeIndexedFile{},
+		Chunks:        map[string]CodeChunkMetadata{},
+	}, "", nil
+}
+
+func normalizeLoadedCodeIndexManifest(manifest *codeIndexManifest) {
+	if manifest.Files == nil {
+		manifest.Files = map[string]codeIndexedFile{}
+	}
+	if manifest.Chunks == nil {
+		manifest.Chunks = map[string]CodeChunkMetadata{}
+	}
+}
+
+func (k *KB) saveCodeIndexManifest(ctx context.Context, manifest codeIndexManifest, expectedVersion string) error {
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp("", "minnow-code-index-*.json")
+	if err != nil {
+		return err
+	}
+	path := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		closeCodeIndexManifestTemp(tmp)
+		removeCodeIndexManifestTemp(path)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		removeCodeIndexManifestTemp(path)
+		return err
+	}
+	defer removeCodeIndexManifestTemp(path)
+	_, err = k.BlobStore.UploadIfMatch(ctx, codeIndexManifestKey(manifest.KBID), path, expectedVersion)
+	return err
+}
+
+func closeCodeIndexManifestTemp(file *os.File) {
+	if err := file.Close(); err != nil {
+		slog.Default().Warn("code index manifest temp close failed", logKeyError, err)
+	}
+}
+
+func removeCodeIndexManifestTemp(path string) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Default().Warn("code index manifest temp remove failed", "path", path, logKeyError, err)
+	}
+}
+
+func (k *KB) CodeIndexStatus(ctx context.Context, kbID string) (CodeIndexStatus, error) {
+	if strings.TrimSpace(kbID) == "" {
+		kbID = codeindex.DefaultKBIDForIndexKey("default")
+	}
+	manifest, version, err := k.loadCodeIndexManifest(ctx, kbID)
+	if err != nil {
+		return CodeIndexStatus{}, err
+	}
+	if version == "" {
+		return CodeIndexStatus{KBID: kbID, Indexed: false, ManifestKey: codeIndexManifestKey(kbID)}, nil
+	}
+	chunkCount := 0
+	for _, file := range manifest.Files {
+		chunkCount += len(file.ChunkIDs)
+	}
+	updatedAt := manifest.UpdatedAt
+	return CodeIndexStatus{
+		KBID:        kbID,
+		Indexed:     true,
+		Root:        manifest.Root,
+		RepoID:      manifest.RepoID,
+		UpdatedAt:   &updatedAt,
+		FileCount:   len(manifest.Files),
+		ChunkCount:  chunkCount,
+		ManifestKey: codeIndexManifestKey(kbID),
+	}, nil
+}
+
+func (k *KB) SearchCode(ctx context.Context, kbID, query string, opts CodeSearchOptions) ([]CodeSearchResult, error) {
+	if strings.TrimSpace(kbID) == "" {
+		kbID = codeindex.DefaultKBIDForIndexKey("default")
+	}
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("query is required")
+	}
+	opts = normalizeCodeSearchOptions(opts)
+	manifest, _, err := k.loadCodeIndexManifest(ctx, kbID)
+	if err != nil {
+		return nil, err
+	}
+	vec, err := k.Embed(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	results, err := k.Search(ctx, kbID, vec, &SearchOptions{TopK: codeSearchFanout(opts.TopK)})
+	if err != nil {
+		return nil, err
+	}
+	return filterCodeSearchResults(results, manifest, opts), nil
+}
+
+func normalizeCodeSearchOptions(opts CodeSearchOptions) CodeSearchOptions {
+	if opts.TopK <= 0 {
+		opts.TopK = 10
+	}
 	return opts
+}
+
+func codeSearchFanout(topK int) int {
+	searchK := topK * 20
+	if searchK < 200 {
+		return 200
+	}
+	return searchK
+}
+
+func filterCodeSearchResults(
+	results []ExpandedResult,
+	manifest codeIndexManifest,
+	opts CodeSearchOptions,
+) []CodeSearchResult {
+	out := make([]CodeSearchResult, 0, opts.TopK)
+	pathFilter := strings.TrimSpace(opts.Path)
+	langFilter := strings.ToLower(strings.TrimSpace(opts.Language))
+	for _, result := range results {
+		if appendCodeSearchResult(
+			&out,
+			result,
+			codeSearchFilter{manifest: manifest, path: pathFilter, language: langFilter, topK: opts.TopK},
+		) {
+			break
+		}
+	}
+	return out
+}
+
+type codeSearchFilter struct {
+	manifest codeIndexManifest
+	path     string
+	language string
+	topK     int
+}
+
+func appendCodeSearchResult(out *[]CodeSearchResult, result ExpandedResult, filter codeSearchFilter) bool {
+	meta, ok := filter.manifest.Chunks[result.ID]
+	if !ok || !codeSearchMetaMatches(meta, filter.path, filter.language) {
+		return false
+	}
+	*out = append(
+		*out,
+		CodeSearchResult{
+			ID:        result.ID,
+			Content:   result.Content,
+			Distance:  result.Distance,
+			Path:      meta.Path,
+			Language:  meta.Language,
+			Symbol:    meta.Symbol,
+			Kind:      meta.Kind,
+			StartLine: meta.StartLine,
+			EndLine:   meta.EndLine,
+		},
+	)
+	return len(*out) >= filter.topK
+}
+
+func codeSearchMetaMatches(meta CodeChunkMetadata, pathFilter string, langFilter string) bool {
+	if pathFilter != "" && !strings.Contains(meta.Path, pathFilter) {
+		return false
+	}
+	if langFilter != "" && strings.ToLower(meta.Language) != langFilter {
+		return false
+	}
+	return true
 }

@@ -22,38 +22,43 @@ import (
 	"github.com/mikills/minnow/mcpserver"
 )
 
+var backgroundContext = context.Background()
+
 const version = "v0.1.0"
 
 func main() {
 	logger := newLogger(os.Getenv("MINNOW_LOG_FORMAT"))
-
-	args := os.Args[1:]
-	if len(args) > 0 {
-		switch args[0] {
-		case "--version", "version":
-			fmt.Println("minnow " + version)
-			return
-		case "-h", "--help":
-			printUsage()
-			return
-		}
+	ctx := backgroundContext
+	if code, handled := runTopLevelCommand(ctx, os.Args[1:], logger); handled {
+		os.Exit(code)
 	}
-	if len(args) > 0 && args[0] == "mcp" {
-		os.Exit(runMCPSubcommand(args[1:]))
-	}
-	if len(args) > 0 && args[0] == "index" {
-		os.Exit(runIndexSubcommand(args[1:], logger))
-	}
-	if len(args) > 0 && args[0] == "config" {
-		os.Exit(runConfigSubcommand(args[1:], logger))
-	}
-	if len(args) > 0 && args[0] == "setup" {
-		os.Exit(runSetupSubcommand(args[1:]))
-	}
-
-	if err := runServer(logger); err != nil {
+	if err := runServer(ctx, logger); err != nil {
 		logger.Error("minnow exited with error", "error", err)
 		os.Exit(1)
+	}
+}
+
+func runTopLevelCommand(ctx context.Context, args []string, logger *slog.Logger) (int, bool) {
+	if len(args) == 0 {
+		return 0, false
+	}
+	switch args[0] {
+	case "--version", "version":
+		fmt.Println("minnow " + version)
+		return 0, true
+	case "-h", "--help":
+		printUsage()
+		return 0, true
+	case "mcp":
+		return runMCPSubcommand(ctx, args[1:]), true
+	case "index":
+		return runIndexSubcommand(ctx, args[1:], logger), true
+	case "config":
+		return runConfigSubcommand(ctx, args[1:], logger), true
+	case "setup":
+		return runSetupSubcommand(args[1:]), true
+	default:
+		return 0, false
 	}
 }
 
@@ -66,7 +71,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       minnow setup")
 }
 
-func runMCPSubcommand(args []string) int {
+func runMCPSubcommand(baseCtx context.Context, args []string) int {
 	if len(args) == 0 || args[0] != "stdio" {
 		fmt.Fprintln(os.Stderr, "usage: minnow mcp stdio")
 		return 2
@@ -77,7 +82,7 @@ func runMCPSubcommand(args []string) int {
 		fmt.Fprintf(os.Stderr, "load config: %v\n", err)
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(baseCtx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	rt, err := configruntime.Build(ctx, cfg, configruntime.BuildOptions{Logger: logger})
 	if err != nil {
@@ -94,9 +99,11 @@ func runMCPSubcommand(args []string) int {
 		return 1
 	}
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.HTTPShutdownTimeout())
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.HTTPShutdownTimeout())
 		defer cancel()
-		_ = rt.Stop(shutdownCtx)
+		if err := rt.Stop(shutdownCtx); err != nil {
+			logger.Warn("runtime stop failed", "error", err)
+		}
 	}()
 	server := appcmd.NewMCPServerFromKB(rt.KB(), mcpCfg, logger)
 	if err := mcpserver.RunStdio(ctx, server); err != nil {
@@ -109,13 +116,13 @@ func runMCPSubcommand(args []string) int {
 // runServer loads the YAML config, builds the runtime, and serves HTTP until
 // SIGINT/SIGTERM. This is the only entry point that binds ports and connects
 // to external services.
-func runServer(logger *slog.Logger) error {
+func runServer(baseCtx context.Context, logger *slog.Logger) error {
 	cfg, err := config.Load(os.Getenv("MINNOW_CONFIG"))
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(baseCtx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	rt, err := configruntime.Build(ctx, cfg, configruntime.BuildOptions{Logger: logger})
@@ -129,9 +136,11 @@ func runServer(logger *slog.Logger) error {
 
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.HTTPShutdownTimeout())
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.HTTPShutdownTimeout())
 		defer cancel()
-		_ = rt.Stop(shutdownCtx)
+		if err := rt.Stop(shutdownCtx); err != nil {
+			logger.Warn("runtime stop failed", "error", err)
+		}
 	}()
 
 	return rt.Wait()
@@ -139,7 +148,7 @@ func runServer(logger *slog.Logger) error {
 
 // runConfigSubcommand implements the `minnow config ...` CLI. Today the only
 // leaf is `validate`, which runs Load + Build(DryRun=true) and exits 0/1.
-func runConfigSubcommand(args []string, logger *slog.Logger) int {
+func runConfigSubcommand(ctx context.Context, args []string, logger *slog.Logger) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: minnow config <subcommand>")
 		fmt.Fprintln(os.Stderr, "subcommands: validate [path], init dev-openai [path] [--force]")
@@ -148,7 +157,7 @@ func runConfigSubcommand(args []string, logger *slog.Logger) int {
 
 	switch args[0] {
 	case "validate":
-		return runConfigValidate(args[1:], logger)
+		return runConfigValidate(ctx, args[1:], logger)
 	case "init":
 		return runConfigInit(args[1:])
 	case "-h", "--help":
@@ -161,7 +170,7 @@ func runConfigSubcommand(args []string, logger *slog.Logger) int {
 	}
 }
 
-func runConfigValidate(args []string, logger *slog.Logger) int {
+func runConfigValidate(ctx context.Context, args []string, logger *slog.Logger) int {
 	path := os.Getenv("MINNOW_CONFIG")
 	if len(args) >= 1 {
 		path = args[0]
@@ -173,7 +182,7 @@ func runConfigValidate(args []string, logger *slog.Logger) int {
 		return 1
 	}
 
-	if _, err := configruntime.Build(context.Background(), cfg, configruntime.BuildOptions{DryRun: true, Logger: logger}); err != nil {
+	if _, err := configruntime.Build(ctx, cfg, configruntime.BuildOptions{DryRun: true, Logger: logger}); err != nil {
 		fmt.Fprintf(os.Stderr, "config build failed: %v\n", err)
 		return 1
 	}
@@ -183,33 +192,17 @@ func runConfigValidate(args []string, logger *slog.Logger) int {
 }
 
 func runConfigInit(args []string) int {
-	if len(args) == 0 || args[0] != "dev-openai" {
-		fmt.Fprintln(os.Stderr, "usage: minnow config init dev-openai [path] [--force]")
-		return 2
-	}
-	path := ""
-	force := false
-	for _, arg := range args[1:] {
-		switch {
-		case arg == "--force":
-			force = true
-		case strings.HasPrefix(arg, "-"):
-			fmt.Fprintf(os.Stderr, "unknown flag: %s\n", arg)
-			return 2
-		case path == "":
-			path = arg
-		default:
-			fmt.Fprintln(os.Stderr, "usage: minnow config init dev-openai [path] [--force]")
-			return 2
-		}
+	path, force, code, ok := parseConfigInitArgs(args)
+	if !ok {
+		return code
 	}
 	if path == "" {
-		var err error
-		path, err = config.UserConfigPath()
+		resolved, err := config.UserConfigPath()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "resolve user config path: %v\n", err)
 			return 1
 		}
+		path = resolved
 	}
 	if err := writeConfigTemplate(path, devOpenAIConfigTemplate(), force); err != nil {
 		fmt.Fprintf(os.Stderr, "write config: %v\n", err)
@@ -219,18 +212,50 @@ func runConfigInit(args []string) int {
 	return 0
 }
 
-func runIndexSubcommand(args []string, logger *slog.Logger) int {
+func parseConfigInitArgs(args []string) (string, bool, int, bool) {
+	if len(args) == 0 || args[0] != "dev-openai" {
+		fmt.Fprintln(os.Stderr, "usage: minnow config init dev-openai [path] [--force]")
+		return "", false, 2, false
+	}
+	path := ""
+	force := false
+	for _, arg := range args[1:] {
+		parsedPath, parsedForce, code, ok := parseConfigInitArg(arg, path, force)
+		if !ok {
+			return "", false, code, false
+		}
+		path, force = parsedPath, parsedForce
+	}
+	return path, force, 0, true
+}
+
+func parseConfigInitArg(arg string, path string, force bool) (string, bool, int, bool) {
+	switch {
+	case arg == "--force":
+		return path, true, 0, true
+	case strings.HasPrefix(arg, "-"):
+		fmt.Fprintf(os.Stderr, "unknown flag: %s\n", arg)
+		return "", false, 2, false
+	case path == "":
+		return arg, force, 0, true
+	default:
+		fmt.Fprintln(os.Stderr, "usage: minnow config init dev-openai [path] [--force]")
+		return "", false, 2, false
+	}
+}
+
+func runIndexSubcommand(ctx context.Context, args []string, logger *slog.Logger) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: minnow index <codebase|refresh|status|hooks>")
 		return 2
 	}
 	switch args[0] {
 	case "codebase", "refresh":
-		return runIndexRefresh(args[1:], logger)
+		return runIndexRefresh(ctx, args[1:], logger)
 	case "status":
-		return runIndexStatus(args[1:], logger)
+		return runIndexStatus(ctx, args[1:], logger)
 	case "hooks":
-		return runIndexHooks(args[1:])
+		return runIndexHooks(ctx, args[1:])
 	case "-h", "--help":
 		fmt.Fprintln(os.Stderr, "usage: minnow index <codebase|refresh|status|hooks>")
 		return 0
@@ -294,23 +319,49 @@ func parseIndexCLIOptions(args []string) (indexCLIOptions, error) {
 }
 
 func validateIndexCLIOptions(opts indexCLIOptions) error {
-	if strings.TrimSpace(opts.kbID) == "" && opts.kbID != "" {
-		return fmt.Errorf("--kb requires a value")
+	return firstCLIValidationErr(
+		validateOptionalCLIValue("--kb", opts.kbID),
+		validateRequiredCLIValue("--index-key", opts.indexKey),
+		validateRequiredCLIValue("--root", opts.root),
+		validateOptionalCLIValue("--binary", opts.binary),
+		validateNonNegativeIndexNumbers(opts),
+		validateNonNegativeDuration("--throttle", opts.throttle),
+	)
+}
+
+func firstCLIValidationErr(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
 	}
-	if strings.TrimSpace(opts.indexKey) == "" {
-		return fmt.Errorf("--index-key requires a value")
+	return nil
+}
+
+func validateOptionalCLIValue(name string, value string) error {
+	if value != "" && strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%s requires a value", name)
 	}
-	if strings.TrimSpace(opts.root) == "" {
-		return fmt.Errorf("--root requires a value")
+	return nil
+}
+
+func validateRequiredCLIValue(name string, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%s requires a value", name)
 	}
-	if opts.binary != "" && strings.TrimSpace(opts.binary) == "" {
-		return fmt.Errorf("--binary requires a value")
-	}
+	return nil
+}
+
+func validateNonNegativeIndexNumbers(opts indexCLIOptions) error {
 	if opts.embedBatchSize < 0 || opts.maxBatchBytes < 0 || opts.largeRepoFiles < 0 {
 		return fmt.Errorf("numeric index flags must be non-negative")
 	}
-	if opts.throttle < 0 {
-		return fmt.Errorf("--throttle must be a non-negative duration")
+	return nil
+}
+
+func validateNonNegativeDuration(name string, value time.Duration) error {
+	if value < 0 {
+		return fmt.Errorf("%s must be a non-negative duration", name)
 	}
 	return nil
 }
@@ -330,19 +381,18 @@ func buildRuntimeForCLI(ctx context.Context, logger *slog.Logger) (*config.Confi
 	return cfg, rt, nil
 }
 
-func runIndexRefresh(args []string, logger *slog.Logger) int {
+func runIndexRefresh(ctx context.Context, args []string, logger *slog.Logger) int {
 	opts, err := parseIndexCLIOptions(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 2
 	}
-	ctx := context.Background()
 	cfg, rt, err := buildRuntimeForCLI(ctx, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
-	defer func() { _ = rt.Stop(context.Background()) }()
+	defer stopRuntimeForCLI(ctx, logger, rt)
 
 	result, err := rt.KB().IndexCodebase(ctx, codeIndexOptionsForCLI(cfg, opts))
 	if err != nil {
@@ -350,9 +400,18 @@ func runIndexRefresh(args []string, logger *slog.Logger) int {
 		return 1
 	}
 	if !opts.quiet {
-		writeJSON(result)
+		if err := writeJSON(result); err != nil {
+			fmt.Fprintf(os.Stderr, "write json: %v\n", err)
+			return 1
+		}
 	}
 	return 0
+}
+
+func stopRuntimeForCLI(ctx context.Context, logger *slog.Logger, rt *configruntime.Runtime) {
+	if err := rt.Stop(context.WithoutCancel(ctx)); err != nil {
+		logger.Warn("runtime stop failed", "error", err)
+	}
 }
 
 func codeIndexOptionsForCLI(cfg *config.Config, opts indexCLIOptions) kb.CodeIndexOptions {
@@ -404,19 +463,18 @@ func applyCLIResourceOverrides(indexOpts *kb.CodeIndexOptions, opts indexCLIOpti
 	}
 }
 
-func runIndexStatus(args []string, logger *slog.Logger) int {
+func runIndexStatus(ctx context.Context, args []string, logger *slog.Logger) int {
 	opts, err := parseIndexCLIOptions(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 2
 	}
-	ctx := context.Background()
 	_, rt, err := buildRuntimeForCLI(ctx, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
-	defer func() { _ = rt.Stop(context.Background()) }()
+	defer stopRuntimeForCLI(ctx, logger, rt)
 	selection, err := kb.ResolveCodeIndexSelection(opts.root, opts.indexKey, opts.kbID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "resolve code index: %v\n", err)
@@ -433,9 +491,12 @@ func runIndexStatus(args []string, logger *slog.Logger) int {
 	return 0
 }
 
-func runIndexHooks(args []string) int {
+func runIndexHooks(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: minnow index hooks <install|uninstall|status> [--kb id] [--index-key key] [--root path] [--binary minnow] [--force]")
+		fmt.Fprintln(
+			os.Stderr,
+			"usage: minnow index hooks <install|uninstall|status> [--kb id] [--index-key key] [--root path] [--binary minnow] [--force]",
+		)
 		return 2
 	}
 	action := args[0]
@@ -444,7 +505,6 @@ func runIndexHooks(args []string) int {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 2
 	}
-	ctx := context.Background()
 	var status any
 	switch action {
 	case "install":
@@ -453,7 +513,16 @@ func runIndexHooks(args []string) int {
 			fmt.Fprintf(os.Stderr, "resolve code index: %v\n", selErr)
 			return 1
 		}
-		status, err = kb.InstallCodeIndexHooks(ctx, kb.CodeHookOptions{Root: opts.root, KBID: selection.KBID, IndexKey: selection.IndexKey, Binary: opts.binary, Force: opts.force})
+		status, err = kb.InstallCodeIndexHooks(
+			ctx,
+			kb.CodeHookOptions{
+				Root:     opts.root,
+				KBID:     selection.KBID,
+				IndexKey: selection.IndexKey,
+				Binary:   opts.binary,
+				Force:    opts.force,
+			},
+		)
 	case "uninstall":
 		status, err = kb.UninstallCodeIndexHooks(ctx, opts.root)
 	case "status":
@@ -466,14 +535,17 @@ func runIndexHooks(args []string) int {
 		fmt.Fprintf(os.Stderr, "index hooks %s: %v\n", action, err)
 		return 1
 	}
-	writeJSON(status)
+	if err := writeJSON(status); err != nil {
+		fmt.Fprintf(os.Stderr, "write json: %v\n", err)
+		return 1
+	}
 	return 0
 }
 
-func writeJSON(v any) {
+func writeJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(v)
+	return enc.Encode(v)
 }
 
 func writeConfigTemplate(path string, data []byte, force bool) error {

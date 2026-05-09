@@ -8,7 +8,7 @@ import (
 )
 
 // ConcurrentWriters spawns two goroutines that upsert disjoint doc sets into
-// the same KB. CAS should serialise them. At least one writer must succeed;
+// the same KB. CAS should serialise them. At least one writer must succeed.
 // the other may legitimately see ErrBlobVersionMismatch. Successful writers'
 // docs must be queryable afterwards (checked by the no-doc-loss invariant).
 func ConcurrentWriters(h *sim.Harness) {

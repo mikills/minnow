@@ -19,7 +19,7 @@ func quietLogger() *slog.Logger {
 }
 
 // writeTempConfig writes a YAML config into a temp dir and returns its path.
-// The temp dir survives for the test's lifetime; the runtime should treat
+// The temp dir survives for the test's lifetime. the runtime should treat
 // relative paths within the YAML as relative to this dir.
 func writeTempConfig(t *testing.T, body string) string {
 	t.Helper()
@@ -42,7 +42,7 @@ func TestBuild(t *testing.T) {
 		require.NotNil(t, rt.KB().EventInbox, "local mode must wire an in-memory event inbox")
 		require.NotEmpty(t, rt.WorkerPools(), "in-memory event store should yield worker pools")
 
-		// Start and Wait must be no-ops in dry-run; Stop must succeed.
+		// Start and Wait must be no-ops in dry-run. Stop must succeed.
 		require.NoError(t, rt.Start(context.Background()))
 		require.NoError(t, rt.Wait())
 		require.NoError(t, rt.Stop(context.Background()))
@@ -200,7 +200,7 @@ media:
 	rt, err := Build(context.Background(), cfg, BuildOptions{DryRun: true, Logger: quietLogger()})
 	require.NoError(t, err)
 
-	// Both setters are exercised only when values are non-zero; verify they
+	// Both setters are exercised only when values are non-zero. verify they
 	// were recorded. We can't read the private fields directly, so we
 	// observe via the public surface.
 	require.NotNil(t, rt.KB())

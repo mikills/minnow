@@ -16,7 +16,7 @@ const (
 
 // ShardingPolicy returns the resolved kb.ShardingPolicy, overlaying any
 // user-supplied values on top of kb.DefaultShardingPolicy. The returned
-// policy is not normalized further; callers that pass it to NewKB via
+// policy is not normalized further. callers that pass it to NewKB via
 // WithShardingPolicy get normalization there.
 func (c *Config) ShardingPolicy() kb.ShardingPolicy {
 	return c.Sharding.resolve()

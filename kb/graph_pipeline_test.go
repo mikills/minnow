@@ -23,27 +23,37 @@ func (staticGrapher) Extract(_ context.Context, chunks []Chunk) (*GraphExtractio
 	return &GraphExtraction{Entities: entities}, nil
 }
 
+type recordingGraphSink struct{ batches []*GraphBuildResult }
+
+func (s *recordingGraphSink) EnsureGraphTables(context.Context) error { return nil }
+func (s *recordingGraphSink) InsertGraphBuildResult(_ context.Context, result *GraphBuildResult) error {
+	s.batches = append(s.batches, result)
+	return nil
+}
+
 func TestGraphBuilder(t *testing.T) {
-	t.Run("sink includes entity-chunk mappings", func(t *testing.T) {
-	b := &GraphBuilder{
-		Chunker:   staticChunker{},
-		Grapher:   staticGrapher{},
-		BatchSize: 1,
-	}
+	t.Run("nil builder is rejected", func(t *testing.T) {
+		var builder *GraphBuilder
 
-	docs := []Document{{ID: "doc-a", Text: "hello"}, {ID: "doc-b", Text: "world"}}
+		_, err := builder.Build(context.Background(), nil)
 
-	var sinkCalls int
-	result, err := b.buildGraph(context.Background(), docs, func(_ context.Context, batch *GraphBuildResult) error {
-		sinkCalls++
-		require.NotEmpty(t, batch.Entities)
-		require.NotEmpty(t, batch.EntityChunkMappings)
-		require.Equal(t, batch.Entities[0].ID, batch.EntityChunkMappings[0].EntityID)
-		require.Equal(t, batch.Chunks[0].ChunkID, batch.EntityChunkMappings[0].ChunkID)
-		return nil
+		require.ErrorContains(t, err, "graph builder is nil")
 	})
-	require.NoError(t, err)
-	require.Equal(t, 2, sinkCalls)
-	require.Len(t, result.EntityChunkMappings, 2)
+
+	t.Run("sink includes entity-chunk mappings", func(t *testing.T) {
+		builder := &GraphBuilder{Chunker: staticChunker{}, Grapher: staticGrapher{}, BatchSize: 1}
+		docs := []Document{{ID: "doc-a", Text: "hello"}, {ID: "doc-b", Text: "world"}}
+		sink := &recordingGraphSink{}
+
+		result, err := builder.BuildAndInsert(context.Background(), sink, docs)
+		require.NoError(t, err)
+		require.Len(t, sink.batches, 2)
+		for _, batch := range sink.batches {
+			require.NotEmpty(t, batch.Entities)
+			require.NotEmpty(t, batch.EntityChunkMappings)
+			require.Equal(t, batch.Entities[0].ID, batch.EntityChunkMappings[0].EntityID)
+			require.Equal(t, batch.Chunks[0].ChunkID, batch.EntityChunkMappings[0].ChunkID)
+		}
+		require.Len(t, result.EntityChunkMappings, 2)
 	})
 }

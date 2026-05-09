@@ -58,31 +58,31 @@ func (l *KB) enqueueReplacedShardsForGC(kbID string, shards []SnapshotShardMetad
 	defer l.mu.Unlock()
 
 	for _, shard := range shards {
-		if shard.Key == "" {
-			continue
-		}
-
-		replaced := false
-		for i := range l.shardGC {
-			entry := &l.shardGC[i]
-			if entry.KBID == kbID && entry.Shard.Key == shard.Key {
-				if notBefore.After(entry.NotBefore) {
-					entry.NotBefore = notBefore
-				}
-				replaced = true
-				break
-			}
-		}
-
-		if replaced {
-			continue
-		}
-		l.shardGC = append(l.shardGC, delayedShardGCEntry{
-			KBID:      kbID,
-			Shard:     shard,
-			NotBefore: notBefore,
-		})
+		l.enqueueShardGCLocked(kbID, shard, notBefore)
 	}
+}
+
+func (l *KB) enqueueShardGCLocked(kbID string, shard SnapshotShardMetadata, notBefore time.Time) {
+	if shard.Key == "" {
+		return
+	}
+	if l.extendShardGCLocked(kbID, shard.Key, notBefore) {
+		return
+	}
+	l.shardGC = append(l.shardGC, delayedShardGCEntry{KBID: kbID, Shard: shard, NotBefore: notBefore})
+}
+
+func (l *KB) extendShardGCLocked(kbID string, shardKey string, notBefore time.Time) bool {
+	for i := range l.shardGC {
+		entry := &l.shardGC[i]
+		if entry.KBID == kbID && entry.Shard.Key == shardKey {
+			if notBefore.After(entry.NotBefore) {
+				entry.NotBefore = notBefore
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // EnqueueReplacedShardsForGC exposes delayed shard GC queueing for backend-owned
@@ -139,72 +139,20 @@ func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSwe
 		return ShardGCSweepResult{}, nil
 	}
 
-	activeKeysByKB := make(map[string]map[string]struct{})
-	var firstErr error
-	next := make([]delayedShardGCEntry, 0, len(queue))
-	result := ShardGCSweepResult{}
-
+	state := shardGCSweepState{
+		activeKeysByKB: make(map[string]map[string]struct{}),
+		next:           make([]delayedShardGCEntry, 0, len(queue)),
+	}
 	for _, entry := range queue {
 		if err := ctx.Err(); err != nil {
-			return result, err
+			return state.result, err
 		}
-
-		if now.Before(entry.NotBefore) {
-			slog.Default().InfoContext(ctx, "deferred shard GC pending grace window", "kb_id", entry.KBID, "reason", "grace_window", "shard_key", entry.Shard.Key, "not_before", entry.NotBefore)
-			next = append(next, entry)
-			continue
-		}
-
-		activeKeys, ok := activeKeysByKB[entry.KBID]
-		if !ok {
-			doc, err := l.ManifestStore.Get(ctx, entry.KBID)
-			if errors.Is(err, ErrManifestNotFound) {
-				// Manifest is gone (KB deleted). Shards are safe to delete.
-				activeKeys = make(map[string]struct{})
-				activeKeysByKB[entry.KBID] = activeKeys
-			} else if err != nil {
-				slog.Default().WarnContext(ctx, "deferred shard GC manifest download failed", "kb_id", entry.KBID, "reason", "manifest_download_failed", "shard_key", entry.Shard.Key, "error", err)
-				if firstErr == nil {
-					firstErr = fmt.Errorf("download manifest for shard gc: %w", err)
-				}
-				entry.NotBefore = now.Add(DefaultShardGCRetryDelay)
-				next = append(next, entry)
-				result.Retried++
-				continue
-			} else {
-				manifest := &doc.Manifest
-				activeKeys = make(map[string]struct{}, len(manifest.Shards))
-				for _, shard := range manifest.Shards {
-					if shard.Key != "" {
-						activeKeys[shard.Key] = struct{}{}
-					}
-				}
-				activeKeysByKB[entry.KBID] = activeKeys
-			}
-		}
-
-		if _, stillReferenced := activeKeys[entry.Shard.Key]; stillReferenced {
-			slog.Default().InfoContext(ctx, "deferred shard GC skipped referenced shard", "kb_id", entry.KBID, "reason", "still_referenced", "shard_key", entry.Shard.Key)
-			entry.NotBefore = now.Add(DefaultShardGCRetryDelay)
-			next = append(next, entry)
-			result.Retried++
-			continue
-		}
-
-		if err := l.deleteShardObject(ctx, entry.Shard.Key); err != nil {
-			slog.Default().WarnContext(ctx, "deferred shard GC delete failed", "kb_id", entry.KBID, "reason", "delete_failed", "shard_key", entry.Shard.Key, "error", err)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("delete replaced shard %s: %w", entry.Shard.Key, err)
-			}
-			entry.NotBefore = now.Add(DefaultShardGCRetryDelay)
-			next = append(next, entry)
-			result.Retried++
-			continue
-		}
-
-		result.Deleted++
-		slog.Default().InfoContext(ctx, "deferred shard GC deleted shard", "kb_id", entry.KBID, "reason", "deleted", "shard_key", entry.Shard.Key)
+		l.sweepShardGCEntry(ctx, now, entry, &state)
 	}
+
+	next := state.next
+	result := state.result
+	firstErr := state.firstErr
 
 	result.Pending = len(next)
 	l.mu.Lock()
@@ -212,10 +160,94 @@ func (l *KB) SweepDelayedShardGC(ctx context.Context, now time.Time) (ShardGCSwe
 	l.mu.Unlock()
 
 	if result.Deleted > 0 || result.Retried > 0 || result.Pending > 0 {
-		slog.Default().InfoContext(ctx, "completed deferred shard GC sweep", "reason", "gc_sweep", "deleted", result.Deleted, "retried", result.Retried, "pending", result.Pending)
+		slog.Default().
+			InfoContext(ctx, "completed deferred shard GC sweep", logKeyReason, "gc_sweep", "deleted", result.Deleted, "retried", result.Retried, "pending", result.Pending)
 	}
 
 	return result, firstErr
+}
+
+type shardGCSweepState struct {
+	activeKeysByKB map[string]map[string]struct{}
+	next           []delayedShardGCEntry
+	result         ShardGCSweepResult
+	firstErr       error
+}
+
+func (l *KB) sweepShardGCEntry(
+	ctx context.Context,
+	now time.Time,
+	entry delayedShardGCEntry,
+	state *shardGCSweepState,
+) {
+	if now.Before(entry.NotBefore) {
+		slog.Default().
+			InfoContext(ctx, "deferred shard GC pending grace window", logKeyKBID, entry.KBID, logKeyReason, "grace_window", "shard_key", entry.Shard.Key, "not_before", entry.NotBefore)
+		state.next = append(state.next, entry)
+		return
+	}
+	activeKeys, err := l.activeShardKeysForGC(ctx, entry, state.activeKeysByKB)
+	if err != nil {
+		state.retry(entry, now, err)
+		return
+	}
+	if _, stillReferenced := activeKeys[entry.Shard.Key]; stillReferenced {
+		slog.Default().
+			InfoContext(ctx, "deferred shard GC skipped referenced shard", logKeyKBID, entry.KBID, logKeyReason, "still_referenced", "shard_key", entry.Shard.Key)
+		state.retry(entry, now, nil)
+		return
+	}
+	if err := l.deleteShardObject(ctx, entry.Shard.Key); err != nil {
+		slog.Default().
+			WarnContext(ctx, "deferred shard GC delete failed", logKeyKBID, entry.KBID, logKeyReason, "delete_failed", "shard_key", entry.Shard.Key, logKeyError, err)
+		state.retry(entry, now, fmt.Errorf("delete replaced shard %s: %w", entry.Shard.Key, err))
+		return
+	}
+	state.result.Deleted++
+	slog.Default().
+		InfoContext(ctx, "deferred shard GC deleted shard", logKeyKBID, entry.KBID, logKeyReason, "deleted", "shard_key", entry.Shard.Key)
+}
+
+func (s *shardGCSweepState) retry(entry delayedShardGCEntry, now time.Time, err error) {
+	if err != nil && s.firstErr == nil {
+		s.firstErr = err
+	}
+	entry.NotBefore = now.Add(DefaultShardGCRetryDelay)
+	s.next = append(s.next, entry)
+	s.result.Retried++
+}
+
+func (l *KB) activeShardKeysForGC(
+	ctx context.Context,
+	entry delayedShardGCEntry,
+	cache map[string]map[string]struct{},
+) (map[string]struct{}, error) {
+	if activeKeys, ok := cache[entry.KBID]; ok {
+		return activeKeys, nil
+	}
+	doc, err := l.ManifestStore.Get(ctx, entry.KBID)
+	if errors.Is(err, ErrManifestNotFound) {
+		cache[entry.KBID] = map[string]struct{}{}
+		return cache[entry.KBID], nil
+	}
+	if err != nil {
+		slog.Default().
+			WarnContext(ctx, "deferred shard GC manifest download failed", logKeyKBID, entry.KBID, logKeyReason, "manifest_download_failed", "shard_key", entry.Shard.Key, logKeyError, err)
+		return nil, fmt.Errorf("download manifest for shard gc: %w", err)
+	}
+	activeKeys := activeShardKeys(doc.Manifest.Shards)
+	cache[entry.KBID] = activeKeys
+	return activeKeys, nil
+}
+
+func activeShardKeys(shards []SnapshotShardMetadata) map[string]struct{} {
+	keys := make(map[string]struct{}, len(shards))
+	for _, shard := range shards {
+		if shard.Key != "" {
+			keys[shard.Key] = struct{}{}
+		}
+	}
+	return keys
 }
 
 // shardGCPendingCount returns the number of shards currently queued for GC.

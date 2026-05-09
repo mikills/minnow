@@ -1,4 +1,4 @@
-package kb
+package kb_test
 
 import (
 	"context"
@@ -6,13 +6,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mikills/minnow/kb"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestTextChunker(t *testing.T) {
 	t.Run("single chunk when text fits", func(t *testing.T) {
-		chunker := TextChunker{ChunkSize: 200}
+		chunker := kb.TextChunker{ChunkSize: 200}
 		text := "  The quick brown fox jumps over the lazy dog. This classic pangram contains every letter of the alphabet at least once.  "
 
 		chunks, err := chunker.Chunk(context.Background(), "doc", text)
@@ -41,7 +43,7 @@ Conclusion
 
 Machine learning continues to advance rapidly. New architectures and training methods emerge regularly, pushing the boundaries of what automated systems can achieve.`
 
-		chunker := TextChunker{ChunkSize: 150}
+		chunker := kb.TextChunker{ChunkSize: 150}
 		chunks, err := chunker.Chunk(context.Background(), "ml-doc", text)
 		require.NoError(t, err)
 
@@ -77,8 +79,12 @@ Machine learning continues to advance rapidly. New architectures and training me
 		}
 		// both should contain the same key phrases
 		for _, phrase := range []string{"Machine learning", "Supervised Learning", "Unsupervised", "Conclusion"} {
-			assert.True(t, strings.Contains(combined.String(), phrase) || strings.Contains(strings.TrimSpace(text), phrase),
-				"combined chunks should preserve content: %s", phrase)
+			assert.True(
+				t,
+				strings.Contains(combined.String(), phrase) || strings.Contains(strings.TrimSpace(text), phrase),
+				"combined chunks should preserve content: %s",
+				phrase,
+			)
 		}
 	})
 
@@ -94,7 +100,7 @@ Delta section provides examples and illustrations. The quick brown fox jumps ove
 
 Epsilon section wraps up the discussion with final thoughts and recommendations for further exploration of these topics.`
 
-		chunker := TextChunker{ChunkSize: 120}
+		chunker := kb.TextChunker{ChunkSize: 120}
 		chunks, err := chunker.Chunk(context.Background(), "test-doc", text)
 		require.NoError(t, err)
 		require.NotEmpty(t, chunks)
@@ -117,7 +123,14 @@ Epsilon section wraps up the discussion with final thoughts and recommendations 
 
 			// verify no overlap with previous chunk
 			if i > 0 {
-				assert.GreaterOrEqual(t, chunk.Start, chunks[i-1].End, "chunk %d should not overlap with chunk %d", i, i-1)
+				assert.GreaterOrEqual(
+					t,
+					chunk.Start,
+					chunks[i-1].End,
+					"chunk %d should not overlap with chunk %d",
+					i,
+					i-1,
+				)
 			}
 		}
 
@@ -125,7 +138,7 @@ Epsilon section wraps up the discussion with final thoughts and recommendations 
 
 	t.Run("offsets_use_original_text", func(t *testing.T) {
 		text := "\n\t  first sentence. second sentence.  \n"
-		chunker := TextChunker{ChunkSize: 256}
+		chunker := kb.TextChunker{ChunkSize: 256}
 
 		chunks, err := chunker.Chunk(context.Background(), "doc-offsets", text)
 		require.NoError(t, err)
@@ -141,7 +154,7 @@ Epsilon section wraps up the discussion with final thoughts and recommendations 
 		// Leading whitespace contains a substring matching the first chunk piece.
 		// Verify offsets point to the trimmed content, not the whitespace prefix.
 		text := "  hello hello world"
-		chunker := TextChunker{ChunkSize: 10}
+		chunker := kb.TextChunker{ChunkSize: 10}
 
 		chunks, err := chunker.Chunk(context.Background(), "doc-adversarial", text)
 		require.NoError(t, err)

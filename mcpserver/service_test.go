@@ -58,7 +58,7 @@ func TestService(t *testing.T) {
 	t.Run("query rejects huge k", func(t *testing.T) {
 		svc := newTestService(func(s *Service) {
 			s.Search = func(context.Context, string, []float32, *kb.SearchOptions) ([]kb.ExpandedResult, error) {
-				t.Fatalf("Search should not be called when K is out of bounds")
+				require.Fail(t, "Search should not be called when K is out of bounds")
 				return nil, nil
 			}
 		})
@@ -91,12 +91,18 @@ func TestService(t *testing.T) {
 	t.Run("code indexing submits options", func(t *testing.T) {
 		svc := newTestService(func(s *Service) {
 			s.Config.CodeIndex = CodeIndexDefaults{
-				Include:        []string{"**/*.go"},
-				Exclude:        []string{"vendor/**"},
-				MaxFileBytes:   1234,
-				ChunkSize:      100,
-				ChunkOverlap:   10,
-				ResourcePolicy: kb.CodeIndexResourcePolicy{EmbedBatchSize: 7, MaxBatchBytes: 2048, MaxHeapBytes: 4096, MaxRSSBytes: 8192, LargeRepoFiles: 11},
+				Include:      []string{"**/*.go"},
+				Exclude:      []string{"vendor/**"},
+				MaxFileBytes: 1234,
+				ChunkSize:    100,
+				ChunkOverlap: 10,
+				ResourcePolicy: kb.CodeIndexResourcePolicy{
+					EmbedBatchSize: 7,
+					MaxBatchBytes:  2048,
+					MaxHeapBytes:   4096,
+					MaxRSSBytes:    8192,
+					LargeRepoFiles: 11,
+				},
 				RequireConfirm: true,
 			}
 			s.IndexCodebase = func(_ context.Context, opts kb.CodeIndexOptions) (kb.CodeIndexResult, error) {
@@ -115,7 +121,11 @@ func TestService(t *testing.T) {
 				return kb.CodeIndexResult{KBID: opts.KBID, Root: opts.Root, IndexedFiles: 1}, nil
 			}
 		})
-		_, out, err := svc.indexCodebase(context.Background(), nil, codeIndexInput{KBID: "kb-code", Root: "/repo", IncludeUntracked: true})
+		_, out, err := svc.indexCodebase(
+			context.Background(),
+			nil,
+			codeIndexInput{KBID: "kb-code", Root: "/repo", IncludeUntracked: true},
+		)
 		require.NoError(t, err)
 		require.Equal(t, 1, out.IndexedFiles)
 	})
@@ -129,7 +139,11 @@ func TestService(t *testing.T) {
 				return []kb.CodeSearchResult{{ID: "c1", Path: "main.go", Language: "go", StartLine: 1, EndLine: 5}}, nil
 			}
 		})
-		_, out, err := svc.codeSearch(context.Background(), nil, codeSearchInput{KBID: "kb-code", Query: "handler", K: 5, Language: "go"})
+		_, out, err := svc.codeSearch(
+			context.Background(),
+			nil,
+			codeSearchInput{KBID: "kb-code", Query: "handler", K: 5, Language: "go"},
+		)
 		require.NoError(t, err)
 		require.Len(t, out.Results, 1)
 		require.Equal(t, "main.go", out.Results[0].Path)
@@ -150,7 +164,12 @@ func TestService(t *testing.T) {
 			// Override the default "Done" event with one that never reaches a
 			// terminal state so the loop must time out.
 			s.GetEvent = func(context.Context, string) (*kb.KBEvent, error) {
-				return &kb.KBEvent{EventID: "evt-pending", KBID: "kb-1", Kind: kb.EventDocumentUpsert, Status: kb.EventStatusPending}, nil
+				return &kb.KBEvent{
+					EventID: "evt-pending",
+					KBID:    "kb-1",
+					Kind:    kb.EventDocumentUpsert,
+					Status:  kb.EventStatusPending,
+				}, nil
 			}
 			s.FindOperationTerminal = func(context.Context, string) (*kb.KBEvent, error) { return nil, kb.ErrEventNotFound }
 		})
@@ -176,7 +195,7 @@ func TestService(t *testing.T) {
 	})
 
 	t.Run("sync ingest polls past not found", func(t *testing.T) {
-		// Event takes a moment to materialize in the inbox; loop must keep
+		// Event takes a moment to materialize in the inbox. loop must keep
 		// polling on ErrEventNotFound and complete normally when it appears.
 		calls := 0
 		svc := newTestService(func(s *Service) {
@@ -186,7 +205,12 @@ func TestService(t *testing.T) {
 				if calls < 3 {
 					return nil, kb.ErrEventNotFound
 				}
-				return &kb.KBEvent{EventID: "evt-eventually", KBID: "kb-1", Kind: kb.EventDocumentUpsert, Status: kb.EventStatusDone}, nil
+				return &kb.KBEvent{
+					EventID: "evt-eventually",
+					KBID:    "kb-1",
+					Kind:    kb.EventDocumentUpsert,
+					Status:  kb.EventStatusDone,
+				}, nil
 			}
 		})
 		_, out, err := svc.ingestSync(context.Background(), nil, ingestSyncInput{Documents: oneDoc()})
@@ -217,7 +241,13 @@ func TestMCPClient(t *testing.T) {
 		require.Contains(t, names, "minnow_index_codebase")
 		require.Contains(t, names, "minnow_code_search")
 
-		queryRes, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "minnow_query", Arguments: json.RawMessage(`{"kb_id":"kb-1","query":"hello","k":1}`)})
+		queryRes, err := cs.CallTool(
+			ctx,
+			&mcp.CallToolParams{
+				Name:      "minnow_query",
+				Arguments: json.RawMessage(`{"kb_id":"kb-1","query":"hello","k":1}`),
+			},
+		)
 		require.NoError(t, err)
 		require.False(t, queryRes.IsError)
 		var queryOut queryOutput
@@ -225,7 +255,15 @@ func TestMCPClient(t *testing.T) {
 		require.Len(t, queryOut.Results, 1)
 		require.Equal(t, "doc-1", queryOut.Results[0].ID)
 
-		ingestRes, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "minnow_ingest_documents_async", Arguments: json.RawMessage(`{"kb_id":"kb-1","documents":[{"id":"doc-2","text":"new"}],"graph_enabled":false}`)})
+		ingestRes, err := cs.CallTool(
+			ctx,
+			&mcp.CallToolParams{
+				Name: "minnow_ingest_documents_async",
+				Arguments: json.RawMessage(
+					`{"kb_id":"kb-1","documents":[{"id":"doc-2","text":"new"}],"graph_enabled":false}`,
+				),
+			},
+		)
 		require.NoError(t, err)
 		require.False(t, ingestRes.IsError)
 
@@ -239,13 +277,28 @@ func TestMCPClient(t *testing.T) {
 		ctx := context.Background()
 		svc := newTestService(func(s *Service) {
 			s.SearchCode = func(context.Context, string, string, kb.CodeSearchOptions) ([]kb.CodeSearchResult, error) {
-				return []kb.CodeSearchResult{{ID: "code-1", Content: "func main() {}", Path: "main.go", Language: "go", StartLine: 1, EndLine: 1}}, nil
+				return []kb.CodeSearchResult{
+					{
+						ID:        "code-1",
+						Content:   "func main() {}",
+						Path:      "main.go",
+						Language:  "go",
+						StartLine: 1,
+						EndLine:   1,
+					},
+				}, nil
 			}
 		})
 		cs := connectInMemoryMCP(t, ctx, New(*svc))
 		defer cs.Close()
 
-		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "minnow_code_search", Arguments: json.RawMessage(`{"kb_id":"kb-1","query":"main","k":1,"language":"go"}`)})
+		res, err := cs.CallTool(
+			ctx,
+			&mcp.CallToolParams{
+				Name:      "minnow_code_search",
+				Arguments: json.RawMessage(`{"kb_id":"kb-1","query":"main","k":1,"language":"go"}`),
+			},
+		)
 		require.NoError(t, err)
 		require.False(t, res.IsError)
 		var out codeSearchOutput
@@ -271,7 +324,10 @@ func TestMCPClient(t *testing.T) {
 		require.NoError(t, err)
 		defer cs.Close()
 
-		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "minnow_query", Arguments: json.RawMessage(`{"query":"hello","k":1}`)})
+		res, err := cs.CallTool(
+			ctx,
+			&mcp.CallToolParams{Name: "minnow_query", Arguments: json.RawMessage(`{"query":"hello","k":1}`)},
+		)
 		require.NoError(t, err)
 		require.False(t, res.IsError)
 		var out queryOutput
@@ -353,7 +409,13 @@ func TestRegisterTools(t *testing.T) {
 		},
 		{
 			name: "all tools register without panic",
-			cfg:  Config{Enabled: true, AllowIndexing: true, AllowSyncIndexing: true, AllowAdmin: true, AllowDestructive: true},
+			cfg: Config{
+				Enabled:           true,
+				AllowIndexing:     true,
+				AllowSyncIndexing: true,
+				AllowAdmin:        true,
+				AllowDestructive:  true,
+			},
 			expected: []string{
 				"minnow_query", "minnow_ingest_documents_async", "minnow_ingest_documents_sync",
 				"minnow_delete_media", "minnow_delete_knowledge_base",
@@ -363,25 +425,29 @@ func TestRegisterTools(t *testing.T) {
 	}
 	ctx := context.Background()
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cs := connectInMemoryMCP(t, ctx, New(Service{Config: tc.cfg}))
-			defer cs.Close()
-			tools, err := cs.ListTools(ctx, nil)
-			require.NoError(t, err)
-			names := toolNames(tools.Tools)
-			for _, want := range tc.expected {
-				require.Contains(t, names, want, "expected %q to be registered for cfg %s", want, tc.name)
-			}
-			for _, hidden := range tc.hidden {
-				require.NotContains(t, names, hidden, "expected %q to be hidden for cfg %s", hidden, tc.name)
-			}
-		})
+		t.Run(tc.name, func(t *testing.T) { assertRegisteredTools(t, ctx, tc.name, tc.cfg, tc.expected, tc.hidden) })
+	}
+}
+
+func assertRegisteredTools(t *testing.T, ctx context.Context, name string, cfg Config, expected, hidden []string) {
+	t.Helper()
+	cs := connectInMemoryMCP(t, ctx, New(Service{Config: cfg}))
+	defer cs.Close()
+	tools, err := cs.ListTools(ctx, nil)
+	require.NoError(t, err)
+	names := toolNames(tools.Tools)
+	for _, want := range expected {
+		require.Contains(t, names, want, "expected %q to be registered for cfg %s", want, name)
+	}
+	for _, hiddenTool := range hidden {
+		require.NotContains(t, names, hiddenTool, "expected %q to be hidden for cfg %s", hiddenTool, name)
 	}
 }
 
 func TestQueryInputSchema(t *testing.T) {
 	t.Run("advertises k bounds", func(t *testing.T) {
-		schema := mustQueryInputSchema()
+		schema, err := queryInputSchema()
+		require.NoError(t, err)
 		require.NotNil(t, schema.Properties["k"], "k property must exist on schema")
 		require.NotNil(t, schema.Properties["k"].Minimum, "k must advertise a minimum")
 		require.NotNil(t, schema.Properties["k"].Maximum, "k must advertise a maximum")
@@ -390,7 +456,7 @@ func TestQueryInputSchema(t *testing.T) {
 	})
 }
 
-// newTestService returns a Service with happy-path closures; callers override
+// newTestService returns a Service with happy-path closures. callers override
 // what differs through the modify callback.
 func newTestService(modify func(*Service)) *Service {
 	svc := &Service{
@@ -403,10 +469,20 @@ func newTestService(modify func(*Service)) *Service {
 			return "evt-1", "idem-1", nil
 		},
 		GetEvent: func(context.Context, string) (*kb.KBEvent, error) {
-			return &kb.KBEvent{EventID: "evt-1", KBID: "kb-1", Kind: kb.EventDocumentUpsert, Status: kb.EventStatusDone}, nil
+			return &kb.KBEvent{
+				EventID: "evt-1",
+				KBID:    "kb-1",
+				Kind:    kb.EventDocumentUpsert,
+				Status:  kb.EventStatusDone,
+			}, nil
 		},
 		FindOperationTerminal: func(context.Context, string) (*kb.KBEvent, error) {
-			return &kb.KBEvent{EventID: "evt-terminal", KBID: "kb-1", Kind: kb.EventKBPublished, Status: kb.EventStatusDone}, nil
+			return &kb.KBEvent{
+				EventID: "evt-terminal",
+				KBID:    "kb-1",
+				Kind:    kb.EventKBPublished,
+				Status:  kb.EventStatusDone,
+			}, nil
 		},
 		DeleteKnowledgeBase: func(context.Context, string) error { return nil },
 		IndexCodebase: func(_ context.Context, opts kb.CodeIndexOptions) (kb.CodeIndexResult, error) {
@@ -416,7 +492,9 @@ func newTestService(modify func(*Service)) *Service {
 			return kb.CodeIndexStatus{KBID: kbID, Indexed: true}, nil
 		},
 		SearchCode: func(context.Context, string, string, kb.CodeSearchOptions) ([]kb.CodeSearchResult, error) {
-			return []kb.CodeSearchResult{{ID: "code-1", Content: "func main() {}", Path: "main.go", Language: "go"}}, nil
+			return []kb.CodeSearchResult{
+				{ID: "code-1", Content: "func main() {}", Path: "main.go", Language: "go"},
+			}, nil
 		},
 	}
 	if modify != nil {

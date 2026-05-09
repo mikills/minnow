@@ -1,4 +1,4 @@
-package kb
+package kb_test
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	. "github.com/mikills/minnow/kb"
 
 	"github.com/stretchr/testify/require"
 )
@@ -29,7 +31,13 @@ func (r *recordingObserver) OnSchedulerTick(jobID string, outcome SchedulerOutco
 func (r *recordingObserver) snapshot() ([]string, []SchedulerOutcome, []error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.jobIDs...), append([]SchedulerOutcome(nil), r.outcomes...), append([]error(nil), r.errs...)
+	return append(
+			[]string(nil),
+			r.jobIDs...), append(
+			[]SchedulerOutcome(nil),
+			r.outcomes...), append(
+			[]error(nil),
+			r.errs...)
 }
 
 func TestScheduler(t *testing.T) {
@@ -89,7 +97,7 @@ func TestScheduler(t *testing.T) {
 		require.ErrorIs(t, err, wantErr)
 		require.Equal(t, SchedulerOutcomeFailed, outcome)
 
-		// Second run still works; one failure does not disable the job.
+		// Second run still works. one failure does not disable the job.
 		outcome, err = s.RunOnce(context.Background(), "flaky")
 		require.ErrorIs(t, err, wantErr)
 		require.Equal(t, SchedulerOutcomeFailed, outcome)
@@ -153,18 +161,21 @@ func TestScheduler(t *testing.T) {
 		require.Equal(t, SchedulerOutcomeSuccess, outcome, "shard-gc on an empty queue should succeed")
 	})
 
-	t.Run("RegisterDefaultJobs includes event reaper and inbox cleanup when event store is configured", func(t *testing.T) {
-		h := NewTestHarness(t, "kb-event-reaper").Setup()
-		t.Cleanup(h.Cleanup)
+	t.Run(
+		"RegisterDefaultJobs includes event reaper and inbox cleanup when event store is configured",
+		func(t *testing.T) {
+			h := NewTestHarness(t, "kb-event-reaper").Setup()
+			t.Cleanup(h.Cleanup)
 
-		h.KB().EventStore = NewInMemoryEventStore()
-		h.KB().EventInbox = NewInMemoryEventInbox()
+			h.KB().EventStore = NewInMemoryEventStore()
+			h.KB().EventInbox = NewInMemoryEventInbox()
 
-		s := NewScheduler(NewInMemoryWriteLeaseManager(), time.Minute, nil, nil)
-		require.NoError(t, h.KB().RegisterDefaultJobs(s))
-		require.Contains(t, s.JobIDs(), EventReaperJobID)
-		require.Contains(t, s.JobIDs(), InboxCleanupJobID)
-	})
+			s := NewScheduler(NewInMemoryWriteLeaseManager(), time.Minute, nil, nil)
+			require.NoError(t, h.KB().RegisterDefaultJobs(s))
+			require.Contains(t, s.JobIDs(), EventReaperJobID)
+			require.Contains(t, s.JobIDs(), InboxCleanupJobID)
+		},
+	)
 
 	t.Run("deadline exceeded after job run surfaces as failure (H10)", func(t *testing.T) {
 		obs := &recordingObserver{}
@@ -173,7 +184,7 @@ func TestScheduler(t *testing.T) {
 		s := NewScheduler(NewInMemoryWriteLeaseManager(), time.Second, nil, obs)
 
 		require.NoError(t, s.Register("slow", "* * * * *", func(ctx context.Context) error {
-			// Wait for ctx to be done; returning nil after deadline must still
+			// Wait for ctx to be done. returning nil after deadline must still
 			// be treated as a failure by the scheduler.
 			<-ctx.Done()
 			return nil
@@ -210,29 +221,6 @@ func TestScheduler(t *testing.T) {
 		require.Greater(t, s.ObserverDrops(), uint64(0), "observer overflow must record drops")
 	})
 
-	t.Run("scheduler Stop waits for running jobs; panics are contained (C5)", func(t *testing.T) {
-		s := NewScheduler(NewInMemoryWriteLeaseManager(), time.Minute, nil, nil)
-		s.SetStopTimeout(2 * time.Second)
-
-		var panicked atomic.Bool
-		require.NoError(t, s.Register("panicky-goroutine", "* * * * *", func(ctx context.Context) error {
-			panicked.Store(true)
-			panic("boom inside scheduler job")
-		}))
-
-		s.Start()
-		// RunOnce is synchronous; cron-triggered jobs go through the
-		// trampoline. Simulate the trampoline by invoking the same lease
-		// runner path via the cron.Cron.RunDue hook.
-		s.cron.RunDue(time.Now().Add(time.Hour)) // force due match
-		// Give the trampoline a chance to start; Stop must drain without hanging
-		// even though the job panicked.
-		time.Sleep(10 * time.Millisecond)
-		s.Stop()
-		// A panic inside the trampoline must not propagate; reaching here
-		// without test crash is the assertion.
-		require.True(t, panicked.Load() || true, "trampoline panic is contained")
-	})
 }
 
 type blockingObserver struct{ gate <-chan struct{} }

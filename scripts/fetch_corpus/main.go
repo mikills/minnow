@@ -18,6 +18,8 @@ import (
 	"github.com/mikills/minnow/kb"
 )
 
+var backgroundContext = context.Background()
+
 type company struct {
 	Ticker string
 	CIK    string
@@ -70,7 +72,7 @@ func main() {
 
 	client := &http.Client{Timeout: 60 * time.Second}
 	chunker := kb.TextChunker{ChunkSize: *chunkSize}
-	ctx := context.Background()
+	ctx := backgroundContext
 
 	totalChunks := 0
 	failures := 0
@@ -98,7 +100,13 @@ func main() {
 		len(companies)-failures, totalChunks, failures, time.Since(start).Round(time.Second))
 }
 
-func fetchOne(ctx context.Context, client *http.Client, ua string, co company, chunker kb.TextChunker) ([]kb.Chunk, string, error) {
+func fetchOne(
+	ctx context.Context,
+	client *http.Client,
+	ua string,
+	co company,
+	chunker kb.TextChunker,
+) ([]kb.Chunk, string, error) {
 	submissionsURL := fmt.Sprintf("https://data.sec.gov/submissions/CIK%s.json", co.CIK)
 	body, err := fetch(ctx, client, ua, submissionsURL)
 	if err != nil {
@@ -140,15 +148,15 @@ func fetch(ctx context.Context, client *http.Client, ua, url string) ([]byte, er
 		return nil, err
 	}
 	req.Header.Set("User-Agent", ua)
-	resp, err := client.Do(req)
+	reply, err := closeableHTTPDo(client, req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, url)
+	defer reply.Close()
+	if reply.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d: %s", reply.StatusCode, url)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(reply.Body)
 }
 
 func htmlToText(data []byte) (string, error) {
