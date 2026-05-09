@@ -1,8 +1,9 @@
 package vectorplan
 
 import (
-	kb "github.com/mikills/minnow/kb"
 	"sort"
+
+	kb "github.com/mikills/minnow/kb"
 )
 
 type QueryPlan struct {
@@ -51,19 +52,19 @@ func LocalTopK(k int, policy kb.ShardingPolicy) int {
 }
 
 type scoredShard struct {
-	shard kb.SnapshotShardMetadata
+	shard *kb.SnapshotShardMetadata
 	score float64
 }
 
 func RankShards(shards []kb.SnapshotShardMetadata, queryVec []float32) []kb.SnapshotShardMetadata {
 	scored := make([]scoredShard, len(shards))
 	for i := range shards {
-		scored[i] = scoredShard{shard: shards[i], score: shardRankScore(shards[i], queryVec)}
+		scored[i] = scoredShard{shard: &shards[i], score: shardRankScore(shards[i], queryVec)}
 	}
 	sort.SliceStable(scored, func(i, j int) bool { return lessScoredShard(scored[i], scored[j]) })
 	ranked := make([]kb.SnapshotShardMetadata, len(scored))
 	for i := range scored {
-		ranked[i] = scored[i].shard
+		ranked[i] = *scored[i].shard
 	}
 	return ranked
 }
@@ -100,17 +101,41 @@ func MergeTopK(shardResults [][]kb.QueryResult, k int) []kb.QueryResult {
 	if k <= 0 || len(shardResults) == 0 {
 		return []kb.QueryResult{}
 	}
-	flattened := flattenShardResults(shardResults)
-	if len(flattened) == 0 {
+	total := countShardResults(shardResults)
+	if total == 0 {
 		return []kb.QueryResult{}
 	}
-	sort.SliceStable(flattened, func(i, j int) bool { return lessScoredResult(flattened[i], flattened[j]) })
-	if k > len(flattened) {
-		k = len(flattened)
+	if k > total {
+		k = total
 	}
-	merged := make([]kb.QueryResult, 0, k)
-	for i := 0; i < k; i++ {
-		merged = append(merged, flattened[i].result)
+	if shouldSortAllTopK(k, total) {
+		return mergeTopKByFullSort(shardResults, k)
+	}
+	best := topKResultHeap{items: make([]scoredResult, 0, k)}
+	for shardIndex, shard := range shardResults {
+		for localIndex, result := range shard {
+			best.add(scoredResult{result: result, shardIndex: shardIndex, localIndex: localIndex}, k)
+		}
+	}
+	sort.SliceStable(best.items, func(i, j int) bool { return lessScoredResult(best.items[i], best.items[j]) })
+	merged := make([]kb.QueryResult, len(best.items))
+	for i := range best.items {
+		merged[i] = best.items[i].result
+	}
+	return merged
+}
+
+func shouldSortAllTopK(k int, total int) bool {
+	return k*4 >= total
+}
+
+func mergeTopKByFullSort(shardResults [][]kb.QueryResult, k int) []kb.QueryResult {
+	refs := flattenShardResultRefs(shardResults)
+	sort.SliceStable(refs, func(i, j int) bool { return lessResultRef(shardResults, refs[i], refs[j]) })
+	merged := make([]kb.QueryResult, k)
+	for i := range merged {
+		ref := refs[i]
+		merged[i] = shardResults[ref.shardIndex][ref.localIndex]
 	}
 	return merged
 }
@@ -121,14 +146,82 @@ type scoredResult struct {
 	localIndex int
 }
 
-func flattenShardResults(shardResults [][]kb.QueryResult) []scoredResult {
-	flattened := make([]scoredResult, 0, countShardResults(shardResults))
+type topKResultHeap struct{ items []scoredResult }
+
+func (h *topKResultHeap) add(candidate scoredResult, k int) {
+	if len(h.items) < k {
+		h.items = append(h.items, candidate)
+		h.siftUp(len(h.items) - 1)
+		return
+	}
+	if lessScoredResult(candidate, h.items[0]) {
+		h.items[0] = candidate
+		h.siftDown(0)
+	}
+}
+
+func (h *topKResultHeap) siftUp(index int) {
+	for index > 0 {
+		parent := (index - 1) / 2
+		if !worseScoredResult(h.items[index], h.items[parent]) {
+			return
+		}
+		h.items[index], h.items[parent] = h.items[parent], h.items[index]
+		index = parent
+	}
+}
+
+func (h *topKResultHeap) siftDown(index int) {
+	for {
+		left := index*2 + 1
+		if left >= len(h.items) {
+			return
+		}
+		child := left
+		right := left + 1
+		if right < len(h.items) && worseScoredResult(h.items[right], h.items[left]) {
+			child = right
+		}
+		if !worseScoredResult(h.items[child], h.items[index]) {
+			return
+		}
+		h.items[index], h.items[child] = h.items[child], h.items[index]
+		index = child
+	}
+}
+
+func worseScoredResult(left scoredResult, right scoredResult) bool {
+	return lessScoredResult(right, left)
+}
+
+type resultRef struct {
+	shardIndex int
+	localIndex int
+}
+
+func flattenShardResultRefs(shardResults [][]kb.QueryResult) []resultRef {
+	refs := make([]resultRef, 0, countShardResults(shardResults))
 	for shardIndex, shard := range shardResults {
-		for localIndex, result := range shard {
-			flattened = append(flattened, scoredResult{result: result, shardIndex: shardIndex, localIndex: localIndex})
+		for localIndex := range shard {
+			refs = append(refs, resultRef{shardIndex: shardIndex, localIndex: localIndex})
 		}
 	}
-	return flattened
+	return refs
+}
+
+func lessResultRef(shardResults [][]kb.QueryResult, left resultRef, right resultRef) bool {
+	return lessScoredResult(
+		scoredResult{
+			result:     shardResults[left.shardIndex][left.localIndex],
+			shardIndex: left.shardIndex,
+			localIndex: left.localIndex,
+		},
+		scoredResult{
+			result:     shardResults[right.shardIndex][right.localIndex],
+			shardIndex: right.shardIndex,
+			localIndex: right.localIndex,
+		},
+	)
 }
 
 func countShardResults(shardResults [][]kb.QueryResult) int {

@@ -589,7 +589,7 @@ func BenchmarkRankShardsForQuery(b *testing.B) {
 	for _, n := range []int{4, 16, 64, 256} {
 		shards := buildBenchShards(n, dim)
 		qVec := buildBenchQueryVec(dim)
-		b.Run("shards=%d", func(b *testing.B) {
+		b.Run(fmt.Sprintf("shards=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				_ = vectorplan.RankShards(shards, qVec)
@@ -628,7 +628,7 @@ func BenchmarkMergeShardTopKResults(b *testing.B) {
 				shardResults[i] = rows
 			}
 			k := shardCount * resultsPerShard / 2
-			b.Run("shards=%d_results=%d", func(b *testing.B) {
+			b.Run(fmt.Sprintf("shards=%d_results=%d", shardCount, resultsPerShard), func(b *testing.B) {
 				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					_ = vectorplan.MergeTopK(shardResults, k)
