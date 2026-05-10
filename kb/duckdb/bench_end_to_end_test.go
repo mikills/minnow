@@ -9,7 +9,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -48,7 +48,6 @@ func BenchmarkVectorQuery(b *testing.B) {
 	}, 0, len(cases))
 
 	for _, tc := range cases {
-		tc := tc
 		caseStart := time.Now()
 		b.Run(tc.name, func(b *testing.B) {
 			runVectorQueryBench(b, tc.corpusSize, tc.vectorDim, tc.realCorpus)
@@ -128,7 +127,7 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 		corpusSize = len(docs)
 		overflow := good[len(docs):]
 		queryTexts = make([]string, 0, warmups+samples)
-		for i := 0; i < warmups+samples; i++ {
+		for i := range warmups + samples {
 			queryTexts = append(queryTexts, overflow[i%len(overflow)].Text)
 		}
 	} else {
@@ -161,7 +160,7 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 	}
 
 	warmupStart := time.Now()
-	for i := 0; i < warmups; i++ {
+	for i := range warmups {
 		_, err := af.QueryRag(ctx, kb.RagQueryRequest{
 			KBID:     kbID,
 			QueryVec: queryVecs[i],
@@ -175,7 +174,7 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 
 	durations := make([]time.Duration, 0, samples)
 	runStart := time.Now()
-	for i := 0; i < samples; i++ {
+	for i := range samples {
 		qs := time.Now()
 		_, err := af.QueryRag(ctx, kb.RagQueryRequest{
 			KBID:     kbID,
@@ -189,7 +188,7 @@ func runVectorQueryBench(b *testing.B, corpusSize, vectorDim int, realCorpus boo
 
 	b.StopTimer()
 
-	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	slices.Sort(durations)
 	pct := func(p int) time.Duration { return durations[(len(durations)*p)/100] }
 
 	b.Logf("corpus=%d dim=%d topk=%d embedder=%s warmups=%d samples=%d",
@@ -287,7 +286,7 @@ func loadRealCorpus(limit int) ([]kb.Document, error) {
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("no corpus files under %s", dir)
 	}
-	sort.Strings(matches)
+	slices.Sort(matches)
 
 	docs := make([]kb.Document, 0, limit)
 	for _, path := range matches {

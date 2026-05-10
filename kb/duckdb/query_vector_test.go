@@ -153,7 +153,7 @@ func uploadTestShardManifest(t *testing.T, loader *kb.KB, kbID string, shardCoun
 		TotalSizeBytes: int64(shardCount),
 		Shards:         make([]kb.SnapshotShardMetadata, 0, shardCount),
 	}
-	for i := 0; i < shardCount; i++ {
+	for i := range shardCount {
 		manifest.Shards = append(manifest.Shards, kb.SnapshotShardMetadata{
 			ShardID:    fmt.Sprintf("shard-%03d", i),
 			Key:        fmt.Sprintf("%s/shard-%03d.duckdb", kbID, i),
@@ -208,7 +208,6 @@ func testKBSearchShardPath(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -241,7 +240,7 @@ func testKBTopKShardExecutionModes(t *testing.T) {
 	ctx := context.Background()
 	makeDocs := func(n int) []kb.Document {
 		docs := make([]kb.Document, 0, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			docs = append(docs, kb.Document{
 				ID:   fmt.Sprintf("doc-%02d", i),
 				Text: fmt.Sprintf("document content %02d with stable text", i),
@@ -308,7 +307,6 @@ func testKBTopKShardExecutionModes(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			loader, kbID, queryVec, wantPath, baseline := tc.setup(t)
 
@@ -434,7 +432,6 @@ func testKBTopKShardFanoutPlan(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -497,7 +494,6 @@ func testKBTopKShardLocalMultiplier(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := vectorplan.LocalTopK(tc.k, kb.NormalizeShardingPolicy(tc.policy))
@@ -539,7 +535,6 @@ func testKBTopKShardMerge(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -581,18 +576,31 @@ func buildBenchQueryVec(dim int) []float32 {
 	return v
 }
 
-// BenchmarkRankShardsForQuery measures the cost of ranking shards by
-// centroid proximity. The current implementation recomputes shardRankScore
-// inside the sort comparator O(n log n) times.
+// BenchmarkRankShardsForQuery measures full ranking by centroid proximity.
 func BenchmarkRankShardsForQuery(b *testing.B) {
 	const dim = 64
-	for _, n := range []int{4, 16, 64, 256} {
+	for _, n := range []int{4, 16, 64, 256, 1024} {
 		shards := buildBenchShards(n, dim)
 		qVec := buildBenchQueryVec(dim)
-		b.Run("shards=%d", func(b *testing.B) {
+		b.Run(fmt.Sprintf("shards=%d", n), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				_ = vectorplan.RankShards(shards, qVec)
+			}
+		})
+	}
+}
+
+func BenchmarkSelectTopShardsForQuery(b *testing.B) {
+	const dim = 64
+	const fanout = 6
+	for _, n := range []int{16, 64, 256, 1024} {
+		shards := buildBenchShards(n, dim)
+		qVec := buildBenchQueryVec(dim)
+		b.Run(fmt.Sprintf("shards=%d_fanout=%d", n, fanout), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				_ = vectorplan.SelectTopShards(shards, qVec, fanout)
 			}
 		})
 	}
@@ -605,7 +613,7 @@ func BenchmarkShardRankScore(b *testing.B) {
 	shards := buildBenchShards(1, dim)
 	qVec := buildBenchQueryVec(dim)
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = vectorplan.RankShards(shards, qVec)
 	}
 }
@@ -627,13 +635,19 @@ func BenchmarkMergeShardTopKResults(b *testing.B) {
 				}
 				shardResults[i] = rows
 			}
-			k := shardCount * resultsPerShard / 2
-			b.Run("shards=%d_results=%d", func(b *testing.B) {
-				b.ReportAllocs()
-				for i := 0; i < b.N; i++ {
-					_ = vectorplan.MergeTopK(shardResults, k)
+			seenK := map[int]struct{}{}
+			for _, k := range []int{10, shardCount * resultsPerShard / 2} {
+				if _, ok := seenK[k]; ok {
+					continue
 				}
-			})
+				seenK[k] = struct{}{}
+				b.Run(fmt.Sprintf("shards=%d_results=%d_k=%d", shardCount, resultsPerShard, k), func(b *testing.B) {
+					b.ReportAllocs()
+					for i := 0; i < b.N; i++ {
+						_ = vectorplan.MergeTopK(shardResults, k)
+					}
+				})
+			}
 		}
 	}
 }

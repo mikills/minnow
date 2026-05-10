@@ -117,10 +117,7 @@ func New(
 		leaseMgr = lease.NewInMemoryManager()
 	}
 
-	leaseTTL := tickEvery * 2
-	if leaseTTL < schedulerMinLeaseTTL {
-		leaseTTL = schedulerMinLeaseTTL
-	}
+	leaseTTL := max(tickEvery*2, schedulerMinLeaseTTL)
 
 	disabledSet := make(map[string]struct{}, len(disabled))
 	for _, id := range disabled {

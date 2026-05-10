@@ -20,6 +20,17 @@ type LocalBlobStore struct {
 	keyLocks map[string]*sync.Mutex
 }
 
+func (l *LocalBlobStore) DownloadBytes(ctx context.Context, key string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(l.Root, key))
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", filepath.Join(l.Root, key), err)
+	}
+	return data, nil
+}
+
 func (l *LocalBlobStore) Download(ctx context.Context, key, dest string) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -168,7 +169,7 @@ func symbolMarkers(lines []string, language string) []symbolMarker {
 	if len(regexes) == 0 {
 		return nil
 	}
-	markers := make([]symbolMarker, 0)
+	markers := make([]symbolMarker, 0, estimatedSymbolMarkers(len(lines)))
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		for _, candidate := range regexes {
@@ -180,6 +181,14 @@ func symbolMarkers(lines []string, language string) []symbolMarker {
 		}
 	}
 	return markers
+}
+
+func estimatedSymbolMarkers(lineCount int) int {
+	estimate := lineCount / 16
+	if estimate < 8 {
+		return 8
+	}
+	return estimate
 }
 
 func lineChunks(lines []string, chunkSize, overlap int, symbol, kind string) []Chunk {
@@ -232,11 +241,26 @@ func chunkEnd(lines []string, start int, chunkSize int) int {
 }
 
 func chunkFromLines(lines []string, start int, end int, symbol string, kind string) Chunk {
-	text := strings.TrimSpace(strings.Join(lines[start:end], "\n"))
+	text := joinTrimmedLines(lines[start:end])
 	if text == "" {
 		return Chunk{}
 	}
 	return Chunk{Text: text, Symbol: symbol, Kind: kind, StartLine: start + 1, EndLine: end}
+}
+
+func joinTrimmedLines(lines []string) string {
+	first := 0
+	for first < len(lines) && strings.TrimSpace(lines[first]) == "" {
+		first++
+	}
+	last := len(lines) - 1
+	for last >= first && strings.TrimSpace(lines[last]) == "" {
+		last--
+	}
+	if first > last {
+		return ""
+	}
+	return strings.Join(lines[first:last+1], "\n")
 }
 
 func nextChunkStart(window []string, end int, overlap int) int {
@@ -267,10 +291,7 @@ func splitLongLineChunks(input longLineChunkInput) []Chunk {
 	}
 	var chunks []Chunk
 	for start := 0; start < len(line); {
-		end := start + input.chunkSize
-		if end > len(line) {
-			end = len(line)
-		}
+		end := min(start+input.chunkSize, len(line))
 		text := strings.TrimSpace(line[start:end])
 		if text != "" {
 			chunks = append(
@@ -333,7 +354,11 @@ func FormatChunkText(path, language string, chunk Chunk) string {
 		b.WriteString(chunk.Symbol)
 		b.WriteString("\n")
 	}
-	b.WriteString(fmt.Sprintf("lines: %d-%d\n\n", chunk.StartLine, chunk.EndLine))
+	b.WriteString("lines: ")
+	b.WriteString(strconv.Itoa(chunk.StartLine))
+	b.WriteString("-")
+	b.WriteString(strconv.Itoa(chunk.EndLine))
+	b.WriteString("\n\n")
 	b.WriteString(chunk.Text)
 	return b.String()
 }
@@ -348,15 +373,20 @@ type ChunkIDInput struct {
 }
 
 func StableChunkID(input ChunkIDInput) string {
-	sum := sha256.Sum256(
-		[]byte(
-			input.RepoID + "\x00" + input.RelPath + "\x00" + fmt.Sprint(
-				input.StartLine,
-			) + "\x00" + fmt.Sprint(
-				input.EndLine,
-			) + "\x00" + input.FileHash + "\x00" + input.Text,
-		),
-	)
+	var hashInput strings.Builder
+	hashInput.Grow(len(input.RepoID) + len(input.RelPath) + len(input.FileHash) + len(input.Text) + 32)
+	hashInput.WriteString(input.RepoID)
+	hashInput.WriteByte('\x00')
+	hashInput.WriteString(input.RelPath)
+	hashInput.WriteByte('\x00')
+	hashInput.WriteString(strconv.Itoa(input.StartLine))
+	hashInput.WriteByte('\x00')
+	hashInput.WriteString(strconv.Itoa(input.EndLine))
+	hashInput.WriteByte('\x00')
+	hashInput.WriteString(input.FileHash)
+	hashInput.WriteByte('\x00')
+	hashInput.WriteString(input.Text)
+	sum := sha256.Sum256([]byte(hashInput.String()))
 	pathToken := SanitizeIDToken(input.RelPath)
 	if len(pathToken) > 80 {
 		pathToken = pathToken[len(pathToken)-80:]

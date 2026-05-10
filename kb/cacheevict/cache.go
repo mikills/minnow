@@ -105,9 +105,9 @@ func Sweep(cfg Config) SweepResult {
 		return SweepResult{MaxBytes: cfg.MaxBytes, CurrentBytes: total}
 	}
 	SortOldestFirst(entries)
-	removed, result := removeExpired(cfg, entries, total)
+	candidates, result := removeExpired(cfg, entries, total)
 	if cfg.MaxBytes > 0 {
-		result.CurrentBytes = removeOverBudget(cfg, entries, removed, result.CurrentBytes, &result)
+		result.CurrentBytes = removeOverBudget(cfg, candidates, result.CurrentBytes, &result)
 	}
 	result.MaxBytes = cfg.MaxBytes
 	result.ProtectedKBCount = len(cfg.Protected)
@@ -115,35 +115,37 @@ func Sweep(cfg Config) SweepResult {
 	return result
 }
 
-func removeExpired(cfg Config, entries []Entry, total int64) (map[string]bool, SweepResult) {
-	removed := make(map[string]bool)
+func removeExpired(cfg Config, entries []Entry, total int64) ([]Entry, SweepResult) {
 	result := SweepResult{CurrentBytes: total}
 	if cfg.TTL <= 0 {
-		return removed, result
+		return entries, result
 	}
 	now := cfg.Now
 	if now.IsZero() {
 		now = time.Now()
 	}
+	remaining := entries[:0]
 	for _, entry := range entries {
 		if cfg.Protected[entry.KBID] || entry.LastTouch.IsZero() || now.Sub(entry.LastTouch) < cfg.TTL {
+			remaining = append(remaining, entry)
 			continue
 		}
 		if removeEntry(cfg, entry, ReasonTTL, &result) {
-			removed[entry.KBID] = true
 			result.CurrentBytes -= entry.Bytes
 			result.TTLEvictions++
+			continue
 		}
+		remaining = append(remaining, entry)
 	}
-	return removed, result
+	return remaining, result
 }
 
-func removeOverBudget(cfg Config, entries []Entry, removed map[string]bool, total int64, result *SweepResult) int64 {
+func removeOverBudget(cfg Config, entries []Entry, total int64, result *SweepResult) int64 {
 	for _, entry := range entries {
 		if total <= cfg.MaxBytes {
 			break
 		}
-		if cfg.Protected[entry.KBID] || removed[entry.KBID] {
+		if cfg.Protected[entry.KBID] {
 			continue
 		}
 		if removeEntry(cfg, entry, ReasonSize, result) {

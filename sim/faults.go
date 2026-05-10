@@ -68,6 +68,13 @@ func (s *FaultableBlobStore) Head(ctx context.Context, key string) (*kb.BlobObje
 	return s.inner.Head(ctx, key)
 }
 
+func (s *FaultableBlobStore) DownloadBytes(ctx context.Context, key string) ([]byte, error) {
+	if s.rollFault(func(f BlobFaults) float64 { return f.DownloadFailRate }) {
+		return nil, ErrInjected
+	}
+	return s.inner.DownloadBytes(ctx, key)
+}
+
 func (s *FaultableBlobStore) Download(ctx context.Context, key string, dest string) error {
 	if s.rollFault(func(f BlobFaults) float64 { return f.DownloadFailRate }) {
 		return ErrInjected

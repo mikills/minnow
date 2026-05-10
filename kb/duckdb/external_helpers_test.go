@@ -75,7 +75,7 @@ func uploadTestShardManifest(t *testing.T, loader *kb.KB, kbID string, shardCoun
 		TotalSizeBytes: int64(shardCount),
 		Shards:         make([]kb.SnapshotShardMetadata, 0, shardCount),
 	}
-	for i := 0; i < shardCount; i++ {
+	for i := range shardCount {
 		manifest.Shards = append(
 			manifest.Shards,
 			kb.SnapshotShardMetadata{

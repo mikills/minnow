@@ -314,6 +314,9 @@ type failingDeleteBlobStore struct {
 func (f *failingDeleteBlobStore) Head(ctx context.Context, key string) (*BlobObjectInfo, error) {
 	return f.inner.Head(ctx, key)
 }
+func (f *failingDeleteBlobStore) DownloadBytes(ctx context.Context, key string) ([]byte, error) {
+	return f.inner.DownloadBytes(ctx, key)
+}
 func (f *failingDeleteBlobStore) Download(ctx context.Context, key, dest string) error {
 	return f.inner.Download(ctx, key, dest)
 }

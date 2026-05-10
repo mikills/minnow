@@ -109,6 +109,32 @@ func (s *S3BlobStore) Head(ctx context.Context, key string) (*ObjectInfo, error)
 	}, nil
 }
 
+func (s *S3BlobStore) DownloadBytes(ctx context.Context, key string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	fullKey := s.fullKey(key)
+	result, err := s.Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.Bucket),
+		Key:    aws.String(fullKey),
+	})
+	if err != nil {
+		var notFoundErr *types.NotFound
+		if errors.As(err, &notFoundErr) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
+		}
+		return nil, fmt.Errorf("get object %s: %w", key, err)
+	}
+	defer result.Body.Close()
+
+	data, err := io.ReadAll(result.Body)
+	if err != nil {
+		return nil, fmt.Errorf("download object %s: %w", key, err)
+	}
+	return data, nil
+}
+
 // Download retrieves an object from S3 and writes it to the destination path.
 func (s *S3BlobStore) Download(ctx context.Context, key string, dest string) error {
 	if err := ctx.Err(); err != nil {

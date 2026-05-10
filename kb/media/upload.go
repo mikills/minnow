@@ -229,8 +229,8 @@ func ContentTypeAllowed(ct string, allowed []string) bool {
 		if a == "" {
 			continue
 		}
-		if strings.HasSuffix(a, "*") {
-			if strings.HasPrefix(ct, strings.TrimSuffix(a, "*")) {
+		if prefix, ok := strings.CutSuffix(a, "*"); ok {
+			if strings.HasPrefix(ct, prefix) {
 				return true
 			}
 			continue

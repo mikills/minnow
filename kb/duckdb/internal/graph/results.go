@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"maps"
 	"sort"
 
 	kb "github.com/mikills/minnow/kb"
@@ -74,9 +75,7 @@ func SeedDocIDs(seeds []kb.QueryResult) []string {
 
 func CopyFloatMap(src map[string]float64) map[string]float64 {
 	dst := make(map[string]float64, len(src))
-	for k, v := range src {
-		dst[k] = v
-	}
+	maps.Copy(dst, src)
 	return dst
 }
 

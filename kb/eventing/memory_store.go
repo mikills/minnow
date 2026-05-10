@@ -48,6 +48,13 @@ func idempKey(e Event) string {
 	return e.IdempotencyKey + "|" + string(e.Kind) + "|" + e.KBID
 }
 
+func eventBefore(left, right *Event) bool {
+	if left.CreatedAt.Equal(right.CreatedAt) {
+		return left.EventID < right.EventID
+	}
+	return left.CreatedAt.Before(right.CreatedAt)
+}
+
 // Append inserts the event. Returns ErrDuplicateKey on idempotency
 // collision.
 func (s *InMemoryStore) Append(_ context.Context, event Event) error {
@@ -92,24 +99,20 @@ func (s *InMemoryStore) Claim(
 
 	now := s.now()
 
-	// Iterate in deterministic created_at order so older events go first.
-	candidates := make([]*Event, 0)
-	for _, e := range s.events {
-		if e.Kind == kind && e.Status == EventStatusPending {
-			candidates = append(candidates, e)
+	// Pick the deterministic first pending event without materializing and
+	// sorting every candidate. Older events go first, then EventID breaks ties.
+	var e *Event
+	for _, candidate := range s.events {
+		if candidate.Kind != kind || candidate.Status != EventStatusPending {
+			continue
+		}
+		if e == nil || eventBefore(candidate, e) {
+			e = candidate
 		}
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
-			return candidates[i].EventID < candidates[j].EventID
-		}
-		return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
-	})
-	if len(candidates) == 0 {
+	if e == nil {
 		return nil, ErrNoneAvailable
 	}
-
-	e := candidates[0]
 	e.Status = EventStatusClaimed
 	e.ClaimedBy = workerID
 	e.ClaimedUntil = now.Add(visibility)
@@ -283,10 +286,7 @@ func eventNextToken(events []Event, after string, limit int) string {
 
 func eventPageBounds(events []Event, after string, limit int) (int, int) {
 	start := eventPageStart(events, after)
-	end := start + limit
-	if end > len(events) {
-		end = len(events)
-	}
+	end := min(start+limit, len(events))
 	return start, end
 }
 

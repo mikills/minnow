@@ -111,12 +111,9 @@ func TestLocalEmbedder(t *testing.T) {
 }
 
 func dot(a, b []float32) float64 {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
+	n := min(len(a), len(b))
 	sum := 0.0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		sum += float64(a[i] * b[i])
 	}
 	return sum

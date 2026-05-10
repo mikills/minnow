@@ -36,9 +36,7 @@ func TestSim(t *testing.T) {
 	}
 
 	for name, scenario := range cases {
-		name, scenario := name, scenario
 		for _, seed := range seeds {
-			seed := seed
 			t.Run(fmt.Sprintf("%s/seed_%d", name, seed), func(t *testing.T) {
 				h := sim.New(t, sim.WithSeed(seed), sim.WithInvariants(invariants...))
 				scenario(h)

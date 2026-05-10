@@ -209,7 +209,7 @@ func (o *Grapher) Extract(ctx context.Context, chunks []graphbuild.Chunk) (*grap
 	jobs := make(chan int, workers)
 
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
+	for range workers {
 		startGrapherWorker(
 			ollamaWorkerState{
 				ctx:     ctx,

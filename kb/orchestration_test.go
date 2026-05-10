@@ -160,7 +160,6 @@ func testKBTopKCases(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			loader, kbID, vec, k := tc.setup(t)
 			results, err := loader.Search(ctx, kbID, vec, &SearchOptions{TopK: k})
@@ -239,7 +238,6 @@ func testKBSearchByDistanceCases(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			loader, kbID, vec, threshold := tc.setup(t)
 			results, err := loader.Search(ctx, kbID, vec, &SearchOptions{TopK: 1000, MaxDistance: &threshold})
@@ -365,7 +363,6 @@ func testKBGraphModeUnavailableScenarios(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			loader, kbID, queryVec := tc.setup(t)
 			_, err := loader.Search(ctx, kbID, queryVec, &SearchOptions{Mode: SearchModeGraph, TopK: 2})

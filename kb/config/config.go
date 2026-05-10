@@ -241,7 +241,7 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // MarshalYAML renders the duration as its canonical string form.
-func (d Duration) MarshalYAML() (interface{}, error) {
+func (d Duration) MarshalYAML() (any, error) {
 	return time.Duration(d).String(), nil
 }
 

@@ -17,6 +17,21 @@ func TestMergeTopK(t *testing.T) {
 	require.Equal(t, []string{"a", "b"}, []string{got[0].ID, got[1].ID})
 }
 
+func TestSelectTopShards(t *testing.T) {
+	t.Run("matches full ranking prefix", func(t *testing.T) {
+		shards := []kb.SnapshotShardMetadata{
+			{ShardID: "far", VectorRows: 1, Centroid: []float32{10}},
+			{ShardID: "near", VectorRows: 1, Centroid: []float32{1}},
+			{ShardID: "middle", VectorRows: 1, Centroid: []float32{5}},
+		}
+
+		selected := SelectTopShards(shards, []float32{0}, 2)
+		ranked := RankShards(shards, []float32{0})
+
+		require.Equal(t, ranked[:2], selected)
+	})
+}
+
 func TestPlanShardFanout(t *testing.T) {
 	manifest := &kb.SnapshotShardManifest{Shards: []kb.SnapshotShardMetadata{
 		{ShardID: "far", VectorRows: 1, Centroid: []float32{10}},

@@ -164,7 +164,7 @@ func TestInMemoryEventStore(t *testing.T) {
 	t.Run("ListUnfinishedBefore paginates and emits continuation token", func(t *testing.T) {
 		s := NewInMemoryStore()
 		ctx := context.Background()
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			ev := mkEvent(fmt.Sprintf("e-%d", i), "kb", EventDocumentUpsert, fmt.Sprintf("k-%d", i))
 			ev.CreatedAt = time.Now().Add(time.Duration(i) * time.Millisecond)
 			require.NoError(t, s.Append(ctx, ev))

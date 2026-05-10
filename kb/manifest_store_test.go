@@ -272,6 +272,10 @@ func (c *churnOnHeadBlobStore) Head(ctx context.Context, key string) (*BlobObjec
 	return info, err
 }
 
+func (c *churnOnHeadBlobStore) DownloadBytes(ctx context.Context, key string) ([]byte, error) {
+	return c.inner.DownloadBytes(ctx, key)
+}
+
 func (c *churnOnHeadBlobStore) Download(ctx context.Context, key string, dest string) error {
 	return c.inner.Download(ctx, key, dest)
 }
@@ -309,7 +313,7 @@ func seedManifestDirect(t *testing.T, bs *LocalBlobStore, kbID string, shardCoun
 		CreatedAt:      time.Now().UTC(),
 		TotalSizeBytes: int64(shardCount),
 	}
-	for i := 0; i < shardCount; i++ {
+	for i := range shardCount {
 		manifest.Shards = append(manifest.Shards, SnapshotShardMetadata{
 			ShardID:    fmt.Sprintf("shard-%03d", i),
 			Key:        fmt.Sprintf("%s/shard-%03d.duckdb", kbID, i),

@@ -31,7 +31,7 @@ func startFinanceReader(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < iterations; i++ {
+		for i := range iterations {
 			qIdx := (worker + i) % len(queryVecs)
 			results, err := readerKB.Search(ctx, tenantID, queryVecs[qIdx], &kb.SearchOptions{TopK: 20})
 			if err != nil {
@@ -98,7 +98,7 @@ func testE2EConcurrentReadsFinanceFixture(t *testing.T) {
 	}
 
 	readerHarnesses := make([]*kb.TestHarness, 0, 4)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		rh := kb.NewTestHarness(t, fmt.Sprintf("reader-%d", i)).
 			WithBlobRoot(sharedBlobRoot).
 			WithEmbedder(embedder).
@@ -114,7 +114,7 @@ func testE2EConcurrentReadsFinanceFixture(t *testing.T) {
 	var readerWG sync.WaitGroup
 	readerWorkers := len(readerHarnesses)
 	iterationsPerReader := 80
-	for worker := 0; worker < readerWorkers; worker++ {
+	for worker := range readerWorkers {
 		startFinanceReader(
 			ctx,
 			&readerWG,
@@ -192,7 +192,7 @@ func startRecipeWriter(
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < writesPerWorker; i++ {
+		for i := range writesPerWorker {
 			line := recipeLines[(worker+i)%len(recipeLines)]
 			doc := kb.Document{
 				ID:   fmt.Sprintf("recipe-w%d-%03d", worker, i),
@@ -233,7 +233,7 @@ func testE2EConcurrentWritesRecipeFixture(t *testing.T) {
 		"rigatoni spaghetti pasta water",
 	}
 	readerHarnesses := make([]*kb.TestHarness, 0, 4)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		rh := kb.NewTestHarness(t, fmt.Sprintf("recipe-reader-%d", i)).
 			WithBlobRoot(sharedBlobRoot).
 			WithEmbedder(embedder).
@@ -276,7 +276,7 @@ func testE2EConcurrentWritesRecipeFixture(t *testing.T) {
 	writerWorkers := 3
 	writesPerWorker := 18
 	var writerWG sync.WaitGroup
-	for worker := 0; worker < writerWorkers; worker++ {
+	for worker := range writerWorkers {
 		startRecipeWriter(
 			ctx,
 			&writerWG,
@@ -441,10 +441,7 @@ func buildChunkedDocuments(prefix, text string, wordsPerChunk, overlap int) []kb
 
 	docs := make([]kb.Document, 0)
 	for start := 0; start < len(tokens); start += step {
-		end := start + wordsPerChunk
-		if end > len(tokens) {
-			end = len(tokens)
-		}
+		end := min(start+wordsPerChunk, len(tokens))
 		chunk := strings.TrimSpace(strings.Join(tokens[start:end], " "))
 		if chunk == "" {
 			continue
@@ -528,12 +525,9 @@ func bruteForceTopK(docEmbeddings map[string][]float32, query []float32, k int) 
 }
 
 func l2Distance(a, b []float32) float64 {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
+	n := min(len(a), len(b))
 	var sum float64
-	for i := 0; i < n; i++ {
+	for i := range n {
 		d := float64(a[i] - b[i])
 		sum += d * d
 	}

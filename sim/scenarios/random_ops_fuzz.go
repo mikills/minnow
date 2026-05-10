@@ -28,7 +28,7 @@ func RandomOpsFuzz(h *sim.Harness) {
 		kbIDs[i] = fmt.Sprintf("fuzz-kb-%d", i)
 	}
 
-	for step := 0; step < numOps; step++ {
+	for step := range numOps {
 		runRandomFuzzOp(h, rng, kbIDs, batchLen, step)
 	}
 

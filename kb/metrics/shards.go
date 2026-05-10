@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -138,9 +139,7 @@ func (r *ShardRegistry) Snapshot() map[string]ShardStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make(map[string]ShardStats, len(r.byKB))
-	for kbID, m := range r.byKB {
-		out[kbID] = m
-	}
+	maps.Copy(out, r.byKB)
 	return out
 }
 

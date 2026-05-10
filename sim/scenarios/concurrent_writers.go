@@ -21,7 +21,7 @@ func ConcurrentWriters(h *sim.Harness) {
 	go func() { results <- h.Ingest(kbID, writerB) }()
 
 	var errs []error
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		errs = append(errs, <-results)
 	}
 

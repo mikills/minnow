@@ -2,7 +2,6 @@ package localembed
 
 import (
 	"fmt"
-	"hash/fnv"
 	"math"
 	"strings"
 	"unicode"
@@ -20,16 +19,15 @@ func Vector(input string, dim, minNgram, maxNgram int) ([]float32, error) {
 	if normalized == "" {
 		return nil, fmt.Errorf("input cannot be empty")
 	}
-	tokens := Tokenize(normalized)
 	vec := make([]float32, dim)
 	var wordCount int
-	for _, tok := range tokens {
+	visitTokens(normalized, func(tok string) {
 		if _, skip := Stopwords[tok]; skip {
-			continue
+			return
 		}
 		AddWordVector(vec, tok, dim, minNgram, maxNgram)
 		wordCount++
-	}
+	})
 	if wordCount == 0 {
 		return nil, fmt.Errorf("input has no indexable tokens after stopword filtering")
 	}
@@ -46,17 +44,22 @@ func Vector(input string, dim, minNgram, maxNgram int) ([]float32, error) {
 func AddWordVector(vec []float32, word string, dim, minNgram, maxNgram int) {
 	bounded := "<" + word + ">"
 	runes := []rune(bounded)
-	addFeature(vec, bounded, dim)
+	addFeature(vec, stableHashString(seedIndexBytes, bounded), stableHashString(seedSignBytes, bounded), dim)
 	for n := minNgram; n <= maxNgram && n <= len(runes); n++ {
 		for i := 0; i <= len(runes)-n; i++ {
-			addFeature(vec, string(runes[i:i+n]), dim)
+			addFeature(
+				vec,
+				stableHashRunes(seedIndexBytes, runes[i:i+n]),
+				stableHashRunes(seedSignBytes, runes[i:i+n]),
+				dim,
+			)
 		}
 	}
 }
 
-func addFeature(vec []float32, feature string, dim int) {
-	idx := int(stableHash(seedIndexBytes, feature) % uint64(dim))
-	if stableHash(seedSignBytes, feature)%2 == 1 {
+func addFeature(vec []float32, indexHash, signHash uint64, dim int) {
+	idx := int(indexHash % uint64(dim))
+	if signHash%2 == 1 {
 		vec[idx] -= float32(1)
 	} else {
 		vec[idx] += float32(1)
@@ -69,12 +72,21 @@ func NormalizeInput(input string) string {
 
 func Tokenize(input string) []string {
 	tokens := make([]string, 0, len(input)/EstimatedCharsPerToken)
+	visitTokens(input, func(tok string) {
+		tokens = append(tokens, tok)
+	})
+	return tokens
+}
+
+func visitTokens(input string, visit func(string)) int {
+	count := 0
 	var b strings.Builder
 	flush := func() {
 		if b.Len() == 0 {
 			return
 		}
-		tokens = append(tokens, b.String())
+		visit(b.String())
+		count++
 		b.Reset()
 	}
 	for _, r := range input {
@@ -85,14 +97,68 @@ func Tokenize(input string) []string {
 		flush()
 	}
 	flush()
-	return tokens
+	return count
 }
 
-func stableHash(seedWithSep []byte, token string) uint64 {
-	h := fnv.New64a()
-	_, _ = h.Write(seedWithSep)
-	_, _ = h.Write([]byte(token))
-	return h.Sum64()
+const (
+	fnv64Offset uint64 = 14695981039346656037
+	fnv64Prime  uint64 = 1099511628211
+
+	utf8Rune1Max           rune = 0x80
+	utf8Rune2Max           rune = 0x800
+	utf8Rune3Max           rune = 0x10000
+	utf8ContinuationMask   rune = 0x3f
+	utf8ContinuationPrefix byte = 0x80
+)
+
+func stableHashString(seedWithSep []byte, token string) uint64 {
+	h := fnv64Offset
+	for _, b := range seedWithSep {
+		h ^= uint64(b)
+		h *= fnv64Prime
+	}
+	for i := 0; i < len(token); i++ {
+		h ^= uint64(token[i])
+		h *= fnv64Prime
+	}
+	return h
+}
+
+func stableHashRunes(seedWithSep []byte, runes []rune) uint64 {
+	h := fnv64Offset
+	for _, b := range seedWithSep {
+		h ^= uint64(b)
+		h *= fnv64Prime
+	}
+	for _, r := range runes {
+		h = appendHashRune(h, r)
+	}
+	return h
+}
+
+func appendHashRune(h uint64, r rune) uint64 {
+	switch {
+	case r < utf8Rune1Max:
+		return hashByte(h, byte(r))
+	case r < utf8Rune2Max:
+		h = hashByte(h, byte(0xc0|r>>6))
+		return hashByte(h, byte(rune(utf8ContinuationPrefix)|r&utf8ContinuationMask))
+	case r < utf8Rune3Max:
+		h = hashByte(h, byte(0xe0|r>>12))
+		h = hashByte(h, byte(rune(utf8ContinuationPrefix)|r>>6&utf8ContinuationMask))
+		return hashByte(h, byte(rune(utf8ContinuationPrefix)|r&utf8ContinuationMask))
+	default:
+		h = hashByte(h, byte(0xf0|r>>18))
+		h = hashByte(h, byte(rune(utf8ContinuationPrefix)|r>>12&utf8ContinuationMask))
+		h = hashByte(h, byte(rune(utf8ContinuationPrefix)|r>>6&utf8ContinuationMask))
+		return hashByte(h, byte(rune(utf8ContinuationPrefix)|r&utf8ContinuationMask))
+	}
+}
+
+func hashByte(h uint64, b byte) uint64 {
+	h ^= uint64(b)
+	h *= fnv64Prime
+	return h
 }
 
 func NormalizeVector(vec []float32) bool {

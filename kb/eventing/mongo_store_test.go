@@ -81,7 +81,7 @@ func TestMongoStore(t *testing.T) {
 		var winners atomic.Int32
 		var noneAvailable atomic.Int32
 		var wg sync.WaitGroup
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			startConcurrentClaim(ctx, s, &wg, &winners, &noneAvailable)
 		}
 		wg.Wait()

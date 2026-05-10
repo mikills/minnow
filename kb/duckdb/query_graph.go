@@ -3,6 +3,8 @@ package duckdb
 import (
 	"context"
 	"database/sql"
+	"maps"
+
 	kb "github.com/mikills/minnow/kb"
 	graph "github.com/mikills/minnow/kb/duckdb/internal/graph"
 )
@@ -67,9 +69,7 @@ func seedEntityScores(ctx context.Context, db *sql.DB, seeds []kb.QueryResult) (
 		return nil, err
 	}
 	entityScores := make(map[string]float64, len(seedEntities))
-	for id, weight := range seedEntities {
-		entityScores[id] = weight
-	}
+	maps.Copy(entityScores, seedEntities)
 	return entityScores, nil
 }
 
