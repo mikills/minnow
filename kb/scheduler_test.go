@@ -215,7 +215,7 @@ func TestScheduler(t *testing.T) {
 		t.Cleanup(s.Stop)
 
 		// Overwhelm the observer buffer.
-		for i := 0; i < 200; i++ {
+		for range 200 {
 			_, _ = s.RunOnce(context.Background(), "job")
 		}
 		require.Greater(t, s.ObserverDrops(), uint64(0), "observer overflow must record drops")

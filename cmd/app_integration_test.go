@@ -339,7 +339,7 @@ func testAppMediaUploadRateLimited(t *testing.T) {
 	// a fast-enough loop of 50+ requests will exceed the bucket and start
 	// returning 429.
 	var got429 bool
-	for i := 0; i < 60; i++ {
+	for range 60 {
 		resp, err := http.Get(baseURL + "/rag/operations/does-not-exist")
 		require.NoError(t, err)
 		status := resp.StatusCode

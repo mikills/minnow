@@ -310,7 +310,7 @@ func testAppMetricsSnapshotCopies(t *testing.T) {
 func startMetricsRecorder(wg *sync.WaitGroup, m *InMemApp, id, loops int) {
 	go func() {
 		defer wg.Done()
-		for j := 0; j < loops; j++ {
+		for j := range loops {
 			path := fmt.Sprintf("/p/%d", id%3)
 			m.RecordRequest("GET", path, 200, int64(j))
 			m.RecordEmbed("kb-concurrent", int64(j), nil)
@@ -327,7 +327,7 @@ func testAppMetricsConcurrentRecord(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		startMetricsRecorder(&wg, m, i, loops)
 	}
 	wg.Wait()
@@ -345,7 +345,7 @@ func testAppMetricsConcurrentRecord(t *testing.T) {
 
 func testAppMetricsRecentRingBufferWraps(t *testing.T) {
 	m := NewInMemApp()
-	for i := 0; i < RecentCapacity+50; i++ {
+	for i := range RecentCapacity + 50 {
 		m.RecordRequest("GET", fmt.Sprintf("/item/%03d", i), 200, int64(i))
 	}
 

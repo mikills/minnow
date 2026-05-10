@@ -124,7 +124,7 @@ func NewSchedule(cronExpr string) (*Schedule, error) {
 
 func parseCronSegment(segment string, min int, max int) (map[int]struct{}, error) {
 	slots := make(map[int]struct{}, max-min+1)
-	for _, part := range strings.Split(segment, ",") {
+	for part := range strings.SplitSeq(segment, ",") {
 		rangeMin, rangeMax, step, err := parseCronSegmentPart(part, min, max)
 		if err != nil {
 			return nil, err

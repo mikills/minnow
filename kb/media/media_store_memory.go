@@ -148,10 +148,7 @@ func mediaSliceToPage(matches []MediaObject, after string, limit int) MediaPage 
 			}
 		}
 	}
-	end := start + limit
-	if end > len(matches) {
-		end = len(matches)
-	}
+	end := min(start+limit, len(matches))
 	items := append([]MediaObject(nil), matches[start:end]...)
 	page := MediaPage{Items: items}
 	if end < len(matches) && len(items) > 0 {

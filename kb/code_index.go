@@ -233,10 +233,7 @@ func (k *KB) embedCodeDocuments(ctx context.Context, docs []Document, batchSize 
 		batchSize = DefaultCodeEmbedBatchSize
 	}
 	for start := 0; start < len(docs); start += batchSize {
-		end := start + batchSize
-		if end > len(docs) {
-			end = len(docs)
-		}
+		end := min(start+batchSize, len(docs))
 		inputs := make([]string, len(docs[start:end]))
 		for i, doc := range docs[start:end] {
 			inputs[i] = doc.Text
@@ -395,10 +392,7 @@ func (k *KB) publishCodeDocumentStream(
 			if pos >= len(docs) {
 				return nil, nil
 			}
-			end := pos + DefaultCodeEmbedBatchSize
-			if end > len(docs) {
-				end = len(docs)
-			}
+			end := min(pos+DefaultCodeEmbedBatchSize, len(docs))
 			batch := docs[pos:end]
 			pos = end
 			embedStarted := time.Now()

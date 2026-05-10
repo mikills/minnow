@@ -16,7 +16,7 @@ func RepeatedSmallIngests(h *sim.Harness) {
 		kbID   = "repeated-ingest"
 		rounds = 30
 	)
-	for i := 0; i < rounds; i++ {
+	for i := range rounds {
 		doc := kb.Document{
 			ID:   fmt.Sprintf("%s-%05d", kbID, i),
 			Text: fmt.Sprintf("round %d content for %s", i, kbID),

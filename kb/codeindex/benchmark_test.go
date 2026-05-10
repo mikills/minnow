@@ -41,7 +41,7 @@ func BenchmarkBuildDocuments(b *testing.B) {
 	opts := Options{ChunkSize: 1200, ChunkOverlap: 120}
 	ctx := context.Background()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _, err := BuildDocuments(ctx, root, "repo", file, opts)
 		require.NoError(b, err)
 	}

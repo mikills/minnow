@@ -153,7 +153,7 @@ func uploadTestShardManifest(t *testing.T, loader *kb.KB, kbID string, shardCoun
 		TotalSizeBytes: int64(shardCount),
 		Shards:         make([]kb.SnapshotShardMetadata, 0, shardCount),
 	}
-	for i := 0; i < shardCount; i++ {
+	for i := range shardCount {
 		manifest.Shards = append(manifest.Shards, kb.SnapshotShardMetadata{
 			ShardID:    fmt.Sprintf("shard-%03d", i),
 			Key:        fmt.Sprintf("%s/shard-%03d.duckdb", kbID, i),
@@ -208,7 +208,6 @@ func testKBSearchShardPath(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -241,7 +240,7 @@ func testKBTopKShardExecutionModes(t *testing.T) {
 	ctx := context.Background()
 	makeDocs := func(n int) []kb.Document {
 		docs := make([]kb.Document, 0, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			docs = append(docs, kb.Document{
 				ID:   fmt.Sprintf("doc-%02d", i),
 				Text: fmt.Sprintf("document content %02d with stable text", i),
@@ -308,7 +307,6 @@ func testKBTopKShardExecutionModes(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			loader, kbID, queryVec, wantPath, baseline := tc.setup(t)
 
@@ -434,7 +432,6 @@ func testKBTopKShardFanoutPlan(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -497,7 +494,6 @@ func testKBTopKShardLocalMultiplier(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := vectorplan.LocalTopK(tc.k, kb.NormalizeShardingPolicy(tc.policy))
@@ -539,7 +535,6 @@ func testKBTopKShardMerge(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -618,7 +613,7 @@ func BenchmarkShardRankScore(b *testing.B) {
 	shards := buildBenchShards(1, dim)
 	qVec := buildBenchQueryVec(dim)
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = vectorplan.RankShards(shards, qVec)
 	}
 }

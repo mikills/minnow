@@ -29,7 +29,7 @@ func seedInMemoryStoreEvents(b *testing.B, store *InMemoryStore, count int) {
 	b.Helper()
 	ctx := context.Background()
 	base := time.Unix(1_700_000_000, 0)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		require.NoError(b, store.Append(ctx, Event{
 			EventID:     fmt.Sprintf("evt-%06d", i),
 			Kind:        EventDocumentUpsert,

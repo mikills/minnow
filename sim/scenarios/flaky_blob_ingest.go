@@ -16,14 +16,14 @@ func FlakyBlobIngest(h *sim.Harness) {
 	h.SetBlobFaults(sim.BlobFaults{UploadFailRate: 0.15})
 	defer h.SetBlobFaults(sim.BlobFaults{})
 
-	for batch := 0; batch < 5; batch++ {
+	for batch := range 5 {
 		docs := h.GenerateDocs(fmt.Sprintf("%s-b%d", kbID, batch), 10)
 		for i := range docs {
 			docs[i].ID = fmt.Sprintf("%s-%d-%d", kbID, batch, i)
 		}
 
 		var lastErr error
-		for attempt := 0; attempt < 10; attempt++ {
+		for attempt := range 10 {
 			lastErr = h.Ingest(kbID, docs)
 			if lastErr == nil {
 				break

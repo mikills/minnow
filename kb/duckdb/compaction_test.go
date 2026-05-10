@@ -158,7 +158,7 @@ func TestDuckDBCompaction(t *testing.T) {
 		var wg sync.WaitGroup
 		errs := make([]error, 2)
 		results := make([]*kb.CompactionPublishResult, 2)
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			startCompactionAttempt(&wg, af, kbID, i, results, errs)
 		}
 		wg.Wait()
@@ -166,7 +166,7 @@ func TestDuckDBCompaction(t *testing.T) {
 		// One should succeed with compaction, the other either succeeds
 		// (finding no debt) or fails with CAS conflict.
 		successCount := 0
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			if errs[i] == nil && results[i] != nil {
 				successCount++
 			}
@@ -318,7 +318,7 @@ func uploadRealShardManifest(t *testing.T, bs kb.BlobStore, kbID string, shardCo
 	}
 
 	tmpDir := t.TempDir()
-	for i := 0; i < shardCount; i++ {
+	for i := range shardCount {
 		shardID := fmt.Sprintf("shard-%03d", i)
 		key := fmt.Sprintf("%s/%s.duckdb", kbID, shardID)
 
@@ -336,7 +336,7 @@ func uploadRealShardManifest(t *testing.T, bs kb.BlobStore, kbID string, shardCo
 		require.NoError(t, err)
 
 		vec := make([]float32, embDim)
-		for d := 0; d < embDim; d++ {
+		for d := range embDim {
 			vec[d] = float32(i*embDim+d) * 0.1
 		}
 		_, err = db.ExecContext(ctx, fmt.Sprintf(

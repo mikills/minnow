@@ -56,7 +56,7 @@ func SanitizeMediaFilename(name string) (string, error) {
 // l.newMediaID() so a FakeClock substituted into the KB propagates into id
 // generation and keeps sim runs deterministic.
 func NewIDAt(now time.Time) string {
-	r := sha256.Sum256([]byte(fmt.Sprintf("%d-%d", now.UnixNano(), mediaIDCounter.next())))
+	r := sha256.Sum256(fmt.Appendf(nil, "%d-%d", now.UnixNano(), mediaIDCounter.next()))
 	return fmt.Sprintf("med_%013d_%s", now.UnixMilli(), hex.EncodeToString(r[:6]))
 }
 

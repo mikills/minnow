@@ -22,6 +22,7 @@ type ObjectInfo struct {
 // Store is the storage abstraction for KB snapshots.
 type Store interface {
 	Head(ctx context.Context, key string) (*ObjectInfo, error)
+	DownloadBytes(ctx context.Context, key string) ([]byte, error)
 	Download(ctx context.Context, key string, dest string) error
 	UploadIfMatch(ctx context.Context, key string, src string, expectedVersion string) (*ObjectInfo, error)
 	Delete(ctx context.Context, key string) error

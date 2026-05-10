@@ -15,7 +15,7 @@ import (
 
 type BlobStore interface {
 	Head(ctx context.Context, key string) (*blobstore.ObjectInfo, error)
-	Download(ctx context.Context, key string, dest string) error
+	DownloadBytes(ctx context.Context, key string) ([]byte, error)
 	UploadIfMatch(ctx context.Context, key string, src string, expectedVersion string) (*blobstore.ObjectInfo, error)
 	Delete(ctx context.Context, key string) error
 }
@@ -28,64 +28,57 @@ func (s *BlobStoreManifest) manifestKey(kbID string) string { return ShardManife
 
 func (s *BlobStoreManifest) Get(ctx context.Context, kbID string) (*Document, error) {
 	key := s.manifestKey(kbID)
-	tmpDir, err := os.MkdirTemp("", "minnow-manifest-get-*")
+	info, data, err := s.downloadStableManifestBytes(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmpDir)
-	manifestPath := filepath.Join(tmpDir, "manifest.json")
-	info, err := s.downloadStableManifest(ctx, key, manifestPath)
-	if err != nil {
-		return nil, err
-	}
-	manifest, err := readManifestFile(manifestPath)
+	manifest, err := readManifestBytes(data)
 	if err != nil {
 		return nil, err
 	}
 	return &Document{Manifest: manifest, Version: info.Version}, nil
 }
 
-func (s *BlobStoreManifest) downloadStableManifest(
+func (s *BlobStoreManifest) downloadStableManifestBytes(
 	ctx context.Context,
 	key string,
-	path string,
-) (*blobstore.ObjectInfo, error) {
+) (*blobstore.ObjectInfo, []byte, error) {
 	const maxAttempts = 1 << 2
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		info, err := s.downloadManifestAttempt(ctx, key, path)
+	for attempt := range maxAttempts {
+		info, data, err := s.downloadManifestBytesAttempt(ctx, key)
 		if err == nil {
-			return info, nil
+			return info, data, nil
 		}
 		if !errors.Is(err, blobstore.ErrVersionMismatch) || attempt == maxAttempts-1 {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := sleepWithContext(ctx, manifestReadBackoff(attempt)); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return nil, fmt.Errorf("manifest changed during read: %w", blobstore.ErrVersionMismatch)
+	return nil, nil, fmt.Errorf("manifest changed during read: %w", blobstore.ErrVersionMismatch)
 }
 
-func (s *BlobStoreManifest) downloadManifestAttempt(
+func (s *BlobStoreManifest) downloadManifestBytesAttempt(
 	ctx context.Context,
 	key string,
-	path string,
-) (*blobstore.ObjectInfo, error) {
+) (*blobstore.ObjectInfo, []byte, error) {
 	info, err := s.headManifest(ctx, key)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := s.Store.Download(ctx, key, path); err != nil {
-		return nil, manifestStoreReadError(err)
+	data, err := s.Store.DownloadBytes(ctx, key)
+	if err != nil {
+		return nil, nil, manifestStoreReadError(err)
 	}
 	latest, err := s.headManifest(ctx, key)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if latest.Version != info.Version {
-		return nil, fmt.Errorf("manifest changed during read: %w", blobstore.ErrVersionMismatch)
+		return nil, nil, fmt.Errorf("manifest changed during read: %w", blobstore.ErrVersionMismatch)
 	}
-	return info, nil
+	return info, data, nil
 }
 
 func (s *BlobStoreManifest) headManifest(ctx context.Context, key string) (*blobstore.ObjectInfo, error) {
@@ -109,11 +102,7 @@ func manifestReadBackoff(attempt int) time.Duration {
 	return backoff + jitter
 }
 
-func readManifestFile(path string) (ShardManifest, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ShardManifest{}, err
-	}
+func readManifestBytes(data []byte) (ShardManifest, error) {
 	var manifest ShardManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return ShardManifest{}, err

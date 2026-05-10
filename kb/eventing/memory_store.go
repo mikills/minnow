@@ -286,10 +286,7 @@ func eventNextToken(events []Event, after string, limit int) string {
 
 func eventPageBounds(events []Event, after string, limit int) (int, int) {
 	start := eventPageStart(events, after)
-	end := start + limit
-	if end > len(events) {
-		end = len(events)
-	}
+	end := min(start+limit, len(events))
 	return start, end
 }
 

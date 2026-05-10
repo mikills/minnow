@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"maps"
 	"runtime"
 	"strings"
 	"sync"
@@ -398,8 +399,6 @@ func normalizeMetricsKBID(kbID string) string {
 // copyMap returns a shallow copy of a map with string keys.
 func copyMap[V any](in map[string]V) map[string]V {
 	out := make(map[string]V, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }

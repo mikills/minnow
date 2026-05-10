@@ -27,7 +27,7 @@ func BenchmarkVector(b *testing.B) {
 func BenchmarkTokenize(b *testing.B) {
 	input := strings.Repeat("semantic retrieval code indexing graph shard merge ranking ", 200)
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = Tokenize(input)
 	}
 }

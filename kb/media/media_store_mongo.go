@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"maps"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -233,9 +234,7 @@ func (s *MongoMediaStore) findPage(ctx context.Context, filter bson.M, limit int
 	limit = clampMediaLimit(limit)
 	// Copy the caller's filter so we can narrow by _id without mutating it.
 	merged := bson.M{}
-	for k, v := range filter {
-		merged[k] = v
-	}
+	maps.Copy(merged, filter)
 	if lastID != "" {
 		merged[mongoKeyID] = bson.M{"$gt": lastID}
 	}

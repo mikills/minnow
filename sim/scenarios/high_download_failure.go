@@ -35,7 +35,7 @@ func HighDownloadFailure(h *sim.Harness) {
 	}
 
 	ok, injected := 0, 0
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		matches, err := h.Search(kbID, probe, 5)
 		if querySucceeded(h, docs, matches, err) {
 			ok++

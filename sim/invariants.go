@@ -2,6 +2,7 @@ package sim
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 
 	"github.com/mikills/minnow/kb"
@@ -29,9 +30,7 @@ func (manifestMonotonic) Name() string { return "manifest_monotonic" }
 func (manifestMonotonic) Check(h *Harness) error {
 	h.mu.Lock()
 	snapshot := make(map[string]string, len(h.lastManifestVers))
-	for kbID, v := range h.lastManifestVers {
-		snapshot[kbID] = v
-	}
+	maps.Copy(snapshot, h.lastManifestVers)
 	h.mu.Unlock()
 
 	for kbID, last := range snapshot {
@@ -165,11 +164,4 @@ func pickOne(set map[string]struct{}) string {
 		return k
 	}
 	return ""
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

@@ -14,7 +14,7 @@ type ShardMetadata struct {
 	SizeBytes      int64     `json:"size_bytes"`
 	VectorRows     int64     `json:"vector_rows"`
 	CreatedAt      time.Time `json:"created_at"`
-	SealedAt       time.Time `json:"sealed_at,omitempty"`
+	SealedAt       time.Time `json:"sealed_at"`
 	TombstoneRatio float64   `json:"tombstone_ratio"`
 	GraphAvailable bool      `json:"graph_available"`
 	Centroid       []float32 `json:"centroid,omitempty"`

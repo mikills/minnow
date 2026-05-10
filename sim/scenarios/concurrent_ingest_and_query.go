@@ -24,7 +24,7 @@ func ConcurrentIngestAndQuery(h *sim.Harness) {
 	// Pre-generate all docs and probe vectors on the main goroutine so the
 	// harness's RNG isn't touched from two goroutines at once.
 	ingestBatches := make([][]kb.Document, batches)
-	for i := 0; i < batches; i++ {
+	for i := range batches {
 		docs := h.GenerateDocs(kbID+"-pre", batchLen)
 		for j := range docs {
 			docs[j].ID = kbID + "-" + docs[j].ID

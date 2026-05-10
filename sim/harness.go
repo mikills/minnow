@@ -172,7 +172,7 @@ func (h *Harness) SetBlobFaults(f BlobFaults) { h.blobStore.SetFaults(f) }
 // identical documents and identical embeddings.
 func (h *Harness) GenerateDocs(kbID string, n int) []kb.Document {
 	out := make([]kb.Document, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		id := fmt.Sprintf("%s-%d-%05d", kbID, h.seed, i)
 		out[i] = kb.Document{ID: id, Text: id + " synthetic content for sim"}
 	}

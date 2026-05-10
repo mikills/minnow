@@ -291,10 +291,7 @@ func splitLongLineChunks(input longLineChunkInput) []Chunk {
 	}
 	var chunks []Chunk
 	for start := 0; start < len(line); {
-		end := start + input.chunkSize
-		if end > len(line) {
-			end = len(line)
-		}
+		end := min(start+input.chunkSize, len(line))
 		text := strings.TrimSpace(line[start:end])
 		if text != "" {
 			chunks = append(
