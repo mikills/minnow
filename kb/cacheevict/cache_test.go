@@ -81,9 +81,9 @@ func sweepEntries(entries []Entry, cfg Config) SweepResult {
 	for _, entry := range entries {
 		total += entry.Bytes
 	}
-	removed, result := removeExpired(cfg, entries, total)
+	candidates, result := removeExpired(cfg, entries, total)
 	if cfg.MaxBytes > 0 {
-		result.CurrentBytes = removeOverBudget(cfg, entries, removed, result.CurrentBytes, &result)
+		result.CurrentBytes = removeOverBudget(cfg, candidates, result.CurrentBytes, &result)
 	}
 	result.MaxBytes = cfg.MaxBytes
 	result.ProtectedKBCount = len(cfg.Protected)

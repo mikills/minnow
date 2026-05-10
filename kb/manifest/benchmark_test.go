@@ -12,6 +12,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func BenchmarkBlobStoreManifestUpsertIfMatch(b *testing.B) {
+	ctx := context.Background()
+	for _, shards := range []int{8, 128, 1024} {
+		manifest := benchmarkManifest(b, shards)
+		b.Run(fmt.Sprintf("shards=%d", shards), func(b *testing.B) {
+			store := &BlobStoreManifest{Store: &blobstore.LocalBlobStore{Root: b.TempDir()}}
+			version := ""
+			b.ReportAllocs()
+			for b.Loop() {
+				var err error
+				version, err = store.UpsertIfMatch(ctx, "kb", manifest, version)
+				require.NoError(b, err)
+			}
+		})
+	}
+}
+
 func BenchmarkBlobStoreManifestGet(b *testing.B) {
 	ctx := context.Background()
 	for _, shards := range []int{8, 128, 1024} {
@@ -34,6 +51,13 @@ func benchManifestGet(b *testing.B, ctx context.Context, store *BlobStoreManifes
 }
 
 func benchmarkManifestJSON(b *testing.B, shardCount int) []byte {
+	b.Helper()
+	data, err := json.Marshal(benchmarkManifest(b, shardCount))
+	require.NoError(b, err)
+	return data
+}
+
+func benchmarkManifest(b *testing.B, shardCount int) ShardManifest {
 	b.Helper()
 	manifest := ShardManifest{
 		SchemaVersion:  1,
@@ -61,9 +85,7 @@ func benchmarkManifestJSON(b *testing.B, shardCount int) []byte {
 			MediaIDs:       []string{fmt.Sprintf("media-%06d", i)},
 		})
 	}
-	data, err := json.Marshal(manifest)
-	require.NoError(b, err)
-	return data
+	return manifest
 }
 
 type benchmarkManifestBlob struct {
