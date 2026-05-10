@@ -204,7 +204,7 @@ func MergeTopK(shardResults [][]kb.QueryResult, k int) []kb.QueryResult {
 }
 
 func shouldSortAllTopK(k int, total int) bool {
-	return k*4 >= total
+	return total <= 128 || k*4 >= total
 }
 
 func mergeTopKByFullSort(shardResults [][]kb.QueryResult, k int) []kb.QueryResult {
@@ -216,12 +216,6 @@ func mergeTopKByFullSort(shardResults [][]kb.QueryResult, k int) []kb.QueryResul
 		merged[i] = shardResults[ref.shardIndex][ref.localIndex]
 	}
 	return merged
-}
-
-type scoredResult struct {
-	result     kb.QueryResult
-	shardIndex int
-	localIndex int
 }
 
 type topKResultHeap struct {
@@ -291,18 +285,21 @@ func flattenShardResultRefs(shardResults [][]kb.QueryResult) []resultRef {
 }
 
 func lessResultRef(shardResults [][]kb.QueryResult, left resultRef, right resultRef) bool {
-	return lessScoredResult(
-		scoredResult{
-			result:     shardResults[left.shardIndex][left.localIndex],
-			shardIndex: left.shardIndex,
-			localIndex: left.localIndex,
-		},
-		scoredResult{
-			result:     shardResults[right.shardIndex][right.localIndex],
-			shardIndex: right.shardIndex,
-			localIndex: right.localIndex,
-		},
-	)
+	leftResult := shardResults[left.shardIndex][left.localIndex]
+	rightResult := shardResults[right.shardIndex][right.localIndex]
+	if leftResult.Distance != rightResult.Distance {
+		return leftResult.Distance < rightResult.Distance
+	}
+	if leftResult.ID != rightResult.ID {
+		return leftResult.ID < rightResult.ID
+	}
+	if leftResult.Content != rightResult.Content {
+		return leftResult.Content < rightResult.Content
+	}
+	if left.shardIndex != right.shardIndex {
+		return left.shardIndex < right.shardIndex
+	}
+	return left.localIndex < right.localIndex
 }
 
 func countShardResults(shardResults [][]kb.QueryResult) int {
@@ -311,22 +308,6 @@ func countShardResults(shardResults [][]kb.QueryResult) int {
 		total += len(shard)
 	}
 	return total
-}
-
-func lessScoredResult(left scoredResult, right scoredResult) bool {
-	if left.result.Distance != right.result.Distance {
-		return left.result.Distance < right.result.Distance
-	}
-	if left.result.ID != right.result.ID {
-		return left.result.ID < right.result.ID
-	}
-	if left.result.Content != right.result.Content {
-		return left.result.Content < right.result.Content
-	}
-	if left.shardIndex != right.shardIndex {
-		return left.shardIndex < right.shardIndex
-	}
-	return left.localIndex < right.localIndex
 }
 
 func positiveOrOne(value int) int {
