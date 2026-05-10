@@ -17,17 +17,15 @@ func PlanShardFanout(policy kb.ShardingPolicy, manifest *kb.SnapshotShardManifes
 	if manifest == nil || len(manifest.Shards) == 0 {
 		return QueryPlan{}
 	}
-	ranked := RankShards(manifest.Shards, queryVec)
 	baseFanout := positiveOrOne(policy.QueryShardFanout)
 	adaptiveMax := positiveOrOne(policy.QueryShardFanoutAdaptiveMax)
 	parallelism := positiveOrOne(policy.QueryShardParallelism)
-	fanout := minInt(baseFanout, adaptiveMax, len(ranked))
+	fanout := minInt(baseFanout, adaptiveMax, len(manifest.Shards))
 	if fanout <= 0 {
 		return QueryPlan{}
 	}
 	parallelism = minInt(parallelism, fanout)
-	selected := make([]kb.SnapshotShardMetadata, fanout)
-	copy(selected, ranked[:fanout])
+	selected := SelectTopShards(manifest.Shards, queryVec, fanout)
 	return QueryPlan{Shards: selected, Fanout: fanout, Parallelism: parallelism, Capped: baseFanout > adaptiveMax}
 }
 
@@ -57,13 +55,43 @@ type scoredShard struct {
 }
 
 func RankShards(shards []kb.SnapshotShardMetadata, queryVec []float32) []kb.SnapshotShardMetadata {
+	return SelectTopShards(shards, queryVec, len(shards))
+}
+
+func SelectTopShards(shards []kb.SnapshotShardMetadata, queryVec []float32, n int) []kb.SnapshotShardMetadata {
+	if n <= 0 || len(shards) == 0 {
+		return []kb.SnapshotShardMetadata{}
+	}
+	if n > len(shards) {
+		n = len(shards)
+	}
+	if shouldSortAllShards(n, len(shards)) {
+		return rankAllShards(shards, queryVec, n)
+	}
+	best := topShardHeap{items: make([]scoredShard, 0, n)}
+	for i := range shards {
+		best.add(scoredShard{shard: &shards[i], score: shardRankScore(shards[i], queryVec)}, n)
+	}
+	sort.SliceStable(best.items, func(i, j int) bool { return lessScoredShard(best.items[i], best.items[j]) })
+	selected := make([]kb.SnapshotShardMetadata, len(best.items))
+	for i := range best.items {
+		selected[i] = *best.items[i].shard
+	}
+	return selected
+}
+
+func shouldSortAllShards(n int, total int) bool {
+	return n*4 >= total
+}
+
+func rankAllShards(shards []kb.SnapshotShardMetadata, queryVec []float32, n int) []kb.SnapshotShardMetadata {
 	scored := make([]scoredShard, len(shards))
 	for i := range shards {
 		scored[i] = scoredShard{shard: &shards[i], score: shardRankScore(shards[i], queryVec)}
 	}
 	sort.SliceStable(scored, func(i, j int) bool { return lessScoredShard(scored[i], scored[j]) })
-	ranked := make([]kb.SnapshotShardMetadata, len(scored))
-	for i := range scored {
+	ranked := make([]kb.SnapshotShardMetadata, n)
+	for i := range ranked {
 		ranked[i] = *scored[i].shard
 	}
 	return ranked
@@ -80,6 +108,54 @@ func lessScoredShard(left scoredShard, right scoredShard) bool {
 		return left.shard.ShardID < right.shard.ShardID
 	}
 	return left.shard.Key < right.shard.Key
+}
+
+type topShardHeap struct{ items []scoredShard }
+
+func (h *topShardHeap) add(candidate scoredShard, n int) {
+	if len(h.items) < n {
+		h.items = append(h.items, candidate)
+		h.siftUp(len(h.items) - 1)
+		return
+	}
+	if lessScoredShard(candidate, h.items[0]) {
+		h.items[0] = candidate
+		h.siftDown(0)
+	}
+}
+
+func (h *topShardHeap) siftUp(index int) {
+	for index > 0 {
+		parent := (index - 1) / 2
+		if !worseScoredShard(h.items[index], h.items[parent]) {
+			return
+		}
+		h.items[index], h.items[parent] = h.items[parent], h.items[index]
+		index = parent
+	}
+}
+
+func (h *topShardHeap) siftDown(index int) {
+	for {
+		left := index*2 + 1
+		if left >= len(h.items) {
+			return
+		}
+		child := left
+		right := left + 1
+		if right < len(h.items) && worseScoredShard(h.items[right], h.items[left]) {
+			child = right
+		}
+		if !worseScoredShard(h.items[child], h.items[index]) {
+			return
+		}
+		h.items[index], h.items[child] = h.items[child], h.items[index]
+		index = child
+	}
+}
+
+func worseScoredShard(left scoredShard, right scoredShard) bool {
+	return lessScoredShard(right, left)
 }
 
 func shardRankScore(shard kb.SnapshotShardMetadata, queryVec []float32) float64 {
@@ -111,16 +187,18 @@ func MergeTopK(shardResults [][]kb.QueryResult, k int) []kb.QueryResult {
 	if shouldSortAllTopK(k, total) {
 		return mergeTopKByFullSort(shardResults, k)
 	}
-	best := topKResultHeap{items: make([]scoredResult, 0, k)}
+	best := topKResultHeap{shardResults: shardResults, items: make([]resultRef, 0, k)}
 	for shardIndex, shard := range shardResults {
-		for localIndex, result := range shard {
-			best.add(scoredResult{result: result, shardIndex: shardIndex, localIndex: localIndex}, k)
+		for localIndex := range shard {
+			best.add(resultRef{shardIndex: shardIndex, localIndex: localIndex}, k)
 		}
 	}
-	sort.SliceStable(best.items, func(i, j int) bool { return lessScoredResult(best.items[i], best.items[j]) })
+	sort.SliceStable(best.items, func(i, j int) bool {
+		return lessResultRef(shardResults, best.items[i], best.items[j])
+	})
 	merged := make([]kb.QueryResult, len(best.items))
-	for i := range best.items {
-		merged[i] = best.items[i].result
+	for i, ref := range best.items {
+		merged[i] = shardResults[ref.shardIndex][ref.localIndex]
 	}
 	return merged
 }
@@ -146,15 +224,18 @@ type scoredResult struct {
 	localIndex int
 }
 
-type topKResultHeap struct{ items []scoredResult }
+type topKResultHeap struct {
+	shardResults [][]kb.QueryResult
+	items        []resultRef
+}
 
-func (h *topKResultHeap) add(candidate scoredResult, k int) {
+func (h *topKResultHeap) add(candidate resultRef, k int) {
 	if len(h.items) < k {
 		h.items = append(h.items, candidate)
 		h.siftUp(len(h.items) - 1)
 		return
 	}
-	if lessScoredResult(candidate, h.items[0]) {
+	if lessResultRef(h.shardResults, candidate, h.items[0]) {
 		h.items[0] = candidate
 		h.siftDown(0)
 	}
@@ -163,7 +244,7 @@ func (h *topKResultHeap) add(candidate scoredResult, k int) {
 func (h *topKResultHeap) siftUp(index int) {
 	for index > 0 {
 		parent := (index - 1) / 2
-		if !worseScoredResult(h.items[index], h.items[parent]) {
+		if !h.worse(h.items[index], h.items[parent]) {
 			return
 		}
 		h.items[index], h.items[parent] = h.items[parent], h.items[index]
@@ -179,10 +260,10 @@ func (h *topKResultHeap) siftDown(index int) {
 		}
 		child := left
 		right := left + 1
-		if right < len(h.items) && worseScoredResult(h.items[right], h.items[left]) {
+		if right < len(h.items) && h.worse(h.items[right], h.items[left]) {
 			child = right
 		}
-		if !worseScoredResult(h.items[child], h.items[index]) {
+		if !h.worse(h.items[child], h.items[index]) {
 			return
 		}
 		h.items[index], h.items[child] = h.items[child], h.items[index]
@@ -190,8 +271,8 @@ func (h *topKResultHeap) siftDown(index int) {
 	}
 }
 
-func worseScoredResult(left scoredResult, right scoredResult) bool {
-	return lessScoredResult(right, left)
+func (h *topKResultHeap) worse(left resultRef, right resultRef) bool {
+	return lessResultRef(h.shardResults, right, left)
 }
 
 type resultRef struct {
