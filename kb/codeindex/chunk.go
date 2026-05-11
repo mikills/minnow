@@ -99,10 +99,10 @@ func BuildDocuments(
 }
 
 func ChunkText(text, language string, chunkSize, overlap int) []Chunk {
-	lines := strings.Split(text, "\n")
+	lines := splitLineViews(text)
 	markers := symbolMarkers(lines, language)
 	if len(markers) == 0 || len(lines) > 2000 {
-		return lineChunks(lines, chunkSize, overlap, "", "")
+		return lineChunks(lineChunkInput{source: text, lines: lines, chunkSize: chunkSize, overlap: overlap})
 	}
 	chunks := make([]Chunk, 0, len(markers))
 	for i, marker := range markers {
@@ -114,27 +114,59 @@ func ChunkText(text, language string, chunkSize, overlap int) []Chunk {
 		if start > end || start < 1 {
 			continue
 		}
-		section := strings.Join(lines[start-1:end], "\n")
-		if len(section) <= chunkSize {
-			chunks = append(
-				chunks,
-				Chunk{
-					Text:      strings.TrimSpace(section),
-					Symbol:    marker.symbol,
-					Kind:      marker.kind,
-					StartLine: start,
-					EndLine:   end,
-				},
-			)
+		sectionLines := lines[start-1 : end]
+		if lineRangeLen(sectionLines) <= chunkSize {
+			if section := joinTrimmedLineViews(text, sectionLines); section != "" {
+				chunks = append(
+					chunks,
+					Chunk{Text: section, Symbol: marker.symbol, Kind: marker.kind, StartLine: start, EndLine: end},
+				)
+			}
 			continue
 		}
-		for _, c := range lineChunks(lines[start-1:end], chunkSize, overlap, marker.symbol, marker.kind) {
+		for _, c := range lineChunks(
+			lineChunkInput{
+				source:    text,
+				lines:     sectionLines,
+				chunkSize: chunkSize,
+				overlap:   overlap,
+				symbol:    marker.symbol,
+				kind:      marker.kind,
+			},
+		) {
 			c.StartLine += start - 1
 			c.EndLine += start - 1
 			chunks = append(chunks, c)
 		}
 	}
 	return nonEmptyChunks(chunks)
+}
+
+type lineView struct {
+	text  string
+	start int
+	end   int
+}
+
+func splitLineViews(text string) []lineView {
+	lines := make([]lineView, 0, strings.Count(text, "\n")+1)
+	start := 0
+	for i := range len(text) {
+		if text[i] != '\n' {
+			continue
+		}
+		lines = append(lines, lineView{text: text[start:i], start: start, end: i})
+		start = i + 1
+	}
+	return append(lines, lineView{text: text[start:], start: start, end: len(text)})
+}
+
+func lineRangeLen(lines []lineView) int {
+	length := 0
+	for _, line := range lines {
+		length += len(line.text) + 1
+	}
+	return length
 }
 
 const (
@@ -152,7 +184,7 @@ type symbolMarker struct {
 	kind   string
 }
 
-func symbolMarkers(lines []string, language string) []symbolMarker {
+func symbolMarkers(lines []lineView, language string) []symbolMarker {
 	switch language {
 	case "go":
 		return goSymbolMarkers(lines)
@@ -166,10 +198,10 @@ func symbolMarkers(lines []string, language string) []symbolMarker {
 	return nil
 }
 
-func goSymbolMarkers(lines []string) []symbolMarker {
+func goSymbolMarkers(lines []lineView) []symbolMarker {
 	markers := make([]symbolMarker, 0, estimatedSymbolMarkers(len(lines)))
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
+		trimmed := strings.TrimSpace(line.text)
 		if symbol, ok := goFunctionSymbol(trimmed); ok {
 			markers = append(markers, symbolMarker{line: i + 1, symbol: symbol, kind: symbolKindFunction})
 			continue
@@ -181,10 +213,10 @@ func goSymbolMarkers(lines []string) []symbolMarker {
 	return markers
 }
 
-func jsSymbolMarkers(lines []string) []symbolMarker {
+func jsSymbolMarkers(lines []lineView) []symbolMarker {
 	markers := make([]symbolMarker, 0, estimatedSymbolMarkers(len(lines)))
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
+		trimmed := strings.TrimSpace(line.text)
 		if symbol, kind, ok := jsSymbol(trimmed); ok {
 			markers = append(markers, symbolMarker{line: i + 1, symbol: symbol, kind: kind})
 		}
@@ -219,10 +251,10 @@ func jsAssignedSymbol(trimmed string) (string, bool) {
 	return "", false
 }
 
-func pythonSymbolMarkers(lines []string) []symbolMarker {
+func pythonSymbolMarkers(lines []lineView) []symbolMarker {
 	markers := make([]symbolMarker, 0, estimatedSymbolMarkers(len(lines)))
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
+		trimmed := strings.TrimSpace(line.text)
 		if symbol, ok := prefixedCallSymbol(trimmed, "def ", isGoIdent); ok {
 			markers = append(markers, symbolMarker{line: i + 1, symbol: symbol, kind: symbolKindFunction})
 			continue
@@ -234,10 +266,10 @@ func pythonSymbolMarkers(lines []string) []symbolMarker {
 	return markers
 }
 
-func rustSymbolMarkers(lines []string) []symbolMarker {
+func rustSymbolMarkers(lines []lineView) []symbolMarker {
 	markers := make([]symbolMarker, 0, estimatedSymbolMarkers(len(lines)))
 	for i, line := range lines {
-		trimmed := strings.TrimPrefix(strings.TrimSpace(line), "pub ")
+		trimmed := strings.TrimPrefix(strings.TrimSpace(line.text), "pub ")
 		if symbol, ok := prefixedCallSymbol(trimmed, "fn ", isGoIdent); ok {
 			markers = append(markers, symbolMarker{line: i + 1, symbol: symbol, kind: symbolKindFunction})
 			continue
@@ -387,43 +419,52 @@ func estimatedSymbolMarkers(lineCount int) int {
 	return estimate
 }
 
-func lineChunks(lines []string, chunkSize, overlap int, symbol, kind string) []Chunk {
+type lineChunkInput struct {
+	source    string
+	lines     []lineView
+	chunkSize int
+	overlap   int
+	symbol    string
+	kind      string
+}
+
+func lineChunks(input lineChunkInput) []Chunk {
 	var chunks []Chunk
 	start := 0
-	for start < len(lines) {
-		if len(lines[start])+1 > chunkSize {
+	for start < len(input.lines) {
+		if len(input.lines[start].text)+1 > input.chunkSize {
 			chunks = append(
 				chunks,
 				splitLongLineChunks(
 					longLineChunkInput{
-						line:      lines[start],
+						line:      input.lines[start].text,
 						lineNo:    start + 1,
-						chunkSize: chunkSize,
-						overlap:   overlap,
-						symbol:    symbol,
-						kind:      kind,
+						chunkSize: input.chunkSize,
+						overlap:   input.overlap,
+						symbol:    input.symbol,
+						kind:      input.kind,
 					},
 				)...)
 			start++
 			continue
 		}
-		end := chunkEnd(lines, start, chunkSize)
-		if chunk := chunkFromLines(lines, start, end, symbol, kind); chunk.Text != "" {
+		end := chunkEnd(input.lines, start, input.chunkSize)
+		if chunk := chunkFromLines(input, start, end); chunk.Text != "" {
 			chunks = append(chunks, chunk)
 		}
-		if end >= len(lines) {
+		if end >= len(input.lines) {
 			break
 		}
-		start = nextChunkStart(lines[start:end], end, overlap)
+		start = nextChunkStart(input.lines[start:end], end, input.overlap)
 	}
 	return chunks
 }
 
-func chunkEnd(lines []string, start int, chunkSize int) int {
+func chunkEnd(lines []lineView, start int, chunkSize int) int {
 	end := start
 	length := 0
 	for end < len(lines) {
-		lineLen := len(lines[end]) + 1
+		lineLen := len(lines[end].text) + 1
 		if end > start && length+lineLen > chunkSize {
 			break
 		}
@@ -436,30 +477,30 @@ func chunkEnd(lines []string, start int, chunkSize int) int {
 	return end
 }
 
-func chunkFromLines(lines []string, start int, end int, symbol string, kind string) Chunk {
-	text := joinTrimmedLines(lines[start:end])
+func chunkFromLines(input lineChunkInput, start int, end int) Chunk {
+	text := joinTrimmedLineViews(input.source, input.lines[start:end])
 	if text == "" {
 		return Chunk{}
 	}
-	return Chunk{Text: text, Symbol: symbol, Kind: kind, StartLine: start + 1, EndLine: end}
+	return Chunk{Text: text, Symbol: input.symbol, Kind: input.kind, StartLine: start + 1, EndLine: end}
 }
 
-func joinTrimmedLines(lines []string) string {
+func joinTrimmedLineViews(source string, lines []lineView) string {
 	first := 0
-	for first < len(lines) && strings.TrimSpace(lines[first]) == "" {
+	for first < len(lines) && strings.TrimSpace(lines[first].text) == "" {
 		first++
 	}
 	last := len(lines) - 1
-	for last >= first && strings.TrimSpace(lines[last]) == "" {
+	for last >= first && strings.TrimSpace(lines[last].text) == "" {
 		last--
 	}
 	if first > last {
 		return ""
 	}
-	return strings.Join(lines[first:last+1], "\n")
+	return strings.TrimSpace(source[lines[first].start:lines[last].end])
 }
 
-func nextChunkStart(window []string, end int, overlap int) int {
+func nextChunkStart(window []lineView, end int, overlap int) int {
 	start := end - overlapLines(window, overlap)
 	if start < 0 || start >= end {
 		return end
@@ -509,14 +550,14 @@ func splitLongLineChunks(input longLineChunkInput) []Chunk {
 	return chunks
 }
 
-func overlapLines(lines []string, overlapChars int) int {
+func overlapLines(lines []lineView, overlapChars int) int {
 	if overlapChars <= 0 || len(lines) == 0 {
 		return 0
 	}
 	total := 0
 	count := 0
 	for i := len(lines) - 1; i >= 0; i-- {
-		total += len(lines[i]) + 1
+		total += len(lines[i].text) + 1
 		count++
 		if total >= overlapChars {
 			break
