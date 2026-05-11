@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -105,7 +104,7 @@ func ChunkText(text, language string, chunkSize, overlap int) []Chunk {
 	if len(markers) == 0 || len(lines) > 2000 {
 		return lineChunks(lines, chunkSize, overlap, "", "")
 	}
-	var chunks []Chunk
+	chunks := make([]Chunk, 0, len(markers))
 	for i, marker := range markers {
 		start := marker.line
 		end := len(lines)
@@ -138,49 +137,246 @@ func ChunkText(text, language string, chunkSize, overlap int) []Chunk {
 	return nonEmptyChunks(chunks)
 }
 
+const (
+	languageJavaScript = "javascript"
+	languageTypeScript = "typescript"
+
+	symbolKindClass    = "class"
+	symbolKindFunction = "function"
+	symbolKindType     = "type"
+)
+
 type symbolMarker struct {
 	line   int
 	symbol string
 	kind   string
 }
 
-var symbolRegexByLanguage = map[string][]struct {
-	kind string
-	re   *regexp.Regexp
-}{
-	"go": {
-		{"function", regexp.MustCompile(`^func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(`)},
-		{"type", regexp.MustCompile(`^type\s+([A-Za-z_][A-Za-z0-9_]*)\s+`)},
-	},
-	"javascript": commonJSSymbolRegexes(),
-	"typescript": commonJSSymbolRegexes(),
-	"python": {
-		{"function", regexp.MustCompile(`^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(`)},
-		{"class", regexp.MustCompile(`^class\s+([A-Za-z_][A-Za-z0-9_]*)`)},
-	},
-	"rust": {
-		{"function", regexp.MustCompile(`^(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(`)},
-		{"type", regexp.MustCompile(`^(?:pub\s+)?(?:struct|enum|trait)\s+([A-Za-z_][A-Za-z0-9_]*)`)},
-	},
+func symbolMarkers(lines []string, language string) []symbolMarker {
+	switch language {
+	case "go":
+		return goSymbolMarkers(lines)
+	case languageJavaScript, languageTypeScript:
+		return jsSymbolMarkers(lines)
+	case "python":
+		return pythonSymbolMarkers(lines)
+	case "rust":
+		return rustSymbolMarkers(lines)
+	}
+	return nil
 }
 
-func symbolMarkers(lines []string, language string) []symbolMarker {
-	regexes := symbolRegexByLanguage[language]
-	if len(regexes) == 0 {
-		return nil
-	}
+func goSymbolMarkers(lines []string) []symbolMarker {
 	markers := make([]symbolMarker, 0, estimatedSymbolMarkers(len(lines)))
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		for _, candidate := range regexes {
-			match := candidate.re.FindStringSubmatch(trimmed)
-			if len(match) >= 2 {
-				markers = append(markers, symbolMarker{line: i + 1, symbol: match[1], kind: candidate.kind})
-				break
-			}
+		if symbol, ok := goFunctionSymbol(trimmed); ok {
+			markers = append(markers, symbolMarker{line: i + 1, symbol: symbol, kind: symbolKindFunction})
+			continue
+		}
+		if symbol, ok := goTypeSymbol(trimmed); ok {
+			markers = append(markers, symbolMarker{line: i + 1, symbol: symbol, kind: symbolKindType})
 		}
 	}
 	return markers
+}
+
+func jsSymbolMarkers(lines []string) []symbolMarker {
+	markers := make([]symbolMarker, 0, estimatedSymbolMarkers(len(lines)))
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if symbol, kind, ok := jsSymbol(trimmed); ok {
+			markers = append(markers, symbolMarker{line: i + 1, symbol: symbol, kind: kind})
+		}
+	}
+	return markers
+}
+
+func jsSymbol(trimmed string) (string, string, bool) {
+	trimmed = strings.TrimPrefix(trimmed, "export default ")
+	trimmed = strings.TrimPrefix(trimmed, "export ")
+	trimmed = strings.TrimPrefix(trimmed, "async ")
+	if symbol, ok := prefixedCallSymbol(trimmed, "function ", isJSIdent); ok {
+		return symbol, symbolKindFunction, true
+	}
+	if symbol, ok := prefixedWordSymbol(trimmed, "class ", isJSIdent); ok {
+		return symbol, symbolKindClass, true
+	}
+	if symbol, ok := jsAssignedSymbol(trimmed); ok {
+		return symbol, symbolKindFunction, true
+	}
+	return "", "", false
+}
+
+func jsAssignedSymbol(trimmed string) (string, bool) {
+	for _, prefix := range []string{"const ", "let ", "var "} {
+		name, rest, ok := prefixedNameAndRest(trimmed, prefix, isJSIdent)
+		if !ok || !strings.HasPrefix(strings.TrimLeft(rest, " \t"), "=") {
+			continue
+		}
+		return name, true
+	}
+	return "", false
+}
+
+func pythonSymbolMarkers(lines []string) []symbolMarker {
+	markers := make([]symbolMarker, 0, estimatedSymbolMarkers(len(lines)))
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if symbol, ok := prefixedCallSymbol(trimmed, "def ", isGoIdent); ok {
+			markers = append(markers, symbolMarker{line: i + 1, symbol: symbol, kind: symbolKindFunction})
+			continue
+		}
+		if symbol, ok := prefixedWordSymbol(trimmed, "class ", isGoIdent); ok {
+			markers = append(markers, symbolMarker{line: i + 1, symbol: symbol, kind: symbolKindClass})
+		}
+	}
+	return markers
+}
+
+func rustSymbolMarkers(lines []string) []symbolMarker {
+	markers := make([]symbolMarker, 0, estimatedSymbolMarkers(len(lines)))
+	for i, line := range lines {
+		trimmed := strings.TrimPrefix(strings.TrimSpace(line), "pub ")
+		if symbol, ok := prefixedCallSymbol(trimmed, "fn ", isGoIdent); ok {
+			markers = append(markers, symbolMarker{line: i + 1, symbol: symbol, kind: symbolKindFunction})
+			continue
+		}
+		if symbol, ok := rustTypeSymbol(trimmed); ok {
+			markers = append(markers, symbolMarker{line: i + 1, symbol: symbol, kind: symbolKindType})
+		}
+	}
+	return markers
+}
+
+func rustTypeSymbol(trimmed string) (string, bool) {
+	for _, prefix := range []string{"struct ", "enum ", "trait "} {
+		if symbol, ok := prefixedWordSymbol(trimmed, prefix, isGoIdent); ok {
+			return symbol, true
+		}
+	}
+	return "", false
+}
+
+func goFunctionSymbol(trimmed string) (string, bool) {
+	rest, ok := strings.CutPrefix(trimmed, "func ")
+	if !ok {
+		return "", false
+	}
+	rest = strings.TrimSpace(rest)
+	if strings.HasPrefix(rest, "(") {
+		closeParen := strings.IndexByte(rest, ')')
+		if closeParen < 0 || closeParen+1 >= len(rest) {
+			return "", false
+		}
+		rest = strings.TrimSpace(rest[closeParen+1:])
+	}
+	openParen := strings.IndexByte(rest, '(')
+	if openParen <= 0 {
+		return "", false
+	}
+	symbol := strings.TrimSpace(rest[:openParen])
+	return symbol, isGoIdent(symbol)
+}
+
+func goTypeSymbol(trimmed string) (string, bool) {
+	rest, ok := strings.CutPrefix(trimmed, "type ")
+	if !ok {
+		return "", false
+	}
+	rest = strings.TrimLeft(rest, " \t")
+	end := 0
+	for end < len(rest) && rest[end] != ' ' && rest[end] != '\t' {
+		end++
+	}
+	if end == 0 || end == len(rest) {
+		return "", false
+	}
+	symbol := rest[:end]
+	return symbol, isGoIdent(symbol)
+}
+
+func prefixedCallSymbol(trimmed string, prefix string, valid func(string) bool) (string, bool) {
+	rest, ok := strings.CutPrefix(trimmed, prefix)
+	if !ok {
+		return "", false
+	}
+	openParen := strings.IndexByte(strings.TrimLeft(rest, " \t"), '(')
+	if openParen <= 0 {
+		return "", false
+	}
+	symbol := strings.TrimSpace(strings.TrimLeft(rest, " \t")[:openParen])
+	return symbol, valid(symbol)
+}
+
+func prefixedWordSymbol(trimmed string, prefix string, valid func(string) bool) (string, bool) {
+	name, _, ok := prefixedNameAndRest(trimmed, prefix, valid)
+	return name, ok
+}
+
+func prefixedNameAndRest(trimmed string, prefix string, valid func(string) bool) (string, string, bool) {
+	rest, ok := strings.CutPrefix(trimmed, prefix)
+	if !ok {
+		return "", "", false
+	}
+	rest = strings.TrimLeft(rest, " \t")
+	end := 0
+	for end < len(rest) && rest[end] != ' ' && rest[end] != '\t' && rest[end] != '(' && rest[end] != '{' && rest[end] != ':' {
+		end++
+	}
+	if end == 0 {
+		return "", "", false
+	}
+	name := rest[:end]
+	return name, rest[end:], valid(name)
+}
+
+func isGoIdent(s string) bool {
+	if s == "" || !isGoIdentStart(rune(s[0])) {
+		return false
+	}
+	for _, r := range s[1:] {
+		if !isGoIdentPart(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isGoIdentStart(r rune) bool {
+	return r == '_' || isASCIILetter(r)
+}
+
+func isGoIdentPart(r rune) bool {
+	return isGoIdentStart(r) || isASCIIDigit(r)
+}
+
+func isJSIdent(s string) bool {
+	if s == "" || !isJSIdentStart(rune(s[0])) {
+		return false
+	}
+	for _, r := range s[1:] {
+		if !isJSIdentPart(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isJSIdentStart(r rune) bool {
+	return r == '_' || r == '$' || isASCIILetter(r)
+}
+
+func isJSIdentPart(r rune) bool {
+	return isJSIdentStart(r) || isASCIIDigit(r)
+}
+
+func isASCIILetter(r rune) bool {
+	return r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z'
+}
+
+func isASCIIDigit(r rune) bool {
+	return r >= '0' && r <= '9'
 }
 
 func estimatedSymbolMarkers(lineCount int) int {
@@ -409,7 +605,7 @@ func SanitizeIDToken(s string) string {
 }
 
 var LanguageByExt = map[string]string{
-	".go": "go", ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript", ".ts": "typescript", ".tsx": "typescript", ".py": "python", ".rs": "rust", ".java": "java", ".rb": "ruby", ".php": "php", ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".cs": "csharp", ".swift": "swift", ".kt": "kotlin", ".kts": "kotlin", ".md": "markdown", ".mdx": "markdown", ".yaml": "yaml", ".yml": "yaml", ".json": "json", ".sh": "shell", ".bash": "shell", ".zsh": "shell",
+	".go": "go", ".js": languageJavaScript, ".jsx": languageJavaScript, ".mjs": languageJavaScript, ".cjs": languageJavaScript, ".ts": languageTypeScript, ".tsx": languageTypeScript, ".py": "python", ".rs": "rust", ".java": "java", ".rb": "ruby", ".php": "php", ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".cs": "csharp", ".swift": "swift", ".kt": "kotlin", ".kts": "kotlin", ".md": "markdown", ".mdx": "markdown", ".yaml": "yaml", ".yml": "yaml", ".json": "json", ".sh": "shell", ".bash": "shell", ".zsh": "shell",
 }
 
 func DetectLanguage(path string) string {
@@ -422,21 +618,4 @@ func DetectLanguage(path string) string {
 		return "dockerfile"
 	}
 	return strings.TrimPrefix(ext, ".")
-}
-
-func commonJSSymbolRegexes() []struct {
-	kind string
-	re   *regexp.Regexp
-} {
-	return []struct {
-		kind string
-		re   *regexp.Regexp
-	}{
-		{"function", regexp.MustCompile(`^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(`)},
-		{"class", regexp.MustCompile(`^(?:export\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)`)},
-		{
-			"function",
-			regexp.MustCompile(`^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?\(?`),
-		},
-	}
 }

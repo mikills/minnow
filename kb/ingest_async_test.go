@@ -320,6 +320,14 @@ func (f *failingDeleteBlobStore) DownloadBytes(ctx context.Context, key string) 
 func (f *failingDeleteBlobStore) Download(ctx context.Context, key, dest string) error {
 	return f.inner.Download(ctx, key, dest)
 }
+func (f *failingDeleteBlobStore) UploadBytesIfMatch(
+	ctx context.Context,
+	key string,
+	data []byte,
+	ver string,
+) (*BlobObjectInfo, error) {
+	return f.inner.UploadBytesIfMatch(ctx, key, data, ver)
+}
 func (f *failingDeleteBlobStore) UploadIfMatch(ctx context.Context, key, src, ver string) (*BlobObjectInfo, error) {
 	return f.inner.UploadIfMatch(ctx, key, src, ver)
 }

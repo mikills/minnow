@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/mikills/minnow/kb/blobstore"
@@ -16,7 +15,12 @@ import (
 type BlobStore interface {
 	Head(ctx context.Context, key string) (*blobstore.ObjectInfo, error)
 	DownloadBytes(ctx context.Context, key string) ([]byte, error)
-	UploadIfMatch(ctx context.Context, key string, src string, expectedVersion string) (*blobstore.ObjectInfo, error)
+	UploadBytesIfMatch(
+		ctx context.Context,
+		key string,
+		data []byte,
+		expectedVersion string,
+	) (*blobstore.ObjectInfo, error)
 	Delete(ctx context.Context, key string) error
 }
 
@@ -137,20 +141,11 @@ func (s *BlobStoreManifest) UpsertIfMatch(
 	manifest ShardManifest,
 	expectedVersion string,
 ) (string, error) {
-	tmpDir, err := os.MkdirTemp("", "minnow-manifest-upsert-*")
-	if err != nil {
-		return "", err
-	}
-	defer os.RemoveAll(tmpDir)
-	manifestPath := filepath.Join(tmpDir, "manifest.json")
 	data, err := json.Marshal(manifest)
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
-		return "", err
-	}
-	info, err := s.Store.UploadIfMatch(ctx, s.manifestKey(kbID), manifestPath, expectedVersion)
+	info, err := s.Store.UploadBytesIfMatch(ctx, s.manifestKey(kbID), data, expectedVersion)
 	if err != nil {
 		return "", err
 	}

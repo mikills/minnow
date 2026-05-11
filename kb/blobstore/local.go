@@ -82,6 +82,39 @@ func (l *LocalBlobStore) Head(ctx context.Context, key string) (*ObjectInfo, err
 	}, nil
 }
 
+func (l *LocalBlobStore) UploadBytesIfMatch(
+	ctx context.Context,
+	key string,
+	data []byte,
+	expectedVersion string,
+) (*ObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	keyLock := l.lockForKey(key)
+	keyLock.Lock()
+	defer keyLock.Unlock()
+
+	dest := filepath.Join(l.Root, key)
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return nil, err
+	}
+	if err := l.checkUploadVersion(ctx, key, expectedVersion); err != nil {
+		return nil, err
+	}
+
+	version := BytesSHA256(data)
+	if err := replaceFileWithBytes(data, dest); err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(dest)
+	if err != nil {
+		return nil, err
+	}
+	return &ObjectInfo{Key: key, Version: version, UpdatedAt: info.ModTime().UTC(), Size: info.Size()}, nil
+}
+
 func (l *LocalBlobStore) UploadIfMatch(
 	ctx context.Context,
 	key string,
