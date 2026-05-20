@@ -20,6 +20,8 @@ func TestSim(t *testing.T) {
 		"warm_vs_cold":            scenarios.WarmVsCold,
 		"flaky_blob_ingest":       scenarios.FlakyBlobIngest,
 		"concurrent_writers":      scenarios.ConcurrentWriters,
+		"concurrent_many_writers": scenarios.ConcurrentManyWriters,
+		"async_document_pipeline": scenarios.AsyncDocumentPipeline,
 		"cache_evicted_mid_query": scenarios.CacheEvictedMidQuery,
 		"high_download_failure":   scenarios.HighDownloadFailure,
 		"clock_jumps_backward":    scenarios.ClockJumpsBackward,

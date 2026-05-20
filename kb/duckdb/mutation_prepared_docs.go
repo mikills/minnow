@@ -13,6 +13,16 @@ import (
 )
 
 func applyPreparedDocsAppender(ctx context.Context, db *sql.DB, docs []preparedUpsertDoc) error {
+	return applyPreparedDocsAndGraphAppender(ctx, db, docs, nil, false)
+}
+
+func applyPreparedDocsAndGraphAppender(
+	ctx context.Context,
+	db *sql.DB,
+	docs []preparedUpsertDoc,
+	graphResult *kb.GraphBuildResult,
+	ensureGraphTables bool,
+) error {
 	if len(docs) == 0 {
 		return nil
 	}
@@ -26,7 +36,16 @@ func applyPreparedDocsAppender(ctx context.Context, db *sql.DB, docs []preparedU
 	if err := appendPreparedDocs(ctx, conn, table, docs); err != nil {
 		return err
 	}
-	return mergePreparedDocsStaging(ctx, conn, table, docs)
+	return mergePreparedDocsAndGraphStaging(
+		ctx,
+		preparedDocsStagingMerge{
+			conn:              conn,
+			table:             table,
+			docs:              docs,
+			graphResult:       graphResult,
+			ensureGraphTables: ensureGraphTables,
+		},
+	)
 }
 
 func createPreparedDocsStagingTable(ctx context.Context, db *sql.DB, table string, dim int) (*sql.Conn, error) {
@@ -88,20 +107,31 @@ func appendPreparedDocRow(appender *duckdbdriver.Appender, prepared preparedUpse
 	return nil
 }
 
-func mergePreparedDocsStaging(ctx context.Context, conn *sql.Conn, table string, docs []preparedUpsertDoc) error {
-	tx, err := conn.BeginTx(ctx, nil)
+type preparedDocsStagingMerge struct {
+	conn              *sql.Conn
+	table             string
+	docs              []preparedUpsertDoc
+	graphResult       *kb.GraphBuildResult
+	ensureGraphTables bool
+}
+
+func mergePreparedDocsAndGraphStaging(ctx context.Context, input preparedDocsStagingMerge) error {
+	tx, err := input.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin appender upsert tx: %w", err)
 	}
-	if err := deletePreparedDocRows(ctx, tx, docs); err != nil {
+	if err := deletePreparedDocRows(ctx, tx, input.docs); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO docs (id, content, embedding, media_refs) SELECT id, content, embedding, media_refs FROM %s`, table)); err != nil {
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT INTO docs (id, content, embedding, media_refs) SELECT id, content, embedding, media_refs FROM %s`, input.table)); err != nil {
 		tx.Rollback()
 		return kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("bulk insert prepared docs: %w", err),
 			"upsert embedding dimension is incompatible with stored vectors",
 		)
+	}
+	if err := applyPreparedGraphTx(ctx, tx, input.docs, input.graphResult, input.ensureGraphTables); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit appender upsert tx: %w", err)

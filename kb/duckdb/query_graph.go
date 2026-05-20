@@ -20,7 +20,7 @@ func searchExpandedWithDB(
 		return nil, err
 	}
 
-	seeds, err := QueryTopKWithDB(ctx, db, queryVec, options.SeedK)
+	seeds, err := queryTopKWithDB(ctx, db, queryVec, options.SeedK, false)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +150,7 @@ func buildExpandedResults(ctx context.Context, db *sql.DB, input expandedResultI
 	}
 
 	candidateIDs := graph.CandidateIDs(input.seeds, docGraphScore)
-	docMatches, err := queryDocMatchesForIDs(ctx, db, input.queryVec, candidateIDs)
+	docMatches, err := queryDocDistancesForIDs(ctx, db, input.queryVec, candidateIDs, false)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +158,7 @@ func buildExpandedResults(ctx context.Context, db *sql.DB, input expandedResultI
 		return []kb.ExpandedResult{}, nil
 	}
 
-	return graph.BuildExpandedResults(
+	ranked := graph.BuildExpandedResults(
 		graph.ExpandInput{
 			TopK:          input.topK,
 			Seeds:         input.seeds,
@@ -166,7 +166,30 @@ func buildExpandedResults(ctx context.Context, db *sql.DB, input expandedResultI
 			DocGraphScore: docGraphScore,
 			Alpha:         input.alpha,
 		},
-	), nil
+	)
+	return hydrateExpandedResults(ctx, db, ranked)
+}
+
+func hydrateExpandedResults(ctx context.Context, db *sql.DB, ranked []kb.ExpandedResult) ([]kb.ExpandedResult, error) {
+	ids := make([]string, 0, len(ranked))
+	for _, result := range ranked {
+		ids = append(ids, result.ID)
+	}
+	payloads, err := queryDocPayloadsByID(ctx, db, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := ranked[:0]
+	for _, result := range ranked {
+		payload, ok := payloads[result.ID]
+		if !ok {
+			continue
+		}
+		result.Content = payload.Content
+		result.MediaRefs = payload.MediaRefs
+		out = append(out, result)
+	}
+	return out, nil
 }
 
 func convertDocMatches(matches map[string]docMatch) map[string]graph.DocMatch {
