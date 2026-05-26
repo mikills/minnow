@@ -1,6 +1,7 @@
 package blobstore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -171,6 +172,15 @@ func (s *S3BlobStore) Download(ctx context.Context, key string, dest string) err
 	return file.Sync()
 }
 
+func (s *S3BlobStore) UploadBytesIfMatch(
+	ctx context.Context,
+	key string,
+	data []byte,
+	expectedVersion string,
+) (*ObjectInfo, error) {
+	return s.putObjectIfMatch(ctx, key, bytes.NewReader(data), int64(len(data)), expectedVersion)
+}
+
 // UploadIfMatch uploads a file to S3 with optimistic concurrency control.
 // If expectedVersion is empty, the upload is unconditional.
 // If expectedVersion is provided, it must match the current ETag (version).
@@ -184,29 +194,32 @@ func (s *S3BlobStore) UploadIfMatch(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
-	fullKey := s.fullKey(key)
-
-	// Open source file
 	file, err := os.Open(src)
 	if err != nil {
 		return nil, fmt.Errorf("open source file: %w", err)
 	}
 	defer file.Close()
-
-	// Prepare upload input
-	input := &s3.PutObjectInput{
-		Bucket: aws.String(s.Bucket),
-		Key:    aws.String(fullKey),
-		Body:   file,
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat source file: %w", err)
 	}
+	return s.putObjectIfMatch(ctx, key, file, info.Size(), expectedVersion)
+}
 
-	// Add conditional header if expectedVersion is provided
+func (s *S3BlobStore) putObjectIfMatch(
+	ctx context.Context,
+	key string,
+	body io.Reader,
+	size int64,
+	expectedVersion string,
+) (*ObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	input := &s3.PutObjectInput{Bucket: aws.String(s.Bucket), Key: aws.String(s.fullKey(key)), Body: body}
 	if expectedVersion != "" {
 		input.IfMatch = aws.String(expectedVersion)
 	}
-
-	// Upload
 	result, err := s.Client.PutObject(ctx, input)
 	if err != nil {
 		var responseErr *smithyhttp.ResponseError
@@ -215,25 +228,11 @@ func (s *S3BlobStore) UploadIfMatch(
 		}
 		return nil, fmt.Errorf("put object %s: %w", key, err)
 	}
-
-	// Get metadata for response
 	version := ""
 	if result.ETag != nil {
 		version = *result.ETag
 	}
-
-	// Get file size
-	info, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat source file: %w", err)
-	}
-
-	return &ObjectInfo{
-		Key:       key,
-		Version:   version,
-		UpdatedAt: s.now(),
-		Size:      info.Size(),
-	}, nil
+	return &ObjectInfo{Key: key, Version: version, UpdatedAt: s.now(), Size: size}, nil
 }
 
 func (s *S3BlobStore) Delete(ctx context.Context, key string) error {

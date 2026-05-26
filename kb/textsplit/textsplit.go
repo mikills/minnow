@@ -33,7 +33,7 @@ func (s Splitter) Chunk(ctx context.Context, docID string, text string) ([]Chunk
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
-	pieces := recursiveSplit(trimmed, defaultSeparators, chunkSize)
+	pieces := splitText(trimmed, chunkSize)
 	return buildChunks(ctx, docID, text, pieces)
 }
 
@@ -92,46 +92,50 @@ func clamp(value int, minValue int, maxValue int) int {
 	return value
 }
 
-func recursiveSplit(text string, separators []string, chunkSize int) []string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil
-	}
-	if len(text) <= chunkSize {
-		return []string{text}
-	}
-	if len(separators) == 0 {
-		return hardSplitByRunes(text, chunkSize)
-	}
-	sep := separators[0]
-	remainingSeps := separators[1:]
-	if sep == "" {
-		return hardSplitByRunes(text, chunkSize)
-	}
-	parts := strings.Split(text, sep)
-	merged := mergeSmallPieces(parts, sep, chunkSize, sep == ".")
-	var result []string
-	for _, piece := range merged {
-		piece = strings.TrimSpace(piece)
-		if piece == "" {
-			continue
-		}
-		if len(piece) <= chunkSize {
-			result = append(result, piece)
-		} else {
-			result = append(result, recursiveSplit(piece, remainingSeps, chunkSize)...)
-		}
-	}
-	return result
+func splitText(text string, chunkSize int) []string {
+	pieces := make([]string, 0, max(1, len(text)/chunkSize))
+	recursiveSplitInto(&pieces, text, defaultSeparators, chunkSize)
+	return pieces
 }
 
-func mergeSmallPieces(parts []string, sep string, chunkSize int, keepSepLeft bool) []string {
-	if len(parts) == 0 {
-		return nil
+func recursiveSplitInto(out *[]string, text string, separators []string, chunkSize int) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
 	}
-	var result []string
+	if len(text) <= chunkSize {
+		*out = append(*out, text)
+		return
+	}
+	if len(separators) == 0 || separators[0] == "" {
+		*out = append(*out, hardSplitByRunes(text, chunkSize)...)
+		return
+	}
+	sep := separators[0]
+	parts := strings.Split(text, sep)
+	mergeSplitPartsInto(splitMergeInput{
+		out:           out,
+		parts:         parts,
+		sep:           sep,
+		remainingSeps: separators[1:],
+		chunkSize:     chunkSize,
+		keepSepLeft:   sep == ".",
+	})
+}
+
+type splitMergeInput struct {
+	out           *[]string
+	parts         []string
+	sep           string
+	remainingSeps []string
+	chunkSize     int
+	keepSepLeft   bool
+}
+
+func mergeSplitPartsInto(input splitMergeInput) {
 	var current strings.Builder
-	for _, part := range parts {
+	current.Grow(input.chunkSize)
+	for _, part := range input.parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
@@ -140,21 +144,32 @@ func mergeSmallPieces(parts []string, sep string, chunkSize int, keepSepLeft boo
 			current.WriteString(part)
 			continue
 		}
-		if canMerge(current.Len(), len(part), len(sep), chunkSize, keepSepLeft) {
-			writeMergedPiece(&current, part, sep, keepSepLeft)
+		if canMerge(current.Len(), len(part), len(input.sep), input.chunkSize, input.keepSepLeft) {
+			writeMergedPiece(&current, part, input.sep, input.keepSepLeft)
 			continue
 		}
-		if keepSepLeft {
-			current.WriteString(sep)
+		if input.keepSepLeft {
+			current.WriteString(input.sep)
 		}
-		result = append(result, current.String())
+		flushSplitPiece(input.out, current.String(), input.remainingSeps, input.chunkSize)
 		current.Reset()
 		current.WriteString(part)
 	}
 	if current.Len() > 0 {
-		result = append(result, current.String())
+		flushSplitPiece(input.out, current.String(), input.remainingSeps, input.chunkSize)
 	}
-	return result
+}
+
+func flushSplitPiece(out *[]string, piece string, remainingSeps []string, chunkSize int) {
+	piece = strings.TrimSpace(piece)
+	if piece == "" {
+		return
+	}
+	if len(piece) <= chunkSize {
+		*out = append(*out, piece)
+		return
+	}
+	recursiveSplitInto(out, piece, remainingSeps, chunkSize)
 }
 
 func canMerge(currentLen, partLen, sepLen, chunkSize int, keepSepLeft bool) bool {

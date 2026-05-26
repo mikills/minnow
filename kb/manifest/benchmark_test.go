@@ -111,6 +111,15 @@ func (b *benchmarkManifestBlob) Download(_ context.Context, _ string, dest strin
 	return os.WriteFile(dest, b.data, 0o644)
 }
 
+func (b *benchmarkManifestBlob) UploadBytesIfMatch(
+	context.Context,
+	string,
+	[]byte,
+	string,
+) (*blobstore.ObjectInfo, error) {
+	return nil, nil
+}
+
 func (b *benchmarkManifestBlob) UploadIfMatch(context.Context, string, string, string) (*blobstore.ObjectInfo, error) {
 	return nil, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 
 	kb "github.com/mikills/minnow/kb"
@@ -11,11 +12,19 @@ import (
 )
 
 func FormatVectorForSQL(vec []float32) string {
-	parts := make([]string, len(vec))
-	for i, v := range vec {
-		parts[i] = fmt.Sprintf("%.6f", v)
+	if len(vec) == 0 {
+		return "[]"
 	}
-	return "[" + strings.Join(parts, ",") + "]"
+	buf := make([]byte, 0, 2+len(vec)*10)
+	buf = append(buf, '[')
+	for i, v := range vec {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = strconv.AppendFloat(buf, float64(v), 'f', 6, 32)
+	}
+	buf = append(buf, ']')
+	return string(buf)
 }
 
 func tableExists(ctx context.Context, q interface {
@@ -33,17 +42,20 @@ func tableExists(ctx context.Context, q interface {
 }
 
 func QueryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int) ([]kb.QueryResult, error) {
+	return queryTopKWithDB(ctx, db, queryVec, k, true)
+}
+
+func queryTopKWithDB(
+	ctx context.Context,
+	db *sql.DB,
+	queryVec []float32,
+	k int,
+	validateDimension bool,
+) ([]kb.QueryResult, error) {
 	if k <= 0 {
 		return []kb.QueryResult{}, nil
 	}
-	if len(queryVec) == 0 {
-		return nil, fmt.Errorf("query vector cannot be empty")
-	}
-	expectedDim, err := duckDBEmbeddingDimension(ctx, db)
-	if err != nil {
-		return nil, err
-	}
-	if err := dimension.ValidateVector(queryVec, expectedDim, "query vector dimension is incompatible with stored vectors"); err != nil {
+	if err := validateQueryVectorForDB(ctx, db, queryVec, validateDimension, "query vector dimension is incompatible with stored vectors"); err != nil {
 		return nil, err
 	}
 
@@ -81,42 +93,56 @@ func QueryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int)
 	return results, nil
 }
 
+func validateQueryVectorForDB(
+	ctx context.Context,
+	db *sql.DB,
+	queryVec []float32,
+	validateDimension bool,
+	operation string,
+) error {
+	if len(queryVec) == 0 {
+		return fmt.Errorf("query vector cannot be empty")
+	}
+	if !validateDimension {
+		return nil
+	}
+	expectedDim, err := duckDBEmbeddingDimension(ctx, db)
+	if err != nil {
+		return err
+	}
+	return dimension.ValidateVector(queryVec, expectedDim, operation)
+}
+
 type docMatch struct {
 	Content   string
 	Distance  float64
 	MediaRefs []kb.ChunkMediaRef
 }
 
-func queryDocMatchesForIDs(
+func queryDocDistancesForIDs(
 	ctx context.Context,
 	db *sql.DB,
 	queryVec []float32,
 	ids []string,
+	validateDimension bool,
 ) (map[string]docMatch, error) {
 	if len(ids) == 0 {
 		return map[string]docMatch{}, nil
 	}
-	expectedDim, err := duckDBEmbeddingDimension(ctx, db)
-	if err != nil {
+	if err := validateQueryVectorForDB(ctx, db, queryVec, validateDimension, "distance query vector dimension is incompatible with stored vectors"); err != nil {
 		return nil, err
 	}
-	if err := dimension.ValidateVector(queryVec, expectedDim, "distance query vector dimension is incompatible with stored vectors"); err != nil {
-		return nil, err
-	}
-
 	vecStr := FormatVectorForSQL(queryVec)
 	placeholders := kb.BuildInClausePlaceholders(len(ids))
 	query := fmt.Sprintf(`
-		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance, media_refs
+		SELECT id, array_distance(embedding, %s::FLOAT[%d]) as distance
 		FROM docs
 		WHERE id IN (%s)
 	`, vecStr, len(queryVec), placeholders)
-
 	args := make([]any, 0, len(ids))
 	for _, id := range ids {
 		args = append(args, id)
 	}
-
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, kb.WrapEmbeddingDimensionMismatch(
@@ -125,23 +151,18 @@ func queryDocMatchesForIDs(
 		)
 	}
 	defer rows.Close()
-
 	results := make(map[string]docMatch, len(ids))
 	for rows.Next() {
 		var id string
-		var content string
 		var distance float64
-		var mediaRefsRaw sql.NullString
-		if err := rows.Scan(&id, &content, &distance, &mediaRefsRaw); err != nil {
-			return nil, fmt.Errorf("failed to scan query result: %w", err)
+		if err := rows.Scan(&id, &distance); err != nil {
+			return nil, fmt.Errorf("failed to scan query distance: %w", err)
 		}
-		refs, _ := decodeMediaRefs(mediaRefsRaw)
-		results[id] = docMatch{Content: content, Distance: distance, MediaRefs: refs}
+		results[id] = docMatch{Distance: distance}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("query rows iteration error: %w", err)
+		return nil, fmt.Errorf("query distance rows iteration error: %w", err)
 	}
-
 	return results, nil
 }
 

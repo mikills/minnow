@@ -830,11 +830,7 @@ func (f *DuckDBArtifactFormat) applyUpsert(
 		}
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin upsert tx: %w", err)
-	}
-	return applyPreparedDocsTx(ctx, tx, docs, graphResult, graphResult != nil)
+	return applyPreparedDocsAndGraphAppender(ctx, db, docs, graphResult, graphResult != nil)
 }
 
 func (f *DuckDBArtifactFormat) applyPreparedUpsert(

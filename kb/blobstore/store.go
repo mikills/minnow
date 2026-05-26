@@ -24,6 +24,7 @@ type Store interface {
 	Head(ctx context.Context, key string) (*ObjectInfo, error)
 	DownloadBytes(ctx context.Context, key string) ([]byte, error)
 	Download(ctx context.Context, key string, dest string) error
+	UploadBytesIfMatch(ctx context.Context, key string, data []byte, expectedVersion string) (*ObjectInfo, error)
 	UploadIfMatch(ctx context.Context, key string, src string, expectedVersion string) (*ObjectInfo, error)
 	Delete(ctx context.Context, key string) error
 	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
@@ -70,6 +71,43 @@ func replaceFileWithCopy(src, dest string) error {
 	}
 	defer os.Remove(tmpDest)
 	return os.Rename(tmpDest, dest)
+}
+
+func replaceFileWithBytes(data []byte, dest string) error {
+	tmpDest := fmt.Sprintf("%s.tmp-%d", dest, time.Now().UnixNano())
+	file, err := os.Create(tmpDest)
+	if err != nil {
+		return err
+	}
+	written, writeErr := file.Write(data)
+	if writeErr == nil && written != len(data) {
+		writeErr = io.ErrShortWrite
+	}
+	if syncErr := file.Sync(); writeErr == nil {
+		writeErr = syncErr
+	}
+	if closeErr := file.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr != nil {
+		return removeTempAfterError(tmpDest, writeErr)
+	}
+	if err := os.Rename(tmpDest, dest); err != nil {
+		return removeTempAfterError(tmpDest, err)
+	}
+	return nil
+}
+
+func removeTempAfterError(path string, cause error) error {
+	if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return fmt.Errorf("%w; remove temp file: %v", cause, removeErr)
+	}
+	return cause
+}
+
+func BytesSHA256(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func FileContentSHA256(ctx context.Context, path string) (string, error) {

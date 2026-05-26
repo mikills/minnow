@@ -280,6 +280,15 @@ func (c *churnOnHeadBlobStore) Download(ctx context.Context, key string, dest st
 	return c.inner.Download(ctx, key, dest)
 }
 
+func (c *churnOnHeadBlobStore) UploadBytesIfMatch(
+	ctx context.Context,
+	key string,
+	data []byte,
+	expectedVersion string,
+) (*BlobObjectInfo, error) {
+	return c.inner.UploadBytesIfMatch(ctx, key, data, expectedVersion)
+}
+
 func (c *churnOnHeadBlobStore) UploadIfMatch(
 	ctx context.Context,
 	key string,

@@ -120,16 +120,17 @@ func (f *DuckDBArtifactFormat) queryTopKFromShards(
 	f.deps.Metrics.RecordShardFanout(query.kbID, query.plan.Fanout, query.plan.Capped)
 	f.deps.Metrics.RecordShardExecution(query.kbID, query.plan.Fanout)
 
-	shardResults, err := f.queryShardsTopK(
-		ctx,
-		shardQueryWorkload{
-			kbID:        query.kbID,
-			shards:      query.plan.Shards,
-			queryVec:    query.queryVec,
-			k:           query.localTopK,
-			parallelism: query.plan.Parallelism,
-		},
-	)
+	workload := shardQueryWorkload{
+		kbID:        query.kbID,
+		shards:      query.plan.Shards,
+		queryVec:    query.queryVec,
+		k:           query.localTopK,
+		parallelism: query.plan.Parallelism,
+	}
+	if shouldUseTwoPhaseMaterialization(query.plan.Fanout, query.localTopK, query.k) {
+		return f.queryTopKRefsFromShards(ctx, workload, query.k)
+	}
+	shardResults, err := f.queryShardsTopK(ctx, workload)
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +143,51 @@ type shardQueryWorkload struct {
 	queryVec    []float32
 	k           int
 	parallelism int
+}
+
+func shouldUseTwoPhaseMaterialization(fanout int, localTopK int, finalTopK int) bool {
+	return fanout > 1 && localTopK > finalTopK
+}
+
+func (f *DuckDBArtifactFormat) queryTopKRefsFromShards(
+	ctx context.Context,
+	workload shardQueryWorkload,
+	finalTopK int,
+) ([]kb.QueryResult, error) {
+	shardRefs, err := f.queryShardsTopKRefs(ctx, workload)
+	if err != nil {
+		return nil, err
+	}
+	merged := mergeRankedShardRefs(shardRefs, finalTopK)
+	byShard := make(map[int][]rankedDocRef)
+	for _, ref := range merged {
+		byShard[ref.ShardIndex] = append(byShard[ref.ShardIndex], ref.Ref)
+	}
+	hydratedByShard := make(map[int][]kb.QueryResult, len(byShard))
+	for shardIndex, refs := range byShard {
+		results, err := f.hydrateShardRankedResults(ctx, workload.kbID, workload.shards[shardIndex], refs)
+		if err != nil {
+			return nil, err
+		}
+		hydratedByShard[shardIndex] = results
+	}
+	resultByKey := make(map[string]kb.QueryResult, len(merged))
+	for shardIndex, results := range hydratedByShard {
+		for _, result := range results {
+			resultByKey[rankedResultKey(shardIndex, result.ID)] = result
+		}
+	}
+	out := make([]kb.QueryResult, 0, len(merged))
+	for _, ref := range merged {
+		if result, ok := resultByKey[rankedResultKey(ref.ShardIndex, ref.Ref.ID)]; ok {
+			out = append(out, result)
+		}
+	}
+	return out, nil
+}
+
+func rankedResultKey(shardIndex int, id string) string {
+	return fmt.Sprintf("%d\x00%s", shardIndex, id)
 }
 
 func (f *DuckDBArtifactFormat) queryShardsTopK(
@@ -208,6 +254,19 @@ type vectorShardQueryWork struct {
 	wg       *sync.WaitGroup
 }
 
+type vectorShardRefQueryWork struct {
+	kbID     string
+	idx      int
+	shard    kb.SnapshotShardMetadata
+	queryVec []float32
+	k        int
+	sem      chan struct{}
+	errCh    chan error
+	results  [][]rankedDocRef
+	cancel   context.CancelFunc
+	wg       *sync.WaitGroup
+}
+
 func (f *DuckDBArtifactFormat) startVectorShardQuery(ctx context.Context, work vectorShardQueryWork) {
 	work.wg.Add(1)
 	go f.runVectorShardQuery(ctx, work)
@@ -233,6 +292,66 @@ func (f *DuckDBArtifactFormat) runVectorShardQuery(ctx context.Context, work vec
 	work.results[work.idx] = rows
 }
 
+func (f *DuckDBArtifactFormat) queryShardsTopKRefs(
+	ctx context.Context,
+	workload shardQueryWorkload,
+) ([][]rankedDocRef, error) {
+	if len(workload.shards) == 0 || workload.k <= 0 {
+		return [][]rankedDocRef{}, nil
+	}
+	parallelism := workload.parallelism
+	if parallelism <= 0 {
+		parallelism = 1
+	}
+	if parallelism > len(workload.shards) {
+		parallelism = len(workload.shards)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make([][]rankedDocRef, len(workload.shards))
+	sem := make(chan struct{}, parallelism)
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	for i := range workload.shards {
+		f.startVectorShardRefQuery(ctx, vectorShardRefQueryWork{
+			kbID: workload.kbID, idx: i, shard: workload.shards[i], queryVec: workload.queryVec,
+			k: workload.k, sem: sem, errCh: errCh, results: results, cancel: cancel, wg: &wg,
+		})
+	}
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return nil, err
+	default:
+	}
+	return results, nil
+}
+
+func (f *DuckDBArtifactFormat) startVectorShardRefQuery(ctx context.Context, work vectorShardRefQueryWork) {
+	work.wg.Add(1)
+	go f.runVectorShardRefQuery(ctx, work)
+}
+
+func (f *DuckDBArtifactFormat) runVectorShardRefQuery(ctx context.Context, work vectorShardRefQueryWork) {
+	defer work.wg.Done()
+	select {
+	case work.sem <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	defer func() { <-work.sem }()
+	rows, err := f.querySingleShardTopKRefs(ctx, work.kbID, work.shard, work.queryVec, work.k)
+	if err != nil {
+		select {
+		case work.errCh <- err:
+		default:
+		}
+		work.cancel()
+		return
+	}
+	work.results[work.idx] = rows
+}
+
 func (f *DuckDBArtifactFormat) querySingleShardTopK(
 	ctx context.Context,
 	kbID string,
@@ -240,23 +359,70 @@ func (f *DuckDBArtifactFormat) querySingleShardTopK(
 	queryVec []float32,
 	k int,
 ) ([]kb.QueryResult, error) {
+	conn, err := f.openCachedShardConn(ctx, kbID, shard)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.mu.Unlock()
+	results, err := queryTopKWithDB(ctx, conn.db, queryVec, k, false)
+	if err != nil {
+		return nil, fmt.Errorf("query shard %s: %w", shard.ShardID, err)
+	}
+	return results, nil
+}
+
+func (f *DuckDBArtifactFormat) querySingleShardTopKRefs(
+	ctx context.Context,
+	kbID string,
+	shard kb.SnapshotShardMetadata,
+	queryVec []float32,
+	k int,
+) ([]rankedDocRef, error) {
+	conn, err := f.openCachedShardConn(ctx, kbID, shard)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.mu.Unlock()
+	refs, err := queryTopKRefsWithDB(ctx, conn.db, queryVec, k, false)
+	if err != nil {
+		return nil, fmt.Errorf("query shard refs %s: %w", shard.ShardID, err)
+	}
+	return refs, nil
+}
+
+func (f *DuckDBArtifactFormat) hydrateShardRankedResults(
+	ctx context.Context,
+	kbID string,
+	shard kb.SnapshotShardMetadata,
+	refs []rankedDocRef,
+) ([]kb.QueryResult, error) {
+	conn, err := f.openCachedShardConn(ctx, kbID, shard)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.mu.Unlock()
+	results, err := hydrateRankedResults(ctx, conn.db, refs)
+	if err != nil {
+		return nil, fmt.Errorf("hydrate shard %s: %w", shard.ShardID, err)
+	}
+	return results, nil
+}
+
+func (f *DuckDBArtifactFormat) openCachedShardConn(
+	ctx context.Context,
+	kbID string,
+	shard kb.SnapshotShardMetadata,
+) (*shardConn, error) {
 	localPath, hit, err := f.ensureLocalShardFile(ctx, kbID, shard)
 	if err != nil {
 		return nil, fmt.Errorf("ensure shard file %s: %w", shard.ShardID, err)
 	}
 	f.deps.Metrics.RecordShardCacheAccess(kbID, hit)
-
 	conn, err := f.pool.GetOrOpen(ctx, localPath, f.openConfiguredDB)
 	if err != nil {
 		return nil, fmt.Errorf("open shard %s: %w", shard.ShardID, err)
 	}
-	defer conn.mu.Unlock()
-
-	results, err := QueryTopKWithDB(ctx, conn.db, queryVec, k)
-	if err != nil {
-		return nil, fmt.Errorf("query shard %s: %w", shard.ShardID, err)
-	}
-	return results, nil
+	return conn, nil
 }
 
 func (f *DuckDBArtifactFormat) ensureLocalShardFile(

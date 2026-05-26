@@ -17,6 +17,8 @@ type BlobStore interface {
 	Download(ctx context.Context, key string, dest string) error
 }
 
+const cachedShardTouchInterval = time.Second
+
 type Manager struct {
 	CacheDir           string
 	BlobStore          BlobStore
@@ -33,7 +35,7 @@ func (m Manager) EnsureLocalFile(
 	}
 	cacheDir := filepath.Join(m.CacheDir, kbID, "query-shards")
 	localPath := filepath.Join(cacheDir, FileName(shard))
-	cached, err := m.useCachedIfPresent(ctx, kbID, localPath)
+	cached, err := m.useCachedIfPresent(ctx, localPath)
 	if err != nil || cached {
 		return localPathOrEmpty(localPath, cached), cached, err
 	}
@@ -54,13 +56,24 @@ func (m Manager) EnsureLocalFile(
 	return localPath, false, nil
 }
 
-func (m Manager) useCachedIfPresent(ctx context.Context, kbID string, localPath string) (bool, error) {
-	if _, err := os.Stat(localPath); err == nil {
-		return true, m.evict(ctx, kbID)
+func (m Manager) useCachedIfPresent(ctx context.Context, localPath string) (bool, error) {
+	if info, err := os.Stat(localPath); err == nil {
+		return true, touchCachedShard(ctx, localPath, info.ModTime())
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return false, err
 	}
 	return false, nil
+}
+
+func touchCachedShard(ctx context.Context, localPath string, lastTouch time.Time) error {
+	if time.Since(lastTouch) < cachedShardTouchInterval {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	now := time.Now()
+	return os.Chtimes(localPath, now, now)
 }
 
 func (m Manager) downloadToTemp(ctx context.Context, shard kb.SnapshotShardMetadata, localPath string) (string, error) {
