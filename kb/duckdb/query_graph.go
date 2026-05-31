@@ -150,15 +150,34 @@ func buildExpandedResults(ctx context.Context, db *sql.DB, input expandedResultI
 	}
 
 	candidateIDs := graph.CandidateIDs(input.seeds, docGraphScore)
-	docMatches, err := queryDocDistancesForIDs(ctx, db, input.queryVec, candidateIDs, false)
+	if twoPhaseMaterializationEnabled {
+		docMatches, err := queryDocDistancesForIDs(ctx, db, input.queryVec, candidateIDs, false)
+		if err != nil {
+			return nil, err
+		}
+		if len(docMatches) == 0 {
+			return []kb.ExpandedResult{}, nil
+		}
+		ranked := graph.BuildExpandedResults(
+			graph.ExpandInput{
+				TopK:          input.topK,
+				Seeds:         input.seeds,
+				DocMatches:    convertDocMatches(docMatches),
+				DocGraphScore: docGraphScore,
+				Alpha:         input.alpha,
+			},
+		)
+		return hydrateExpandedResults(ctx, db, ranked)
+	}
+
+	docMatches, err := queryDocMatchesForIDs(ctx, db, input.queryVec, candidateIDs, false)
 	if err != nil {
 		return nil, err
 	}
 	if len(docMatches) == 0 {
 		return []kb.ExpandedResult{}, nil
 	}
-
-	ranked := graph.BuildExpandedResults(
+	return graph.BuildExpandedResults(
 		graph.ExpandInput{
 			TopK:          input.topK,
 			Seeds:         input.seeds,
@@ -166,8 +185,7 @@ func buildExpandedResults(ctx context.Context, db *sql.DB, input expandedResultI
 			DocGraphScore: docGraphScore,
 			Alpha:         input.alpha,
 		},
-	)
-	return hydrateExpandedResults(ctx, db, ranked)
+	), nil
 }
 
 func hydrateExpandedResults(ctx context.Context, db *sql.DB, ranked []kb.ExpandedResult) ([]kb.ExpandedResult, error) {

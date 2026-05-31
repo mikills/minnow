@@ -29,7 +29,7 @@ func (k *KB) Search(
 	queryVec []float32,
 	opts *SearchOptions,
 ) ([]ExpandedResult, error) {
-	format, err := k.resolveFormat(ctx, kbID)
+	format, err := k.resolveSearchFormat(ctx, kbID)
 	if err != nil {
 		return nil, err
 	}

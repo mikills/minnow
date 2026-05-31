@@ -384,6 +384,16 @@ func (l *KB) DefaultFormat() ArtifactFormat {
 	return nil
 }
 
+func (l *KB) resolveSearchFormat(ctx context.Context, kbID string) (ArtifactFormat, error) {
+	if err := l.getInitErr(); err != nil {
+		return nil, err
+	}
+	if format := l.singleRegisteredDefaultFormat(); format != nil {
+		return format, nil
+	}
+	return l.resolveFormat(ctx, kbID)
+}
+
 func (l *KB) resolveFormat(ctx context.Context, kbID string) (ArtifactFormat, error) {
 	if err := l.getInitErr(); err != nil {
 		return nil, err
@@ -402,6 +412,15 @@ func (l *KB) resolveFormat(ctx context.Context, kbID string) (ArtifactFormat, er
 	}
 
 	return l.resolveFormatByKind(doc.Manifest.FormatKind)
+}
+
+func (l *KB) singleRegisteredDefaultFormat() ArtifactFormat {
+	l.formatMu.RLock()
+	defer l.formatMu.RUnlock()
+	if len(l.formatRegistry) != 1 {
+		return nil
+	}
+	return l.formatRegistry[l.defaultFormatKind]
 }
 
 func (l *KB) setInitErr(err error) {
