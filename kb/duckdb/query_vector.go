@@ -11,6 +11,8 @@ import (
 	"github.com/mikills/minnow/kb/duckdb/internal/vectorplan"
 )
 
+var twoPhaseMaterializationEnabled = true
+
 type vectorQueryPath int
 
 const (
@@ -146,7 +148,7 @@ type shardQueryWorkload struct {
 }
 
 func shouldUseTwoPhaseMaterialization(fanout int, localTopK int, finalTopK int) bool {
-	return fanout > 1 && localTopK > finalTopK
+	return twoPhaseMaterializationEnabled && fanout > 1 && localTopK > finalTopK
 }
 
 func (f *DuckDBArtifactFormat) queryTopKRefsFromShards(
@@ -159,35 +161,37 @@ func (f *DuckDBArtifactFormat) queryTopKRefsFromShards(
 		return nil, err
 	}
 	merged := mergeRankedShardRefs(shardRefs, finalTopK)
-	byShard := make(map[int][]rankedDocRef)
+	refsByShard := make([][]rankedDocRef, len(workload.shards))
 	for _, ref := range merged {
-		byShard[ref.ShardIndex] = append(byShard[ref.ShardIndex], ref.Ref)
+		refsByShard[ref.ShardIndex] = append(refsByShard[ref.ShardIndex], ref.Ref)
 	}
-	hydratedByShard := make(map[int][]kb.QueryResult, len(byShard))
-	for shardIndex, refs := range byShard {
+	resultsByShard := make([][]kb.QueryResult, len(workload.shards))
+	for shardIndex, refs := range refsByShard {
+		if len(refs) == 0 {
+			continue
+		}
 		results, err := f.hydrateShardRankedResults(ctx, workload.kbID, workload.shards[shardIndex], refs)
 		if err != nil {
 			return nil, err
 		}
-		hydratedByShard[shardIndex] = results
-	}
-	resultByKey := make(map[string]kb.QueryResult, len(merged))
-	for shardIndex, results := range hydratedByShard {
-		for _, result := range results {
-			resultByKey[rankedResultKey(shardIndex, result.ID)] = result
-		}
+		resultsByShard[shardIndex] = results
 	}
 	out := make([]kb.QueryResult, 0, len(merged))
 	for _, ref := range merged {
-		if result, ok := resultByKey[rankedResultKey(ref.ShardIndex, ref.Ref.ID)]; ok {
+		if result, ok := findHydratedRankedResult(resultsByShard[ref.ShardIndex], ref.Ref.ID); ok {
 			out = append(out, result)
 		}
 	}
 	return out, nil
 }
 
-func rankedResultKey(shardIndex int, id string) string {
-	return fmt.Sprintf("%d\x00%s", shardIndex, id)
+func findHydratedRankedResult(results []kb.QueryResult, id string) (kb.QueryResult, bool) {
+	for _, result := range results {
+		if result.ID == id {
+			return result, true
+		}
+	}
+	return kb.QueryResult{}, false
 }
 
 func (f *DuckDBArtifactFormat) queryShardsTopK(

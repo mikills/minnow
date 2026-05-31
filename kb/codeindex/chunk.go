@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -556,8 +557,8 @@ func overlapLines(lines []lineView, overlapChars int) int {
 	}
 	total := 0
 	count := 0
-	for i := len(lines) - 1; i >= 0; i-- {
-		total += len(lines[i].text) + 1
+	for _, line := range slices.Backward(lines) {
+		total += len(line.text) + 1
 		count++
 		if total >= overlapChars {
 			break

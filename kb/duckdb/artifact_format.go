@@ -169,15 +169,15 @@ func (f *DuckDBArtifactFormat) QueryGraph(ctx context.Context, req kb.GraphQuery
 	if err := kb.ValidateGraphQueryRequest(req); err != nil {
 		return nil, err
 	}
-	if err := f.ensureGraphModeAvailable(ctx, req.KBID); err != nil {
-		return nil, err
-	}
 
 	options := kb.NormalizeExpansionOptions(req.Options.TopK, req.Options.Expansion)
 	options.OfflineExt = f.deps.OfflineExt
 	selection, err := f.resolveVectorQuerySelection(ctx, req.KBID, req.QueryVec)
 	if err != nil {
 		return nil, fmt.Errorf("select vector query path: %w", err)
+	}
+	if err := ensureGraphSelectionAvailable(selection); err != nil {
+		return nil, err
 	}
 	if err := validateQueryVectorDimensionForShards(req.QueryVec, selection.Plan.Shards); err != nil {
 		return nil, err
@@ -321,6 +321,18 @@ func filterExpandedByMaxDistance(results []kb.ExpandedResult, maxDistance *float
 		}
 	}
 	return filtered
+}
+
+func ensureGraphSelectionAvailable(selection *vectorQuerySelection) error {
+	if selection == nil || len(selection.Plan.Shards) == 0 {
+		return kb.ErrGraphQueryUnavailable
+	}
+	for _, shard := range selection.Plan.Shards {
+		if shard.GraphAvailable {
+			return nil
+		}
+	}
+	return kb.ErrGraphQueryUnavailable
 }
 
 func (f *DuckDBArtifactFormat) ensureGraphModeAvailable(ctx context.Context, kbID string) error {

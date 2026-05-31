@@ -166,6 +166,56 @@ func queryDocDistancesForIDs(
 	return results, nil
 }
 
+func queryDocMatchesForIDs(
+	ctx context.Context,
+	db *sql.DB,
+	queryVec []float32,
+	ids []string,
+	validateDimension bool,
+) (map[string]docMatch, error) {
+	if len(ids) == 0 {
+		return map[string]docMatch{}, nil
+	}
+	if err := validateQueryVectorForDB(ctx, db, queryVec, validateDimension, "distance query vector dimension is incompatible with stored vectors"); err != nil {
+		return nil, err
+	}
+	vecStr := FormatVectorForSQL(queryVec)
+	placeholders := kb.BuildInClausePlaceholders(len(ids))
+	query := fmt.Sprintf(`
+		SELECT id, content, array_distance(embedding, %s::FLOAT[%d]) as distance, media_refs
+		FROM docs
+		WHERE id IN (%s)
+	`, vecStr, len(queryVec), placeholders)
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, kb.WrapEmbeddingDimensionMismatch(
+			fmt.Errorf("distance query failed: %w", err),
+			"distance query vector dimension is incompatible with stored vectors",
+		)
+	}
+	defer rows.Close()
+	results := make(map[string]docMatch, len(ids))
+	for rows.Next() {
+		var id string
+		var content string
+		var distance float64
+		var mediaRefsRaw sql.NullString
+		if err := rows.Scan(&id, &content, &distance, &mediaRefsRaw); err != nil {
+			return nil, fmt.Errorf("failed to scan query result: %w", err)
+		}
+		refs, _ := decodeMediaRefs(mediaRefsRaw)
+		results[id] = docMatch{Content: content, Distance: distance, MediaRefs: refs}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("query rows iteration error: %w", err)
+	}
+	return results, nil
+}
+
 func ensureGraphQueryReady(ctx context.Context, db *sql.DB) error {
 	requiredTables := []string{"edges", "doc_entities"}
 	for _, tableName := range requiredTables {
