@@ -104,6 +104,15 @@ minnow index hooks install --index-key default --root .
 minnow index hooks status --root .
 ```
 
+Code index refreshes are state-based, not commit-based. On each refresh Minnow
+scans the current tree, uses Git tracked files by default (`git ls-files`), hashes
+eligible files, and compares them with the previous code-index manifest. Unchanged
+files are skipped, changed files are re-chunked and re-embedded, new files are
+added, and chunks for deleted files are hard-deleted from the backing KB. Pass the
+include-untracked option when creating or refreshing an index if untracked files
+should be indexed too. Without installed hooks, run `minnow index refresh`
+manually after code changes.
+
 The default bind address is `127.0.0.1:8080` (override `http.address` in the YAML).
 
 The minimal config enables MCP for local coding-agent workflows:
