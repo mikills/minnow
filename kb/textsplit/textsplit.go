@@ -4,12 +4,25 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
-var defaultSeparators = []string{"\n\n", "\n", ".", " ", ""}
+// Separators are tried in priority order when choosing a chunk boundary.
+// The last occurrence within the size window wins, so larger semantic units
+// (paragraphs) are preferred over lines, sentences, and words.
+var defaultSeparators = []string{"\n\n", "\n", ".", " "}
 
-const DefaultChunkSize = 500
+const (
+	// DefaultChunkSize targets the middle of the 512-1024 token sweet
+	// spot reported for RAG retrieval, converted to characters at
+	// roughly 4 chars per token for English text.
+	DefaultChunkSize = 3000
+	// DefaultChunkOverlap is 10% of DefaultChunkSize, matching the
+	// code-index chunker ratio (120/1200) and the commonly recommended
+	// 10-20% overlap window.
+	DefaultChunkOverlap = 300
+)
 
 type Chunk struct {
 	DocID   string
@@ -19,192 +32,204 @@ type Chunk struct {
 	End     int
 }
 
-type Splitter struct{ ChunkSize int }
+type Splitter struct {
+	ChunkSize int
+	// ChunkOverlap is the number of bytes repeated from the previous chunk
+	// at the start of the next one. Zero selects DefaultChunkOverlap;
+	// negative disables overlap.
+	ChunkOverlap int
+}
 
 func (s Splitter) Chunk(ctx context.Context, docID string, text string) ([]Chunk, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
+	if strings.TrimSpace(text) == "" {
 		return nil, nil
 	}
-	chunkSize := s.ChunkSize
+	chunkSize, overlap := normalize(s.ChunkSize, s.ChunkOverlap)
+	return splitWithOverlap(ctx, docID, text, chunkSize, overlap)
+}
+
+func normalize(chunkSize, overlap int) (int, int) {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
-	pieces := splitText(trimmed, chunkSize)
-	return buildChunks(ctx, docID, text, pieces)
+	switch {
+	case overlap < 0:
+		overlap = 0
+	case overlap == 0:
+		overlap = DefaultChunkOverlap
+	}
+	if overlap >= chunkSize {
+		overlap = chunkSize / 10
+	}
+	return chunkSize, overlap
 }
 
-func buildChunks(ctx context.Context, docID string, sourceText string, pieces []string) ([]Chunk, error) {
-	chunks := make([]Chunk, 0, len(pieces))
-	pos := 0
-	for i, piece := range pieces {
+// splitWithOverlap walks the source with a sliding window. Each chunk holds
+// up to chunkSize bytes cut at the best separator boundary, and the next
+// chunk starts overlap bytes before the previous chunk's trimmed end
+// (snapped back to a word boundary). Chunk text is always an exact slice of
+// the source, so Text == source[Start:End] by construction.
+func splitWithOverlap(ctx context.Context, docID, source string, chunkSize, overlap int) ([]Chunk, error) {
+	n := len(source)
+	pos := skipWhitespaceForward(source, 0)
+	var chunks []Chunk
+	prevEnd := -1
+	for pos < n {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		span := findSpan(sourceText, piece, pos)
-		chunks = append(
-			chunks,
-			Chunk{
+		if len(strings.TrimSpace(source[pos:])) <= chunkSize {
+			end := trimTrailingWhitespace(source, pos, n)
+			if end <= pos {
+				break
+			}
+			chunks = append(chunks, Chunk{
 				DocID:   docID,
-				ChunkID: fmt.Sprintf("%s-chunk-%03d", docID, i),
-				Text:    piece,
-				Start:   span.start,
-				End:     span.end,
-			},
-		)
-		pos = span.end
+				ChunkID: fmt.Sprintf("%s-chunk-%03d", docID, len(chunks)),
+				Text:    source[pos:end],
+				Start:   pos,
+				End:     end,
+			})
+			break
+		}
+		windowEnd := pos + chunkSize
+		if windowEnd > n {
+			windowEnd = n
+		} else {
+			windowEnd = backToRuneBoundary(source, pos, windowEnd)
+		}
+		split := bestSplit(source, pos, windowEnd)
+		if split <= pos {
+			// Never emit an empty chunk; a single rune always fits even
+			// when it exceeds a tiny chunkSize.
+			split = advanceOneRune(source, pos)
+		}
+		end := trimTrailingWhitespace(source, pos, split)
+		if end <= pos {
+			pos = skipWhitespaceForward(source, split)
+			continue
+		}
+		if prevEnd >= 0 && end <= prevEnd {
+			// Fully contained in the previous chunk (the overlapped
+			// window re-selected an earlier boundary), so skip past it
+			// without emitting a duplicate. Coverage is preserved
+			// because [pos:end] lies inside the previous chunk.
+			pos = skipWhitespaceForward(source, split)
+			continue
+		}
+		chunks = append(chunks, Chunk{
+			DocID:   docID,
+			ChunkID: fmt.Sprintf("%s-chunk-%03d", docID, len(chunks)),
+			Text:    source[pos:end],
+			Start:   pos,
+			End:     end,
+		})
+		prevEnd = end
+		next := end
+		if overlap > 0 && end-pos > overlap {
+			candidate := forwardToRuneBoundary(source, end-overlap, end)
+			candidate = backToWordStart(source, pos, candidate)
+			if candidate > pos && candidate < end {
+				next = candidate
+			}
+		}
+		if next <= pos {
+			next = end
+		}
+		pos = skipWhitespaceForward(source, next)
 	}
 	return chunks, nil
 }
 
-type span struct{ start, end int }
-
-func findSpan(sourceText string, piece string, pos int) span {
-	sourceLen := len(sourceText)
-	pos = clamp(pos, 0, sourceLen)
-	idx := strings.Index(sourceText[pos:], piece)
-	if idx < 0 {
-		idx = fallbackIndex(sourceText, piece, pos)
-	}
-	start := clamp(pos+idx, 0, sourceLen)
-	end := clamp(start+len(piece), start, sourceLen)
-	return span{start: start, end: end}
-}
-
-func fallbackIndex(sourceText string, piece string, pos int) int {
-	absoluteIdx := strings.Index(sourceText, piece)
-	if absoluteIdx < 0 {
-		return 0
-	}
-	return absoluteIdx - pos
-}
-
-func clamp(value int, minValue int, maxValue int) int {
-	if value < minValue {
-		return minValue
-	}
-	if value > maxValue {
-		return maxValue
-	}
-	return value
-}
-
-func splitText(text string, chunkSize int) []string {
-	pieces := make([]string, 0, max(1, len(text)/chunkSize))
-	recursiveSplitInto(&pieces, text, defaultSeparators, chunkSize)
-	return pieces
-}
-
-func recursiveSplitInto(out *[]string, text string, separators []string, chunkSize int) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return
-	}
-	if len(text) <= chunkSize {
-		*out = append(*out, text)
-		return
-	}
-	if len(separators) == 0 || separators[0] == "" {
-		*out = append(*out, hardSplitByRunes(text, chunkSize)...)
-		return
-	}
-	sep := separators[0]
-	parts := strings.Split(text, sep)
-	mergeSplitPartsInto(splitMergeInput{
-		out:           out,
-		parts:         parts,
-		sep:           sep,
-		remainingSeps: separators[1:],
-		chunkSize:     chunkSize,
-		keepSepLeft:   sep == ".",
-	})
-}
-
-type splitMergeInput struct {
-	out           *[]string
-	parts         []string
-	sep           string
-	remainingSeps []string
-	chunkSize     int
-	keepSepLeft   bool
-}
-
-func mergeSplitPartsInto(input splitMergeInput) {
-	var current strings.Builder
-	current.Grow(input.chunkSize)
-	for _, part := range input.parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
+// bestSplit returns the end offset of the current chunk: the last occurrence
+// of the highest-priority separator within [pos, windowEnd), or windowEnd as
+// a hard cut. The result never exceeds windowEnd, keeping chunks within
+// chunkSize, and always lands on a rune boundary (separators are ASCII).
+func bestSplit(source string, pos, windowEnd int) int {
+	for _, sep := range defaultSeparators {
+		rel := strings.LastIndex(source[pos:windowEnd], sep)
+		if rel < 0 {
 			continue
 		}
-		if current.Len() == 0 {
-			current.WriteString(part)
-			continue
+		if split := pos + rel + len(sep); split > pos && split <= windowEnd {
+			return split
 		}
-		if canMerge(current.Len(), len(part), len(input.sep), input.chunkSize, input.keepSepLeft) {
-			writeMergedPiece(&current, part, input.sep, input.keepSepLeft)
-			continue
-		}
-		if input.keepSepLeft {
-			current.WriteString(input.sep)
-		}
-		flushSplitPiece(input.out, current.String(), input.remainingSeps, input.chunkSize)
-		current.Reset()
-		current.WriteString(part)
 	}
-	if current.Len() > 0 {
-		flushSplitPiece(input.out, current.String(), input.remainingSeps, input.chunkSize)
-	}
+	return windowEnd
 }
 
-func flushSplitPiece(out *[]string, piece string, remainingSeps []string, chunkSize int) {
-	piece = strings.TrimSpace(piece)
-	if piece == "" {
-		return
-	}
-	if len(piece) <= chunkSize {
-		*out = append(*out, piece)
-		return
-	}
-	recursiveSplitInto(out, piece, remainingSeps, chunkSize)
-}
-
-func canMerge(currentLen, partLen, sepLen, chunkSize int, keepSepLeft bool) bool {
-	if keepSepLeft {
-		return currentLen+sepLen+1+partLen <= chunkSize
-	}
-	return currentLen+sepLen+partLen <= chunkSize
-}
-
-func writeMergedPiece(current *strings.Builder, part string, sep string, keepSepLeft bool) {
-	current.WriteString(sep)
-	if keepSepLeft {
-		current.WriteString(" ")
-	}
-	current.WriteString(part)
-}
-
-func hardSplitByRunes(text string, chunkSize int) []string {
-	if len(text) <= chunkSize {
-		return []string{text}
-	}
-	var result []string
-	var current strings.Builder
-	for _, r := range text {
-		runeBytes := utf8.RuneLen(r)
-		if current.Len() > 0 && current.Len()+runeBytes > chunkSize {
-			result = append(result, current.String())
-			current.Reset()
+func skipWhitespaceForward(source string, i int) int {
+	for i < len(source) {
+		r, size := utf8.DecodeRuneInString(source[i:])
+		if r == utf8.RuneError && size <= 1 {
+			break
 		}
-		current.WriteRune(r)
-	}
-	if current.Len() > 0 {
-		if s := strings.TrimSpace(current.String()); s != "" {
-			result = append(result, s)
+		if !unicode.IsSpace(r) {
+			break
 		}
+		i += size
 	}
-	return result
+	return i
+}
+
+func trimTrailingWhitespace(source string, pos, end int) int {
+	e := end
+	for e > pos {
+		r, size := utf8.DecodeLastRuneInString(source[pos:e])
+		if r == utf8.RuneError && size <= 1 {
+			break
+		}
+		if !unicode.IsSpace(r) {
+			break
+		}
+		e -= size
+	}
+	return e
+}
+
+func backToRuneBoundary(source string, pos, i int) int {
+	if i >= len(source) {
+		return len(source)
+	}
+	for i > pos && !utf8.RuneStart(source[i]) {
+		i--
+	}
+	return i
+}
+
+func forwardToRuneBoundary(source string, i, limit int) int {
+	for i < limit && i < len(source) && !utf8.RuneStart(source[i]) {
+		i++
+	}
+	return i
+}
+
+// backToWordStart moves idx back to just after the previous ASCII whitespace
+// so overlap starts on a word boundary. Without whitespace it returns idx
+// (hard cut inside a long token).
+func backToWordStart(source string, lo, idx int) int {
+	if idx <= lo {
+		return idx
+	}
+	if idx > len(source) {
+		idx = len(source)
+	}
+	if j := strings.LastIndexAny(source[lo:idx], " \t\n\r\f\v"); j >= 0 {
+		return lo + j + 1
+	}
+	return idx
+}
+
+func advanceOneRune(source string, pos int) int {
+	if pos >= len(source) {
+		return len(source)
+	}
+	_, size := utf8.DecodeRuneInString(source[pos:])
+	if size <= 0 {
+		return pos + 1
+	}
+	return pos + size
 }
