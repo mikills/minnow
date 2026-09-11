@@ -41,6 +41,7 @@ const (
 	DefaultCodeThrottle       = codeindex.DefaultThrottle
 	DefaultCodeLargeRepoFiles = codeindex.DefaultLargeRepoFiles
 	DefaultTextChunkSize      = textsplit.DefaultChunkSize
+	DefaultTextChunkOverlap   = textsplit.DefaultChunkOverlap
 )
 
 type (
@@ -82,10 +83,13 @@ func buildCodeDocuments(
 	return out, metas, nil
 }
 
-type TextChunker struct{ ChunkSize int }
+type TextChunker struct {
+	ChunkSize    int
+	ChunkOverlap int
+}
 
 func (c TextChunker) Chunk(ctx context.Context, docID string, text string) ([]Chunk, error) {
-	chunks, err := textsplit.Splitter{ChunkSize: c.ChunkSize}.Chunk(ctx, docID, text)
+	chunks, err := textsplit.Splitter{ChunkSize: c.ChunkSize, ChunkOverlap: c.ChunkOverlap}.Chunk(ctx, docID, text)
 	if err != nil {
 		return nil, err
 	}

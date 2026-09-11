@@ -121,18 +121,38 @@ Epsilon section wraps up the discussion with final thoughts and recommendations 
 			assert.Equal(t, chunk.Text, text[chunk.Start:chunk.End],
 				"chunk %d text should match offset range", i)
 
-			// verify no overlap with previous chunk
+			// chunks use sliding-window overlap: each chunk must advance
+			// and either overlap the previous chunk or abut it across
+			// separator whitespace (short chunks carry no overlap).
 			if i > 0 {
-				assert.GreaterOrEqual(
+				assert.Greater(
 					t,
 					chunk.Start,
-					chunks[i-1].End,
-					"chunk %d should not overlap with chunk %d",
+					chunks[i-1].Start,
+					"chunk %d must advance past chunk %d",
 					i,
 					i-1,
 				)
+				if chunk.Start > chunks[i-1].End {
+					assert.Empty(t, strings.TrimSpace(text[chunks[i-1].End:chunk.Start]),
+						"chunk %d must not skip content after chunk %d", i, i-1)
+				}
 			}
 		}
+
+		overlapped := false
+		for i := 1; i < len(chunks); i++ {
+			if chunks[i].Start < chunks[i-1].End {
+				overlapped = true
+				// the repeated region is an exact slice of the source and
+				// a suffix/prefix of the adjacent chunk texts.
+				overlapSrc := text[chunks[i].Start:chunks[i-1].End]
+				assert.NotEmpty(t, strings.TrimSpace(overlapSrc))
+				assert.True(t, strings.HasSuffix(chunks[i-1].Text, overlapSrc))
+				assert.True(t, strings.HasPrefix(chunks[i].Text, overlapSrc))
+			}
+		}
+		assert.True(t, overlapped, "expected sliding-window overlap between chunks")
 
 	})
 
@@ -165,6 +185,58 @@ Epsilon section wraps up the discussion with final thoughts and recommendations 
 				"chunk %d offset mismatch", i)
 			assert.NotEmpty(t, strings.TrimSpace(chunk.Text),
 				"chunk %d should not be only whitespace", i)
+		}
+	})
+
+	t.Run("explicit overlap repeats boundary context", func(t *testing.T) {
+		text := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 20)
+		chunker := kb.TextChunker{ChunkSize: 100, ChunkOverlap: 20}
+
+		chunks, err := chunker.Chunk(context.Background(), "overlap-doc", text)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(chunks), 3)
+
+		for i, chunk := range chunks {
+			assert.LessOrEqual(t, len(chunk.Text), 100)
+			assert.Equal(t, chunk.Text, text[chunk.Start:chunk.End])
+			if i > 0 {
+				assert.Greater(t, chunk.Start, chunks[i-1].Start)
+				assert.LessOrEqual(t, chunk.Start, chunks[i-1].End)
+			}
+		}
+	})
+
+	t.Run("defaults target research sweet spot", func(t *testing.T) {
+		assert.Equal(t, 3000, kb.DefaultTextChunkSize)
+		assert.Equal(t, 300, kb.DefaultTextChunkOverlap)
+
+		text := strings.Repeat("The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. ", 60)
+		chunks, err := kb.TextChunker{}.Chunk(context.Background(), "default-doc", text)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(chunks), 2)
+		for i, chunk := range chunks {
+			assert.LessOrEqual(t, len(chunk.Text), 3000)
+			assert.Equal(t, chunk.Text, text[chunk.Start:chunk.End])
+			if i > 0 {
+				assert.Greater(t, chunk.Start, chunks[i-1].Start)
+			}
+		}
+	})
+
+	t.Run("negative overlap disables repetition", func(t *testing.T) {
+		text := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 20)
+		chunker := kb.TextChunker{ChunkSize: 100, ChunkOverlap: -1}
+
+		chunks, err := chunker.Chunk(context.Background(), "no-overlap-doc", text)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(chunks), 2)
+
+		for i, chunk := range chunks {
+			assert.LessOrEqual(t, len(chunk.Text), 100)
+			if i > 0 {
+				assert.GreaterOrEqual(t, chunk.Start, chunks[i-1].End,
+					"chunk %d should not overlap with chunk %d", i, i-1)
+			}
 		}
 	})
 }
