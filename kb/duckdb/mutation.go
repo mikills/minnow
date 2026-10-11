@@ -15,6 +15,7 @@ import (
 
 	kb "github.com/mikills/minnow/kb"
 	graph "github.com/mikills/minnow/kb/duckdb/internal/graph"
+	"github.com/mikills/minnow/kb/duckdb/internal/reconstruct"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -474,7 +475,7 @@ func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(ctx context.Context, r
 				return fmt.Errorf("reuse local shard for %s: %w", req.kbID, err)
 			}
 		}
-		return f.bootstrapMutableShardDB(ctx, req.kbDir, req.dbPath, req.embeddingDim, req.allowBootstrap)
+		return f.bootstrapMutableShardDB(ctx, req.kbDir, req.dbPath, req.embeddingDim, req.allowBootstrap, manifestVersion)
 	}
 	localVersionPath := localShardManifestVersionPath(req.kbDir)
 	fresh, err := localShardDBIsFresh(req.kbDir, req.dbPath, localVersionPath, manifestVersion)
@@ -494,7 +495,7 @@ func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(ctx context.Context, r
 		return err
 	}
 	if emptied {
-		return f.bootstrapMutableShardDB(ctx, req.kbDir, req.dbPath, req.embeddingDim, req.allowBootstrap)
+		return f.bootstrapMutableShardDB(ctx, req.kbDir, req.dbPath, req.embeddingDim, req.allowBootstrap, manifestVersion)
 	}
 	return f.refreshMutableShardDB(
 		ctx,
@@ -503,7 +504,6 @@ func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(ctx context.Context, r
 			kbDir:            req.kbDir,
 			dbPath:           req.dbPath,
 			localVersionPath: localVersionPath,
-			manifestVersion:  manifestVersion,
 		},
 	)
 }
@@ -540,6 +540,7 @@ func (f *DuckDBArtifactFormat) bootstrapMutableShardDB(
 	dbPath string,
 	embeddingDim int,
 	allowBootstrap bool,
+	manifestVersion string,
 ) error {
 	if !allowBootstrap {
 		return kb.ErrKBUninitialized
@@ -547,7 +548,33 @@ func (f *DuckDBArtifactFormat) bootstrapMutableShardDB(
 	if embeddingDim <= 0 {
 		return fmt.Errorf("embedding dimension must be > 0")
 	}
-	return f.createEmptyMutableShardDBLocked(ctx, kbDir, dbPath, embeddingDim)
+	// A published empty manifest (or deletion of a previously published KB)
+	// must not adopt stale rows from the old cache. An unpublished first-write
+	// cache is retained so streaming batches can accumulate before publication.
+	localVersionPath := localShardManifestVersionPath(kbDir)
+	localVersion, err := readLocalShardManifestVersion(localVersionPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if manifestVersion != "" || localVersion != "" {
+		if err := os.MkdirAll(kbDir, 0o755); err != nil {
+			return err
+		}
+		tmpPath, cleanup, err := reconstruct.TempPath(dbPath)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		if err := f.createEmptyMutableShardDBLocked(ctx, kbDir, tmpPath, embeddingDim); err != nil {
+			return err
+		}
+		if err := os.Rename(tmpPath, dbPath); err != nil {
+			return err
+		}
+	} else if err := f.createEmptyMutableShardDBLocked(ctx, kbDir, dbPath, embeddingDim); err != nil {
+		return err
+	}
+	return writeLocalShardManifestVersion(localVersionPath, manifestVersion)
 }
 
 func localShardDBIsFresh(kbDir string, dbPath string, localVersionPath string, manifestVersion string) (bool, error) {
@@ -571,17 +598,22 @@ type mutableShardRefresh struct {
 	kbDir            string
 	dbPath           string
 	localVersionPath string
-	manifestVersion  string
 }
 
 func (f *DuckDBArtifactFormat) refreshMutableShardDB(ctx context.Context, req mutableShardRefresh) error {
 	if err := os.MkdirAll(req.kbDir, 0o755); err != nil {
 		return err
 	}
-	if _, err := f.downloadSnapshotFromShards(ctx, req.kbID, req.dbPath); err != nil {
+	doc, err := f.downloadSourceManifest(ctx, req.kbID)
+	if err != nil {
 		return err
 	}
-	return writeLocalShardManifestVersion(req.localVersionPath, req.manifestVersion)
+	if _, err := f.downloadSnapshotFromManifest(ctx, req.kbID, req.dbPath, doc.Manifest); err != nil {
+		return err
+	}
+	// Persist the version of the bytes actually reconstructed, not an earlier
+	// HEAD that may have raced another publisher before the manifest GET.
+	return writeLocalShardManifestVersion(req.localVersionPath, doc.Version)
 }
 
 func (f *DuckDBArtifactFormat) createEmptyMutableShardDBLocked(
@@ -685,7 +717,13 @@ func (f *DuckDBArtifactFormat) postMutationCommitWithRetry(
 	}
 
 	var sourceInfo *snapshotSourceInfo
+	var expectedManifestVersion string
 	if opts.upload {
+		var err error
+		expectedManifestVersion, err = readLocalShardManifestVersion(localShardManifestVersionPath(kbDir))
+		if err != nil {
+			return fmt.Errorf("read mutation base manifest version: %w", err)
+		}
 		info, err := inspectSnapshotSource(ctx, db)
 		if err != nil {
 			return err
@@ -699,7 +737,7 @@ func (f *DuckDBArtifactFormat) postMutationCommitWithRetry(
 	}
 
 	if opts.upload {
-		if err := f.publishMutationSnapshotWithBackoff(ctx, mutationPublishRequest{kbID: opts.kbID, kbDir: kbDir, dbPath: dbPath, targetShardBytes: opts.targetShardBytes, maxAttempts: opts.maxAttempts, sourceInfo: sourceInfo}); err != nil {
+		if err := f.publishMutationSnapshotWithBackoff(ctx, mutationPublishRequest{kbID: opts.kbID, kbDir: kbDir, dbPath: dbPath, targetShardBytes: opts.targetShardBytes, maxAttempts: opts.maxAttempts, sourceInfo: sourceInfo, expectedManifestVersion: expectedManifestVersion}); err != nil {
 			return err
 		}
 		// Before the housekeeping below, whose failure would otherwise leave
@@ -758,6 +796,8 @@ type mutationPublishRequest struct {
 	// Immutable for this publish and its retries: the caller holds the KB lock,
 	// and the inspected mutation has been checkpointed and closed.
 	sourceInfo *snapshotSourceInfo
+	// Fixed for every attempt. A new HEAD is not a rebase of the local rows.
+	expectedManifestVersion string
 }
 
 func (f *DuckDBArtifactFormat) publishMutationSnapshotWithBackoff(
@@ -793,7 +833,14 @@ const (
 	transientPublishCapDelay    = 2 * time.Second
 )
 
+var errMutationBaseChanged = fmt.Errorf("mutation source manifest changed: %w", kb.ErrBlobVersionMismatch)
+
 func (s *mutationPublishRetry) retry(ctx context.Context, kbID string, attempt int, err error) bool {
+	// Only retry a fixed snapshot while its base is still current. Reapplying
+	// a mutation requires a whole-operation retry, not another snapshot upload.
+	if errors.Is(err, errMutationBaseChanged) {
+		return false
+	}
 	shouldRetry := errors.Is(err, kb.ErrBlobVersionMismatch) || isTransientBlobError(err)
 	if !shouldRetry {
 		return false
@@ -813,9 +860,12 @@ func (f *DuckDBArtifactFormat) publishMutationSnapshotAttempt(
 	ctx context.Context,
 	req mutationPublishRequest,
 ) (string, int, error) {
-	expectedManifestVersion, err := f.deps.ManifestStore.HeadVersion(ctx, req.kbID)
+	currentVersion, err := f.deps.ManifestStore.HeadVersion(ctx, req.kbID)
 	if err != nil {
 		return "", 0, err
+	}
+	if currentVersion != req.expectedManifestVersion {
+		return "", 0, errMutationBaseChanged
 	}
 	artifacts, err := f.buildArtifacts(ctx, req.kbID, req.dbPath, req.targetShardBytes, req.sourceInfo)
 	if err != nil {
@@ -824,7 +874,7 @@ func (f *DuckDBArtifactFormat) publishMutationSnapshotAttempt(
 	if err := f.auditStagedShardBlobs(ctx, artifacts); err != nil {
 		return "", 0, err
 	}
-	newVersion, err := f.publishMutationManifest(ctx, req.kbID, artifacts, expectedManifestVersion)
+	newVersion, err := f.publishMutationManifest(ctx, req.kbID, artifacts, req.expectedManifestVersion)
 	if err != nil {
 		return "", 0, err
 	}

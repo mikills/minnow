@@ -13,6 +13,9 @@ import (
 )
 
 func TestManifest(t *testing.T) {
+	t.Run("create", testManifestCreate)
+	t.Run("missing_create_support", testMissingCreateSupport)
+
 	t.Run("key is format agnostic", func(t *testing.T) {
 		require.Equal(t, "kb.duckdb.manifest.json", ShardManifestKey("kb"))
 	})

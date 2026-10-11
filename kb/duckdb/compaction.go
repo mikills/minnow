@@ -117,6 +117,7 @@ type builtCompactionShard struct {
 	graphAvailable bool
 	centroid       []float32
 	sha            string
+	mediaIDs       []string
 }
 
 func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(
@@ -153,6 +154,7 @@ func (f *DuckDBArtifactFormat) buildAndUploadCompactionReplacement(
 		GraphAvailable: built.graphAvailable,
 		Centroid:       built.centroid,
 		SHA256:         built.sha,
+		MediaIDs:       built.mediaIDs,
 	}, nil
 }
 
@@ -180,6 +182,10 @@ func (f *DuckDBArtifactFormat) buildCompactionShard(ctx context.Context, tmpDir 
 		return builtCompactionShard{}, err
 	}
 	graphAvailable := hasGraphQueryData(ctx, db)
+	mediaIDs, err := collectShardMediaIDs(ctx, db)
+	if err != nil {
+		return builtCompactionShard{}, fmt.Errorf("collect compacted shard media ids: %w", err)
+	}
 	if err := CheckpointAndCloseDB(ctx, db, "close compacted shard db"); err != nil {
 		return builtCompactionShard{}, err
 	}
@@ -187,7 +193,7 @@ func (f *DuckDBArtifactFormat) buildCompactionShard(ctx context.Context, tmpDir 
 	if err != nil {
 		return builtCompactionShard{}, err
 	}
-	return builtCompactionShard{path: combinedPath, vectorRows: vectorRows, sizeBytes: info.Size(), graphAvailable: graphAvailable, centroid: c, sha: sha}, nil
+	return builtCompactionShard{path: combinedPath, vectorRows: vectorRows, sizeBytes: info.Size(), graphAvailable: graphAvailable, centroid: c, sha: sha, mediaIDs: mediaIDs}, nil
 }
 
 func (f *DuckDBArtifactFormat) mergeCompactionShards(

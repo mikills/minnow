@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -145,11 +146,58 @@ func (s *BlobStoreManifest) UpsertIfMatch(
 	if err != nil {
 		return "", err
 	}
+	if expectedVersion == "" {
+		info, err := s.createManifest(ctx, s.manifestKey(kbID), data)
+		if err != nil {
+			return "", err
+		}
+		return info.Version, nil
+	}
 	info, err := s.Store.UploadBytesIfMatch(ctx, s.manifestKey(kbID), data, expectedVersion)
 	if err != nil {
 		return "", err
 	}
 	return info.Version, nil
+}
+
+// Blob uploads with an empty expected version are unconditional, unlike the
+// manifest contract. Use an atomic create primitive, never HEAD-then-overwrite.
+func (s *BlobStoreManifest) createManifest(ctx context.Context, key string, data []byte) (*blobstore.ObjectInfo, error) {
+	if creator, ok := s.Store.(interface {
+		UploadBytesIfNotExists(context.Context, string, []byte) (*blobstore.ObjectInfo, error)
+	}); ok {
+		return creator.UploadBytesIfNotExists(ctx, key, data)
+	}
+	if creator, ok := s.Store.(interface {
+		UploadIfNotExists(context.Context, string, string) (*blobstore.ObjectInfo, error)
+	}); ok {
+		file, err := os.CreateTemp("", "minnow-manifest-*")
+		if err != nil {
+			return nil, err
+		}
+		defer os.Remove(file.Name())
+		if _, err := file.Write(data); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if err := file.Close(); err != nil {
+			return nil, err
+		}
+		return creator.UploadIfNotExists(ctx, key, file.Name())
+	}
+	// Wrappers may expose only the ordinary blob-store interface, whose Copy
+	// operation still has an explicit create-only precondition.
+	if copier, ok := s.Store.(interface {
+		Copy(context.Context, string, string, blobstore.CopyOptions) (*blobstore.ObjectInfo, error)
+	}); ok {
+		stagedKey := key + ".staged-" + cryptorand.Text()
+		defer s.Store.Delete(context.WithoutCancel(ctx), stagedKey)
+		if _, err := s.Store.UploadBytesIfMatch(ctx, stagedKey, data, ""); err != nil {
+			return nil, err
+		}
+		return copier.Copy(ctx, stagedKey, key, blobstore.CopyOptions{CreateOnly: true})
+	}
+	return nil, fmt.Errorf("manifest store requires atomic create support")
 }
 
 func (s *BlobStoreManifest) Delete(ctx context.Context, kbID string) error {
