@@ -23,6 +23,22 @@ func (f *DuckDBArtifactFormat) BuildArtifacts(
 	kbID, srcPath string,
 	targetBytes int64,
 ) ([]kb.SnapshotShardMetadata, error) {
+	return f.buildArtifacts(ctx, kbID, srcPath, targetBytes, nil)
+}
+
+// snapshotSourceInfo is captured before closing a mutation DB. Public snapshot
+// builds have no pre-inspection and inspect the closed source file themselves.
+type snapshotSourceInfo struct {
+	hasTombstones bool
+	activeRows    int64
+}
+
+func (f *DuckDBArtifactFormat) buildArtifacts(
+	ctx context.Context,
+	kbID, srcPath string,
+	targetBytes int64,
+	sourceInfo *snapshotSourceInfo,
+) ([]kb.SnapshotShardMetadata, error) {
 	// Once, before the loop. Checking per shard aborts a snapshot midway and
 	// strands the shards already uploaded.
 	if err := f.budget().AdmitBuild(); err != nil {
@@ -36,7 +52,7 @@ func (f *DuckDBArtifactFormat) BuildArtifacts(
 		return nil, err
 	}
 	prefix := fmt.Sprintf("%s.duckdb.shards/%s", kbID, dbHash[:16])
-	parts, _, err := f.uploadQueryableSnapshotShards(ctx, prefix, srcPath, targetBytes)
+	parts, _, err := f.uploadQueryableSnapshotShards(ctx, prefix, srcPath, targetBytes, sourceInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -47,11 +63,16 @@ func (f *DuckDBArtifactFormat) uploadQueryableSnapshotShards(
 	ctx context.Context,
 	prefix, localDBPath string,
 	partSize int64,
+	sourceInfo *snapshotSourceInfo,
 ) ([]kb.SnapshotShardMetadata, int64, error) {
-	hasTombstones, activeRows, err := f.inspectSnapshotSourceDB(ctx, localDBPath)
-	if err != nil {
-		return nil, 0, err
+	if sourceInfo == nil {
+		info, err := f.inspectSnapshotSourceDB(ctx, localDBPath)
+		if err != nil {
+			return nil, 0, err
+		}
+		sourceInfo = &info
 	}
+	hasTombstones, activeRows := sourceInfo.hasTombstones, sourceInfo.activeRows
 	if activeRows <= 0 {
 		// Every row was deleted. Refusing here means the delete that removes
 		// the last document can never succeed.
@@ -110,22 +131,26 @@ func (f *DuckDBArtifactFormat) uploadQueryableSnapshotShards(
 // active docs, then closes it before returning. DuckDB v1.5+ does not allow
 // a file to be open by multiple database handles simultaneously, and shard
 // building ATTACHes localDBPath from a separate handle.
-func (f *DuckDBArtifactFormat) inspectSnapshotSourceDB(ctx context.Context, localDBPath string) (bool, int64, error) {
+func (f *DuckDBArtifactFormat) inspectSnapshotSourceDB(ctx context.Context, localDBPath string) (snapshotSourceInfo, error) {
 	sourceDB, err := f.openConfiguredDB(ctx, localDBPath)
 	if err != nil {
-		return false, 0, err
+		return snapshotSourceInfo{}, err
 	}
 	defer sourceDB.Close()
+	return inspectSnapshotSource(ctx, sourceDB)
+}
 
-	hasTombstones, err := tableExists(ctx, sourceDB, "doc_tombstones")
+// inspectSnapshotSource borrows the handle; it never closes or changes it.
+func inspectSnapshotSource(ctx context.Context, db *sql.DB) (snapshotSourceInfo, error) {
+	hasTombstones, err := tableExists(ctx, db, "doc_tombstones")
 	if err != nil {
-		return false, 0, err
+		return snapshotSourceInfo{}, err
 	}
-	activeRows, err := shardbuild.CountActiveDocs(ctx, sourceDB, hasTombstones)
+	activeRows, err := shardbuild.CountActiveDocs(ctx, db, hasTombstones)
 	if err != nil {
-		return false, 0, err
+		return snapshotSourceInfo{}, err
 	}
-	return hasTombstones, activeRows, nil
+	return snapshotSourceInfo{hasTombstones: hasTombstones, activeRows: activeRows}, nil
 }
 
 func planShardRowCount(localDBPath string, activeRows, partSize int64) (int, error) {
@@ -158,7 +183,7 @@ func (f *DuckDBArtifactFormat) buildAndUploadOneSnapshotShard(
 	ctx context.Context,
 	input snapshotShardBuildInput,
 ) (kb.SnapshotShardMetadata, int64, string, error) {
-	vectorRows, graphAvailable, nextDocID, centroid, err := f.buildShardDBFromSourceRange(
+	built, err := f.buildShardDBFromSourceRange(
 		ctx,
 		shardSourceRange{
 			sourceDBPath:  input.localDBPath,
@@ -171,8 +196,8 @@ func (f *DuckDBArtifactFormat) buildAndUploadOneSnapshotShard(
 	if err != nil {
 		return kb.SnapshotShardMetadata{}, 0, "", err
 	}
-	if vectorRows <= 0 {
-		return kb.SnapshotShardMetadata{}, 0, nextDocID, nil
+	if built.vectorRows <= 0 {
+		return kb.SnapshotShardMetadata{}, 0, built.lastDocID, nil
 	}
 
 	sha, err := kb.FileContentSHA256(ctx, input.shardPath)
@@ -190,24 +215,20 @@ func (f *DuckDBArtifactFormat) buildAndUploadOneSnapshotShard(
 	}
 
 	now := time.Now().UTC()
-	mediaIDs, mediaErr := collectShardMediaIDs(ctx, input.shardPath, f.openConfiguredDB)
-	if mediaErr != nil {
-		return kb.SnapshotShardMetadata{}, 0, "", fmt.Errorf("collect shard media ids: %w", mediaErr)
-	}
 	return kb.SnapshotShardMetadata{
 		ShardID:        fmt.Sprintf("shard-%05d", input.shardIndex),
 		Key:            partKey,
 		Version:        uploadInfo.Version,
 		SizeBytes:      info.Size(),
-		VectorRows:     vectorRows,
+		VectorRows:     built.vectorRows,
 		CreatedAt:      now,
 		SealedAt:       now,
 		TombstoneRatio: 0,
-		GraphAvailable: graphAvailable,
-		Centroid:       centroid,
+		GraphAvailable: built.graphAvailable,
+		Centroid:       built.centroid,
 		SHA256:         sha,
-		MediaIDs:       mediaIDs,
-	}, vectorRows, nextDocID, nil
+		MediaIDs:       built.mediaIDs,
+	}, built.vectorRows, built.lastDocID, nil
 }
 
 type shardSourceRange struct {
@@ -218,12 +239,20 @@ type shardSourceRange struct {
 	lastDocID     string
 }
 
+type builtSnapshotShard struct {
+	vectorRows     int64
+	graphAvailable bool
+	lastDocID      string
+	centroid       []float32
+	mediaIDs       []string
+}
+
 func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(
 	ctx context.Context,
 	source shardSourceRange,
-) (int64, bool, string, []float32, error) {
+) (builtSnapshotShard, error) {
 	if err := shardbuild.ValidateLimit(source.limit); err != nil {
-		return 0, false, "", nil, err
+		return builtSnapshotShard{}, err
 	}
 	threads, releaseThreads := f.budget().AcquireBuildThreads(ctx, f.buildThreads())
 	defer releaseThreads()
@@ -232,50 +261,56 @@ func (f *DuckDBArtifactFormat) buildShardDBFromSourceRange(
 	}
 	shardDB, err := shardbuild.OpenAttached(ctx, source.sourceDBPath, source.shardPath, openBuild)
 	if err != nil {
-		return 0, false, "", nil, err
+		return builtSnapshotShard{}, err
 	}
 	defer shardDB.Close()
 	defer shardbuild.DetachSource(ctx, shardDB)
 
 	if err := shardbuild.CopyRowRange(ctx, shardDB, source.hasTombstones, source.limit, source.lastDocID); err != nil {
-		return 0, false, "", nil, logDuckDBMemoryOnError(ctx, shardDB, "shard_copy_rows", err)
+		return builtSnapshotShard{}, logDuckDBMemoryOnError(ctx, shardDB, "shard_copy_rows", err)
 	}
 
 	if err := buildShardIndexes(ctx, shardDB); err != nil {
-		return 0, false, "", nil, err
+		return builtSnapshotShard{}, err
 	}
 
 	if err := shardbuild.CopyGraphTables(ctx, shardDB, EnsureGraphTables); err != nil {
-		return 0, false, "", nil, err
+		return builtSnapshotShard{}, err
 	}
 
 	rowCount, empty, err := shardRowCountOrClose(ctx, shardDB)
 	if err != nil || empty {
-		return rowCount, false, source.lastDocID, nil, err
+		return builtSnapshotShard{vectorRows: rowCount, lastDocID: source.lastDocID}, err
 	}
 	maxDocID, err := shardbuild.MaxDocID(ctx, shardDB)
 	if err != nil {
-		return 0, false, "", nil, err
+		return builtSnapshotShard{}, err
 	}
-	graphAvailable, centroid, err := finalizeBuiltShardDB(ctx, shardDB)
+	built, err := finalizeBuiltShardDB(ctx, shardDB)
 	if err != nil {
-		return 0, false, "", nil, err
+		return builtSnapshotShard{}, err
 	}
-	return rowCount, graphAvailable, maxDocID, centroid, nil
+	built.vectorRows = rowCount
+	built.lastDocID = maxDocID
+	return built, nil
 }
 
-func finalizeBuiltShardDB(ctx context.Context, db *sql.DB) (bool, []float32, error) {
-	centroid, err := centroid.Compute(ctx, db)
+func finalizeBuiltShardDB(ctx context.Context, db *sql.DB) (builtSnapshotShard, error) {
+	c, err := centroid.Compute(ctx, db)
 	if err != nil {
-		return false, nil, err
+		return builtSnapshotShard{}, err
 	}
 	graphAvailable := hasGraphQueryData(ctx, db)
-	// NOTE: SnapshotShardMetadata.MediaIDs is populated at manifest-publish
-	// time by walking docs.media_refs. See collectShardMediaIDs.
-	if err := CheckpointAndCloseDB(ctx, db, "close shard db"); err != nil {
-		return false, nil, err
+	mediaIDs, err := collectShardMediaIDs(ctx, db)
+	if err != nil {
+		return builtSnapshotShard{}, fmt.Errorf("collect shard media ids: %w", err)
 	}
-	return graphAvailable, centroid, nil
+	// Finish all reads on the build handle before closing it. The file must be
+	// checkpointed and closed before its hash, size, and upload are calculated.
+	if err := CheckpointAndCloseDB(ctx, db, "close shard db"); err != nil {
+		return builtSnapshotShard{}, err
+	}
+	return builtSnapshotShard{graphAvailable: graphAvailable, centroid: c, mediaIDs: mediaIDs}, nil
 }
 
 func shardRowCountOrClose(ctx context.Context, db *sql.DB) (int64, bool, error) {
@@ -287,18 +322,12 @@ func shardRowCountOrClose(ctx context.Context, db *sql.DB) (int64, bool, error) 
 }
 
 // collectShardMediaIDs scans docs.media_refs for a shard file and returns
-// the unique media ids it references. Called when sealing a shard so the
-// manifest can carry the ids for pending-media GC promotion.
+// the unique media ids it references. It borrows the build handle so sealing
+// does not reopen a database just to populate pending-media GC metadata.
 func collectShardMediaIDs(
 	ctx context.Context,
-	shardPath string,
-	openDB func(context.Context, string) (*sql.DB, error),
+	db *sql.DB,
 ) ([]string, error) {
-	db, err := openDB(ctx, shardPath)
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
 	rows, err := db.QueryContext(ctx, `SELECT media_refs FROM docs WHERE media_refs IS NOT NULL AND media_refs != ''`)
 	if err != nil {
 		return nil, err
