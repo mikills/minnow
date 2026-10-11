@@ -119,13 +119,15 @@ func TestBackupAdv(t *testing.T) {
 	t.Run("shardkey_reject", func(t *testing.T) {
 		ctx := context.Background()
 		loader, _ := newOrphanKB(t)
+		version := ""
 		for _, bad := range []string{"../evil", "/abs", "a/../b", "a\\b"} {
-			_, err := loader.ManifestStore.UpsertIfMatch(ctx, "kb", SnapshotShardManifest{
+			nextVersion, err := loader.ManifestStore.UpsertIfMatch(ctx, "kb", SnapshotShardManifest{
 				SchemaVersion: 1, FormatKind: "duckdb_sharded", FormatVersion: 2,
 				KBID: "kb", CreatedAt: time.Now().UTC(),
 				Shards: []SnapshotShardMetadata{{ShardID: "s", Key: bad, Version: "v", SizeBytes: 1, SHA256: "ab"}},
-			}, "")
+			}, version)
 			require.NoError(t, err)
+			version = nextVersion
 			_, err = loader.CreateBackup(ctx, "kb", "b1")
 			require.Error(t, err)
 			require.ErrorIs(t, err, ErrBackupCorrupt, "key %q", bad)

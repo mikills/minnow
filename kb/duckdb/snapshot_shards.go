@@ -366,8 +366,19 @@ func (f *DuckDBArtifactFormat) downloadSnapshotFromShards(
 		return nil, err
 	}
 
-	manifest, err := f.downloadSourceManifest(ctx, kbID)
+	doc, err := f.downloadSourceManifest(ctx, kbID)
 	if err != nil {
+		return nil, err
+	}
+	return f.downloadSnapshotFromManifest(ctx, kbID, dest, doc.Manifest)
+}
+
+func (f *DuckDBArtifactFormat) downloadSnapshotFromManifest(
+	ctx context.Context,
+	kbID, dest string,
+	manifest kb.SnapshotShardManifest,
+) (*kb.SnapshotShardManifest, error) {
+	if err := validateSnapshotDownload(kbID, dest); err != nil {
 		return nil, err
 	}
 
@@ -438,20 +449,20 @@ func validateSnapshotDownload(kbID string, dest string) error {
 func (f *DuckDBArtifactFormat) downloadSourceManifest(
 	ctx context.Context,
 	kbID string,
-) (kb.SnapshotShardManifest, error) {
+) (*kb.ManifestDocument, error) {
 	doc, err := f.deps.ManifestStore.Get(ctx, kbID)
 	if err != nil {
-		return kb.SnapshotShardManifest{}, err
+		return nil, err
 	}
 	manifest := doc.Manifest
 	if err := f.validateManifestFormat(&manifest); err != nil {
-		return kb.SnapshotShardManifest{}, err
+		return nil, err
 	}
 	f.deps.Metrics.RecordShardCount(kbID, len(manifest.Shards))
 	if len(manifest.Shards) == 0 {
-		return kb.SnapshotShardManifest{}, fmt.Errorf("manifest has no shards")
+		return nil, fmt.Errorf("manifest has no shards")
 	}
-	return manifest, nil
+	return doc, nil
 }
 
 // reconstructMaxBytes bounds one reconstruct group. Normalized policy always

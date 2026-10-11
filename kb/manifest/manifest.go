@@ -41,6 +41,8 @@ type Document struct {
 type Store interface {
 	Get(ctx context.Context, kbID string) (*Document, error)
 	HeadVersion(ctx context.Context, kbID string) (string, error)
+	// An empty expectedVersion creates only if absent; a nonempty version
+	// replaces only that version. Neither path may overwrite another writer.
 	UpsertIfMatch(ctx context.Context, kbID string, manifest ShardManifest, expectedVersion string) (string, error)
 	Delete(ctx context.Context, kbID string) error
 }
