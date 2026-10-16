@@ -221,17 +221,29 @@ func testDuckDBExtensionDirParse(t *testing.T) {
 	})
 }
 
-// TestOfflineExtensionLoadAll verifies that every pre-downloaded extension
-// can be loaded offline without downloading.
-func TestOfflineExtensionLoadAll(t *testing.T) {
+// TestExtensions verifies bundled extensions load without downloading.
+func TestExtensions(t *testing.T) {
+	t.Run("offline", testOfflineExtensions)
+}
+
+func testOfflineExtensions(t *testing.T) {
 	localExtDir := ResolveExtensionDir()
 	if localExtDir == "" {
 		t.Skip("pre-downloaded extensions not found")
 	}
 
-	// Discover extensions from the resolved directory by scanning for
-	// *.duckdb_extension files under the platform subdirectory.
-	entries, err := filepath.Glob(filepath.Join(localExtDir, "*", "*", "*.duckdb_extension"))
+	probe, err := sql.Open("duckdb", "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = probe.Close() })
+	var version, platform string
+	require.NoError(t, probe.QueryRow(`SELECT version()`).Scan(&version))
+	require.Equal(t, connection.NativeVersion, version, "use bash scripts/duckdb.sh test to link the actual 2.0 library")
+	require.NoError(t, probe.QueryRow(`PRAGMA platform`).Scan(&platform))
+	t.Logf("DuckDB %s, platform %s", version, platform)
+
+	// Only audit the running engine/platform. PGQ is optional and old bundles
+	// for other engines must not make it mandatory for this one.
+	entries, err := filepath.Glob(filepath.Join(localExtDir, version, platform, "*.duckdb_extension"))
 	require.NoError(t, err)
 
 	seen := map[string]bool{}
@@ -240,6 +252,9 @@ func TestOfflineExtensionLoadAll(t *testing.T) {
 		seen[name] = true
 	}
 	require.NotEmpty(t, seen, "expected at least one extension in %s", localExtDir)
+	for _, required := range []string{"vss", "fts", "httpfs"} {
+		require.True(t, seen[required], "missing required bundled extension %s for %s/%s", required, version, platform)
+	}
 
 	for ext := range seen {
 		t.Run(ext, func(t *testing.T) {
@@ -248,22 +263,23 @@ func TestOfflineExtensionLoadAll(t *testing.T) {
 			db, err := sql.Open("duckdb", dbPath)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = db.Close() })
+			db.SetMaxOpenConns(1)
 
 			_, err = db.Exec(fmt.Sprintf(`SET extension_directory = '%s'`, connection.QuoteSQLString(localExtDir)))
 			require.NoError(t, err)
 
-			_, err = db.Exec(`SET autoinstall_known_extensions = false`)
-			require.NoError(t, err)
+			require.NoError(t, connection.DisableImplicitExtensionLoading(t.Context(), db))
 
 			_, err = db.Exec(fmt.Sprintf(`LOAD %s`, ext))
 			require.NoError(t, err, "%s extension should load offline without downloading", ext)
 
-			var installed bool
+			var installed, loaded bool
 			err = db.QueryRow(fmt.Sprintf(
-				`SELECT installed FROM duckdb_extensions() WHERE extension_name = '%s'`, ext,
-			)).Scan(&installed)
+				`SELECT installed, loaded FROM duckdb_extensions() WHERE extension_name = '%s'`, ext,
+			)).Scan(&installed, &loaded)
 			require.NoError(t, err)
 			require.True(t, installed, "%s extension should be installed", ext)
+			require.True(t, loaded, "%s extension should be loaded", ext)
 		})
 	}
 }
@@ -520,5 +536,7 @@ func testHNSWQueryPlanUsesHNSWScan(t *testing.T) {
 
 	planText := plan.String()
 	t.Logf("query plan:\n%s", planText)
-	require.Contains(t, planText, "HNSW_INDEX_SCAN", "expected HNSW_INDEX_SCAN in query plan — ORDER BY array_distance may not be triggering the VSS optimizer rule")
+	// DuckDB 2.0 renders operator names in title case with spaces.
+	operatorText := strings.ToUpper(strings.ReplaceAll(planText, " ", "_"))
+	require.Contains(t, operatorText, "HNSW_INDEX_SCAN", "expected an HNSW index scan — ORDER BY array_distance may not be triggering the VSS optimizer rule")
 }

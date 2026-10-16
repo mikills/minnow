@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	_ "github.com/duckdb/duckdb-go/v2"
+	_ "github.com/mikills/minnow/kb/duckdb/internal/connection"
 	"github.com/stretchr/testify/require"
 )
 

@@ -30,6 +30,8 @@ testdata
 examples
 sim
 BENCHMARK.md
-extensions/v1.5.0/osx_arm64
+extensions/v1.5.0
 /minnow
 /codeindex/codeindex
+/.cache
+extensions/v2.0.0-alpha45672/osx_arm64

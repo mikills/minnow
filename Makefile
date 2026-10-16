@@ -1,21 +1,27 @@
 SHELL := /bin/bash
 
-.PHONY: test build run fmt release release-major
+.PHONY: test build run install fmt release release-major
 
 GOFILES := $(shell find . -name '*.go' -not -path './testdata/*')
 GOLINES := go run github.com/segmentio/golines@latest
 MAX_LEN ?= 120
+DUCKDB_GO := bash scripts/duckdb.sh
+ARGS ?=
 
 test:
-	go test ./... -v -race -count=1
+	$(DUCKDB_GO) test ./... -v -race -count=1 -timeout 25m
 	go test ./codeindex/... -count=1
 
 build:
-	GOWORK=off go build ./...
+	GOWORK=off $(DUCKDB_GO) build ./...
+	GOWORK=off $(DUCKDB_GO) build -o minnow .
 	go build -o /tmp/minnow-codeindex ./codeindex
 
 run:
-	go run .
+	$(DUCKDB_GO) run . $(ARGS)
+
+install:
+	$(DUCKDB_GO) install .
 
 fmt:
 	$(GOLINES) --max-len=$(MAX_LEN) -w .

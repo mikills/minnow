@@ -9,6 +9,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRuntime(t *testing.T) {
+	db, err := Open(t.Context(), "", Config{
+		ExtensionDir: ResolveExtensionDir(),
+		OfflineExt:   true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	t.Run("native", func(t *testing.T) {
+		var version, sourceID, codename string
+		require.NoError(t, db.QueryRowContext(t.Context(), `PRAGMA version`).Scan(&version, &sourceID, &codename))
+		require.Equal(t, NativeVersion, version)
+		require.Equal(t, "f2f9329721", sourceID)
+		t.Logf("DuckDB %s (%s)", version, sourceID)
+	})
+
+	t.Run("extension_policy", func(t *testing.T) {
+		for _, setting := range []string{"allow_unsigned_extensions", "autoinstall_known_extensions", "autoload_known_extensions"} {
+			var enabled bool
+			require.NoError(t, db.QueryRowContext(t.Context(), `SELECT current_setting(?)`, setting).Scan(&enabled))
+			require.False(t, enabled, "%s must remain disabled", setting)
+		}
+	})
+}
+
 func TestNormalizeMemoryLimit(t *testing.T) {
 	got, err := NormalizeMemoryLimit("")
 	require.NoError(t, err)
@@ -67,8 +92,10 @@ func TestTempDir(t *testing.T) {
 		dir := t.TempDir()
 		spill := filepath.Join(dir, "spill")
 		db, err := Open(t.Context(), filepath.Join(dir, "t.duckdb"), Config{
-			MemoryLimit: "128MB",
-			TempDir:     spill,
+			MemoryLimit:  "128MB",
+			TempDir:      spill,
+			ExtensionDir: ResolveExtensionDir(),
+			OfflineExt:   true,
 		})
 		require.NoError(t, err)
 		defer db.Close()
