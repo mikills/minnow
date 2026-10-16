@@ -16,6 +16,9 @@ import (
 
 const DefaultExtensionDir = "extensions"
 
+// NativeVersion is pinned together with scripts/duckdb.sh and bundled extensions.
+const NativeVersion = "v2.0.0-alpha45672"
+
 func ResolveExtensionDir() string {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -97,6 +100,13 @@ func (c *closingConnector) Close() error {
 }
 
 func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
+	var version, sourceID, codename string
+	if err := db.QueryRowContext(ctx, `PRAGMA version`).Scan(&version, &sourceID, &codename); err != nil {
+		return fmt.Errorf("read DuckDB runtime version: %w", err)
+	}
+	if version != NativeVersion {
+		return fmt.Errorf("DuckDB runtime %s does not match %s; rebuild with make build or bash scripts/duckdb.sh build", version, NativeVersion)
+	}
 	if cfg.ExtensionDir != "" {
 		if _, err := db.ExecContext(ctx, fmt.Sprintf(`SET extension_directory = '%s'`, QuoteSQLString(cfg.ExtensionDir))); err != nil {
 			return fmt.Errorf("set extension_directory: %w", err)

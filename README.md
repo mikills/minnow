@@ -32,14 +32,15 @@ docker compose up -d              # pulls ghcr.io/mikills/minnow
 curl -s http://127.0.0.1:8080/healthz
 ```
 
-From a source checkout, `go run .` serves the same thing, and
+From a source checkout, `make run` serves the same thing, and
 `docker compose -f compose.yaml -f compose.build.yaml up --build` builds the
 image locally instead of pulling it.
 
 For globally installed MCP use with OpenAI embeddings:
 
 ```bash
-go install github.com/mikills/minnow@latest
+# From this checkout (links the pinned DuckDB 2.0 alpha):
+make install
 go install github.com/mikills/minnow/codeindex@latest
 $(go env GOPATH)/bin/minnow setup
 minnow config init dev-openai
@@ -78,13 +79,37 @@ with `CODEINDEX_MINNOW_URL`, or either identity with `--kb`/`--index-key`.
 The default `minnow.yaml` also exposes MCP for coding agents:
 
 - Streamable HTTP: `http://127.0.0.1:8080/mcp`
-- Stdio: `go run . mcp stdio`
+- Stdio: `make run ARGS="mcp stdio"`
 
 Codex CLI, Claude Code, and OpenCode can connect directly to a hosted streamable
 HTTP endpoint; see [MCP endpoints](docs/getting-started.md#mcp-endpoints) for
 verified registration commands and token handling.
 
 The default config at `./minnow.yaml` is sufficient for local development (embedder-only, no external services). See [`docs/getting-started.md`](docs/getting-started.md) for a deployment-grade setup.
+
+### DuckDB 2.0 preview
+
+This checkout uses **DuckDB v2.0.0-alpha45672**, not a stable 2.0 release.
+`make build`, `make run`, `make install`, and `make test` link the actual native
+library using `scripts/duckdb.sh`. The first build downloads a checksum-pinned
+static archive into `.cache/duckdb/`; later builds and runtime extension loads
+work offline. Docker uses the same setup. Supported platforms are macOS ARM64
+and Linux AMD64.
+
+For other Go commands, use `bash scripts/duckdb.sh test ./kb/duckdb/...` (or
+`build`, `run`, `install`, etc.). Plain `go build`/`go install` still select an
+upstream preview archive containing DuckDB 1.5.4; database configuration rejects
+that mismatch rather than silently running the wrong engine.
+
+The bundled 2.0 extensions are `vss`, `fts`, and `httpfs`. DuckPGQ is not bundled
+for this alpha; graph expansion uses the existing BFS implementation by default.
+Keep `UseDuckPGQ` false. Back up existing data before trying an alpha; don't use
+it for production or assume files written by 2.0 can be reopened with 1.5.
+
+On Apple Silicon, Docker Desktop's default AMD64 emulation can report invalid
+extension signatures for this preview even when the signatures are valid.
+The same Linux binaries load successfully under QEMU. Use native Linux AMD64
+or QEMU for container validation; do not enable `allow_unsigned_extensions`.
 
 ## What it does
 

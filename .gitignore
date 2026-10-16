@@ -33,3 +33,6 @@ todo.md
 /codeindex/codeindex
 
 .claude/
+
+# Checksum-verified native DuckDB archives, downloaded by scripts/duckdb.sh
+/.cache/duckdb/

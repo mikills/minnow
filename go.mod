@@ -10,7 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.0
 	github.com/aws/smithy-go v1.24.0
 	github.com/charmbracelet/bubbletea v1.3.10
-	github.com/duckdb/duckdb-go/v2 v2.10500.0
+	github.com/duckdb/duckdb-go/v2 v2.20000.0-6.preview
 	github.com/google/jsonschema-go v0.4.2
 	github.com/google/uuid v1.6.0
 	github.com/johannesboyne/gofakes3 v0.0.0-20250916175020-ebf3e50324d3
@@ -52,12 +52,12 @@ require (
 	github.com/charmbracelet/x/term v0.2.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
-	github.com/duckdb/duckdb-go-bindings v0.10500.0 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64 v0.10500.0 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.10500.0 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/linux-amd64 v0.10500.0 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/linux-arm64 v0.10500.0 // indirect
-	github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.10500.0 // indirect
+	github.com/duckdb/duckdb-go-bindings v0.20000.0-3.preview // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64 v0.20000.0-3.preview // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.20000.0-3.preview // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/linux-amd64 v0.20000.0-3.preview // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/linux-arm64 v0.20000.0-3.preview // indirect
+	github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.20000.0-3.preview // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
