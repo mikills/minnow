@@ -27,6 +27,33 @@ costs, **not query throughput**. They should not be compared directly with the
 older macOS measurements below. A failed, skipped or incomplete seed set fails
 the comparison instead of producing a misleading passing row.
 
+### Native profiling
+
+The **DuckDB profile** Actions workflow runs diagnostics on one GitHub-hosted
+Ubuntu AMD64 runner. It builds the same diagnostic source against 1.5.0 and
+2.0.0, then runs each process sequentially with the comparison's resource controls.
+The probe refuses to execute locally. Profiling does not alter production code.
+
+- Three alternating phase runs separate core open/close, signed VSS/FTS loading,
+  appender batches, HNSW/FTS builds, checkpoints, and warm vector/BM25 queries.
+  Memory inspection is outside operation timers. These are diagnostic fixtures,
+  not a production throughput benchmark.
+- Native CPU sampling uses Linux `perf`, software `cpu-clock:u` events, and DWARF
+  call graphs. It also profiles the real repeated-ingest and random-operations
+  simulations at seed 1. Both self-time and caller reports are saved.
+- `heaptrack` records native allocation stacks separately for configured
+  open/close cycles and ingestion. Profiled wall times are not benchmark results.
+- Process RSS/anonymous memory, Go heap, and all-arena glibc `malloc_info` counters
+  are captured across open/load/close cycles, after Go GC, and after a diagnostic
+  `malloc_trim`. The trim experiment is not a proposed production optimization.
+  glibc/heaptrack do not necessarily see alternative allocators or Go's mmap heap;
+  retained RSS or allocations outstanding at process exit do not prove a leak.
+
+The `duckdb-native-profiles` artifact includes raw CPU/allocation traces, readable
+reports, per-operation JSON, tool/host metadata, and matching binaries/extensions
+for symbolization. Missing permissions, failed workloads, and unavailable native
+symbols are reported as failures rather than silently replaced with Go-only data.
+
 ## Setup
 
 - Hardware: Apple M4, local SSD.

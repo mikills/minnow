@@ -1,0 +1,127 @@
+name: DuckDB profile
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/duckdb_profile/**'
+      - 'scripts/profile_duckdb*'
+      - .github/workflows/duckdb-profile.yml
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: 'Baseline ref with DuckDB 1.5.0'
+        default: main
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: duckdb-profile-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: '1'
+      GOWORK: 'off'
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 384MiB
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || inputs.baseline_ref }}
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: candidate/go.mod
+          cache-dependency-path: |
+            baseline/go.sum
+            candidate/go.sum
+
+      - name: Check tooling and matched workloads
+        run: |
+          diff -ru baseline/sim candidate/sim
+          python3 -m unittest discover -s candidate/scripts -p '*duckdb_test.py' -v
+          mkdir -p profiles
+          uname -a > profiles/host.txt
+          lscpu >> profiles/host.txt
+          free -m >> profiles/host.txt
+          go version >> profiles/host.txt
+
+      - name: Install native profilers
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends linux-tools-generic heaptrack
+          # The runner's kernel may differ from the tools-generic package.
+          # Use the actual perf executable, not the version-matching wrapper.
+          perf=$(find /usr/lib/linux-tools -type f -name perf | sort -V | tail -n1)
+          test -x "$perf"
+          echo "PERF=$perf" >> "$GITHUB_ENV"
+          "$perf" version > profiles/tools.txt
+          heaptrack --version >> profiles/tools.txt
+          heaptrack_print --version >> profiles/tools.txt
+          # Software cpu-clock samples avoid depending on a hosted VM's PMU.
+          # Record any restriction; the runner reports unavailable diagnostics.
+          sudo sysctl kernel.perf_event_paranoid=-1 >> profiles/tools.txt 2>&1 || true
+          "$perf" record -e cpu-clock:u -o profiles/permission-check.data -- sleep 0.1 \
+            > profiles/permission-check.out 2> profiles/permission-check.err || true
+
+      - name: Build matched probes and simulations sequentially (outside measurement)
+        run: |
+          set -euo pipefail
+          for revision in baseline candidate; do
+            (
+              cd "$revision"
+              git rev-parse HEAD > "../profiles/$revision.sha"
+              go list -m all > "../profiles/$revision.modules.txt"
+              go build -p=1 -o "$GITHUB_WORKSPACE/profiles/$revision-profile" \
+                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/main.go" \
+                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/memory_linux.go"
+              go build -p=1 -o "$GITHUB_WORKSPACE/profiles/$revision-probe" \
+                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_compat/main.go"
+              "../profiles/$revision-probe" > "../profiles/$revision.engine.json"
+              go test -p=1 -c -o "$GITHUB_WORKSPACE/profiles/$revision.test" ./sim
+              nm -C "../profiles/$revision-profile" > "../profiles/$revision.symbols.txt"
+            )
+          done
+
+      - name: Run phase diagnostics, native CPU sampling, and allocation tracing sequentially
+        run: python3 candidate/scripts/profile_duckdb.py --root "$GITHUB_WORKSPACE"
+
+      - name: Preserve matching binaries and extensions for offline symbolization
+        if: always()
+        run: |
+          tar -czf profiles/symbols.tar.gz \
+            profiles/baseline-profile profiles/candidate-profile \
+            profiles/baseline.test profiles/candidate.test \
+            baseline/extensions/v1.5.0/linux_amd64 \
+            candidate/extensions/v2.0.0/linux_amd64
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: duckdb-native-profiles
+          retention-days: 7
+          path: |
+            profiles/*.json
+            profiles/*.txt
+            profiles/*.md
+            profiles/*.sha
+            profiles/*.time
+            profiles/*.out
+            profiles/*.err
+            profiles/*.data
+            profiles/*.gz
+            profiles/*.zst
+          if-no-files-found: warn
