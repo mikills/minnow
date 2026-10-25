@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from profile_duckdb import run, summary, validate_probe
+from profile_duckdb import has_native_symbols, run, summary, validate_probe
 
 
 def configured(version="v2.0.0", iterations=20, elapsed=1500000):
@@ -21,6 +21,12 @@ def configured(version="v2.0.0", iterations=20, elapsed=1500000):
 
 
 class ProfileTest(unittest.TestCase):
+    def test_native_hash_symbols(self):
+        self.assertTrue(has_native_symbols("90.83% candidate-profile [.] mbedtls_internal_sha256_process - -"))
+        self.assertTrue(has_native_symbols("1.96% candidate-profile [.] duckdb::LogicalOperatorVisitor::VisitExpression()"))
+        self.assertFalse(has_native_symbols("90.83% candidate-profile [.] crypto/internal/fips140/sha256.blockSHANI.abi0"))
+        self.assertFalse(has_native_symbols("90.83% candidate-profile [.] 0x0000000012345678"))
+
     def test_stage_completeness(self):
         data = configured()
         validate_probe(data, "configured", 20, "v2.0.0")

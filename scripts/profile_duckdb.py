@@ -5,6 +5,7 @@ from collections import defaultdict
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import statistics
 import subprocess
@@ -13,6 +14,16 @@ from compare_duckdb import CONTROLS, require_ci
 
 
 MODES = {"core": 20, "vss": 20, "fts": 20, "configured": 20, "ingest": 20, "query": 1000}
+
+
+def has_native_symbols(text):
+    # A hash-dominated trace can have no duckdb:: entry above the report's
+    # percentage threshold. mbedTLS is native engine code too, unlike Go's
+    # crypto/internal/...sha256 symbols. Do not mislabel that as missing data.
+    return bool(re.search(
+        r"\[\.\]\s+(?:duckdb::|duckdb_mbedtls::|mbedtls_internal_sha256_process\b|mbedtls_sha256_|unum::usearch::)",
+        text,
+    ))
 
 
 def run(command, prefix, cwd, env, timeout=120):
@@ -178,7 +189,7 @@ def main():
              "--percent-limit", "0.5", "-i", str(prefix) + ".data"], report_prefix, root, env)
         Path(str(report_prefix) + ".out").rename(results / f"{prefix.name}.leaf.txt")
         text = (results / f"{prefix.name}.leaf.txt").read_text()
-        if "duckdb::" not in text and "duckdb_mbedtls" not in text:
+        if not has_native_symbols(text):
             raise RuntimeError(f"{prefix.name}: native DuckDB symbols unavailable in perf report")
 
     def heap(label, mode):
