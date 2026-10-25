@@ -26,7 +26,7 @@ type shardConnPool struct {
 	entries     map[string]*shardConn
 	evicting    map[string]*shardEviction
 	generations map[string]uint64
-	inFlight    map[string]int
+	inFlight    map[string]*shardOpen
 	openChanged *sync.Cond
 }
 
@@ -35,77 +35,124 @@ type shardEviction struct {
 	done  chan struct{}
 }
 
+type shardOpen struct {
+	done chan struct{}
+	ctx  context.Context
+	conn *shardConn
+	err  error
+}
+
 // GetOrOpen returns a locked connection for localPath. The caller must unlock
 // shardConn.mu when done with shardConn.db.
 func (p *shardConnPool) GetOrOpen(ctx context.Context, localPath string, maxEntries int,
 	openFn func(ctx context.Context, path string) (*sql.DB, error)) (*shardConn, error) {
 
-	p.mu.Lock()
-	generation := p.generationLocked(localPath)
-	if p.pathEvictingLocked(localPath) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		p.mu.Lock()
+		generation := p.generationLocked(localPath)
+		if p.pathEvictingLocked(localPath) {
+			p.mu.Unlock()
+			return nil, errShardConnPoolEvicting
+		}
+		if p.entries == nil {
+			p.entries = make(map[string]*shardConn)
+		}
+		if sc, ok := p.entries[localPath]; ok {
+			sc.mu.Lock()
+			sc.lastUse = time.Now()
+			p.mu.Unlock()
+			return sc, nil
+		}
+		if pending := p.inFlight[localPath]; pending != nil {
+			p.mu.Unlock()
+			conn, err := p.waitForOpen(ctx, localPath, pending)
+			if ctx.Err() == nil && pending.ctx.Err() != nil &&
+				(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+				// The opener belongs to another request. Its cancellation must
+				// not cancel a still-live follower; retry with this request's context.
+				continue
+			}
+			return conn, err
+		}
+		if p.inFlight == nil {
+			p.inFlight = make(map[string]*shardOpen)
+		}
+		pending := &shardOpen{done: make(chan struct{}), ctx: ctx}
+		p.inFlight[localPath] = pending
 		p.mu.Unlock()
-		return nil, errShardConnPoolEvicting
-	}
-	if p.entries == nil {
-		p.entries = make(map[string]*shardConn)
-	}
-	if sc, ok := p.entries[localPath]; ok {
+
+		db, err := openFn(ctx, localPath)
+		if err != nil {
+			// Native preparation may report only an interrupt, not wrap the
+			// request's cancellation. Snapshot that cause before publishing the
+			// failure so live followers can retry without losing the native error.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				err = errors.Join(err, ctxErr)
+			}
+			p.mu.Lock()
+			p.finishOpenLocked(localPath, err)
+			p.mu.Unlock()
+			return nil, err
+		}
+
+		sc := &shardConn{db: db, lastUse: time.Now()}
+
+		p.mu.Lock()
+		changed := p.pathEvictingLocked(localPath) || p.generationLocked(localPath) != generation
+		if changed {
+			p.mu.Unlock()
+			if closeErr := db.Close(); closeErr != nil {
+				slog.Default().Warn("close shard connection opened during eviction failed", logKeyError, closeErr)
+			}
+			p.mu.Lock()
+			p.finishOpenLocked(localPath, errShardConnPoolEvicting)
+			p.mu.Unlock()
+			return nil, errShardConnPoolEvicting
+		}
 		sc.mu.Lock()
-		sc.lastUse = time.Now()
+		p.entries[localPath] = sc
+		pending.conn = sc
+		p.finishOpenLocked(localPath, nil)
+		toClose := p.takeOverflowLocked(localPath, maxEntries)
 		p.mu.Unlock()
+
+		for _, stale := range toClose {
+			stale.mu.Lock()
+			if err := stale.db.Close(); err != nil {
+				slog.Default().Warn("close LRU shard connection failed", logKeyError, err)
+			}
+			stale.mu.Unlock()
+		}
 		return sc, nil
 	}
-	if p.inFlight == nil {
-		p.inFlight = make(map[string]int)
-	}
-	p.inFlight[localPath]++
-	p.mu.Unlock()
+}
 
-	db, err := openFn(ctx, localPath)
-	if err != nil {
-		p.mu.Lock()
-		p.finishOpenLocked(localPath)
-		p.mu.Unlock()
+// Waiters do not open another native database or cancel the opener. Recheck
+// identity under the pool lock: a completed open may already have been evicted,
+// including by an eviction whose barrier has since been released.
+func (p *shardConnPool) waitForOpen(ctx context.Context, path string, pending *shardOpen) (*shardConn, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-pending.done:
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
-	sc := &shardConn{db: db, lastUse: time.Now()}
-
+	if pending.err != nil {
+		return nil, pending.err
+	}
 	p.mu.Lock()
-	changed := p.pathEvictingLocked(localPath) || p.generationLocked(localPath) != generation
-	if changed {
-		p.mu.Unlock()
-		if closeErr := db.Close(); closeErr != nil {
-			slog.Default().Warn("close shard connection opened during eviction failed", logKeyError, closeErr)
-		}
-		p.mu.Lock()
-		p.finishOpenLocked(localPath)
-		p.mu.Unlock()
+	defer p.mu.Unlock()
+	if p.pathEvictingLocked(path) || p.entries[path] != pending.conn {
 		return nil, errShardConnPoolEvicting
 	}
-	p.finishOpenLocked(localPath)
-	// Another goroutine may have raced and inserted first.
-	if existing, ok := p.entries[localPath]; ok {
-		existing.mu.Lock()
-		existing.lastUse = time.Now()
-		p.mu.Unlock()
-		if err := db.Close(); err != nil {
-			slog.Default().Warn("close duplicate shard connection failed", "path", localPath, logKeyError, err)
-		}
-		return existing, nil
-	}
+	sc := pending.conn
 	sc.mu.Lock()
-	p.entries[localPath] = sc
-	toClose := p.takeOverflowLocked(localPath, maxEntries)
-	p.mu.Unlock()
-
-	for _, stale := range toClose {
-		stale.mu.Lock()
-		if err := stale.db.Close(); err != nil {
-			slog.Default().Warn("close LRU shard connection failed", logKeyError, err)
-		}
-		stale.mu.Unlock()
-	}
+	sc.lastUse = time.Now()
 	return sc, nil
 }
 
@@ -223,12 +270,11 @@ func (p *shardConnPool) waitForEviction(ctx context.Context, path string) error 
 	}
 }
 
-func (p *shardConnPool) finishOpenLocked(path string) {
-	if p.inFlight[path] <= 1 {
-		delete(p.inFlight, path)
-	} else {
-		p.inFlight[path]--
-	}
+func (p *shardConnPool) finishOpenLocked(path string, err error) {
+	pending := p.inFlight[path]
+	delete(p.inFlight, path)
+	pending.err = err
+	close(pending.done)
 	if p.openChanged != nil {
 		p.openChanged.Broadcast()
 	}

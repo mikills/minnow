@@ -27,6 +27,14 @@ costs, **not query throughput**. They should not be compared directly with the
 older macOS measurements below. A failed, skipped or incomplete seed set fails
 the comparison instead of producing a misleading passing row.
 
+### Initialization revision comparison
+
+For initialization optimizations, dispatch **DuckDB comparison** on the candidate
+branch with `same_engine=true` and `baseline_ref` set to the pre-optimization 2.0
+commit (currently `c6030fb3371177f3335934da4fd6eb7d0a4c3655`). Both engine/source
+probes must match. This isolates the application change from the engine upgrade;
+the usual pull-request comparison still measures main's 1.5 against 2.0.
+
 ### Native profiling
 
 The **DuckDB profile** Actions workflow runs diagnostics on one GitHub-hosted

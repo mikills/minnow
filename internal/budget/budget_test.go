@@ -25,6 +25,16 @@ func planFor(t *testing.T, ceiling int64) memlimit.Plan {
 }
 
 func TestDatabaseShares(t *testing.T) {
+	t.Run("open_attempts_survive_release", func(t *testing.T) {
+		m := New(memlimit.Plan{}, false)
+		for range 3 {
+			_, release := m.OpenDatabase("128MB")
+			release()
+			release()
+		}
+		require.EqualValues(t, 3, m.DatabaseOpenAttempts())
+		require.Zero(t, m.LiveDatabases())
+	})
 	t.Run("the total stays inside the budget however many open", func(t *testing.T) {
 		m := New(planFor(t, 16<<30), true)
 		var releases []func()

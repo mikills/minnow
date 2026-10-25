@@ -11,12 +11,22 @@ on:
       - 'scripts/duckdb_compat/**'
       - 'scripts/compare_duckdb*'
       - .github/workflows/duckdb-comparison.yml
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: 'Baseline commit or ref (main for the engine upgrade)'
+        required: true
+        default: main
+      same_engine:
+        description: 'Compare application revisions using the identical stable 2.0 engine'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: duckdb-comparison-${{ github.event.pull_request.number }}
+  group: duckdb-comparison-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -28,15 +38,16 @@ jobs:
       GOWORK: 'off'
       GOMAXPROCS: '2'
       GOMEMLIMIT: 384MiB
+      COMPARE_SAME_ENGINE: ${{ inputs.same_engine || false }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.sha || inputs.baseline_ref }}
           path: baseline
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
           persist-credentials: false
       - uses: actions/setup-go@v5
@@ -72,7 +83,7 @@ jobs:
               "../results/$revision-probe" > "../results/$revision.engine.json"
             )
           done
-          if cmp -s results/baseline.engine.json results/candidate.engine.json; then
+          if [ "$COMPARE_SAME_ENGINE" != true ] && cmp -s results/baseline.engine.json results/candidate.engine.json; then
             echo 'compare=false' >> "$GITHUB_OUTPUT"
             echo 'Engine unchanged; no performance comparison needed.' >> "$GITHUB_STEP_SUMMARY"
           else
@@ -96,10 +107,15 @@ jobs:
           cd candidate
           go test -p=1 -parallel=1 -count=1 -run '^(TestRuntime|TestExtensions|TestAppender)$' \
             ./kb/duckdb ./kb/duckdb/internal/connection
+          go test -race -p=1 -parallel=1 -count=1 -timeout=3m \
+            -run '^(TestMutableOpen|TestShardOpen|TestShardConnPool.*)$' ./kb/duckdb
 
       - name: Compare isolated simulation execution (three alternating rounds)
         if: steps.engines.outputs.compare == 'true'
-        run: python3 candidate/scripts/compare_duckdb.py --root "$GITHUB_WORKSPACE" --rounds 3
+        run: |
+          args=()
+          if [ "$COMPARE_SAME_ENGINE" = true ]; then args+=(--same-engine); fi
+          python3 candidate/scripts/compare_duckdb.py --root "$GITHUB_WORKSPACE" --rounds 3 "${args[@]}"
 
       - uses: actions/upload-artifact@v4
         if: always()

@@ -93,10 +93,7 @@ func (f *DuckDBArtifactFormat) openPreparedMutationDB(
 	if len(seedVec) == 0 {
 		return nil, fmt.Errorf("embed doc %q for shard bootstrap: empty embedding", firstDocID)
 	}
-	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: kbID, kbDir: kbDir, dbPath: dbPath, embeddingDim: len(seedVec), allowBootstrap: true, joinsSession: deferred}); err != nil {
-		return nil, err
-	}
-	return f.openMutableShardDB(ctx, dbPath)
+	return f.prepareMutableShardDBLocked(ctx, mutableShardRequest{kbID: kbID, kbDir: kbDir, dbPath: dbPath, embeddingDim: len(seedVec), allowBootstrap: true, joinsSession: deferred})
 }
 
 func (f *DuckDBArtifactFormat) graphBuilderForUpsert(opts kb.UpsertDocsOptions) (*kb.GraphBuilder, error) {
@@ -143,7 +140,8 @@ func (f *DuckDBArtifactFormat) Delete(ctx context.Context, req kb.IngestDeleteRe
 
 	kbDir := filepath.Join(f.deps.CacheDir, req.KBID)
 	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
-	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: req.KBID, kbDir: kbDir, dbPath: dbPath, joinsSession: req.Options.DeferPublish}); err != nil {
+	db, err := f.prepareMutableShardDBLocked(ctx, mutableShardRequest{kbID: req.KBID, kbDir: kbDir, dbPath: dbPath, joinsSession: req.Options.DeferPublish})
+	if err != nil {
 		// The orphans this caller wants gone cannot exist.
 		if errors.Is(err, kb.ErrKBUninitialized) {
 			return kb.IngestResult{}, nil
@@ -151,10 +149,6 @@ func (f *DuckDBArtifactFormat) Delete(ctx context.Context, req kb.IngestDeleteRe
 		return kb.IngestResult{}, err
 	}
 
-	db, err := f.openMutableShardDB(ctx, dbPath)
-	if err != nil {
-		return kb.IngestResult{}, err
-	}
 	defer db.Close()
 
 	if err := f.applyDelete(ctx, db, cleanIDs, req.Options); err != nil {
@@ -299,9 +293,11 @@ func (f *DuckDBArtifactFormat) applyPreparedStreamBatch(ctx context.Context, bat
 	lock := f.lockFor(batch.kbID)
 	lock.Lock()
 	defer lock.Unlock()
-	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: batch.kbID, kbDir: batch.kbDir, dbPath: batch.dbPath, embeddingDim: len(batch.prepared[0].Embedding), allowBootstrap: true, joinsSession: batch.deferred}); err != nil {
+	db, err := f.prepareMutableShardDBLocked(ctx, mutableShardRequest{kbID: batch.kbID, kbDir: batch.kbDir, dbPath: batch.dbPath, embeddingDim: len(batch.prepared[0].Embedding), allowBootstrap: true, joinsSession: batch.deferred})
+	if err != nil {
 		return err
 	}
+	defer db.Close()
 	// Per batch, because the lock is released between batches and eviction
 	// would reclaim anything not yet marked.
 	if batch.deferred {
@@ -309,11 +305,6 @@ func (f *DuckDBArtifactFormat) applyPreparedStreamBatch(ctx context.Context, bat
 			return err
 		}
 	}
-	db, err := f.openMutableShardDB(ctx, batch.dbPath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
 	if err := f.validatePreparedBatchDimensions(ctx, db, batch.prepared); err != nil {
 		return err
 	}
@@ -425,13 +416,14 @@ func (f *DuckDBArtifactFormat) PrepareAndOpenDB(ctx context.Context, kbID string
 	kbDir := filepath.Join(f.deps.CacheDir, kbID)
 	dbPath := filepath.Join(kbDir, vectorsDuckDBFileName)
 	// Not exempt: writes here would ride out under another client's commit.
-	if err := f.ensureMutableShardDBLocked(ctx, mutableShardRequest{kbID: kbID, kbDir: kbDir, dbPath: dbPath}); err != nil {
+	db, err := f.prepareMutableShardDBLocked(ctx, mutableShardRequest{kbID: kbID, kbDir: kbDir, dbPath: dbPath})
+	if err != nil {
 		return nil, err
 	}
 	if err := f.deps.EvictCacheIfNeeded(ctx, kbID); err != nil {
-		return nil, err
+		return nil, closeMutableBootstrapDB(db, err)
 	}
-	return f.openMutableShardDB(ctx, dbPath)
+	return db, nil
 }
 
 type mutableShardRequest struct {
@@ -445,34 +437,34 @@ type mutableShardRequest struct {
 	joinsSession bool
 }
 
-// ensureMutableShardDBLocked prepares the local file while the caller holds the
-// KB lock. Schema migration runs on the handle returned by openMutableShardDB,
-// rather than opening and closing a separate database just to check metadata.
-func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(ctx context.Context, req mutableShardRequest) error {
+// prepareMutableShardDBLocked returns an owned handle while the caller holds the
+// KB lock. Bootstrap and session repair use that same handle for the mutation;
+// atomic file replacements still close their temporary database before rename.
+func (f *DuckDBArtifactFormat) prepareMutableShardDBLocked(ctx context.Context, req mutableShardRequest) (*sql.DB, error) {
 	if strings.TrimSpace(req.kbID) == "" {
-		return fmt.Errorf(errEmptyKBID)
+		return nil, fmt.Errorf(errEmptyKBID)
 	}
 	// An open session does not move the manifest, so the staleness check below
 	// waves this through and publishes rows the client has not committed.
 	if !req.joinsSession && kb.HasPendingSession(req.kbDir) {
-		return kb.UnpublishedWritesError(req.kbID)
+		return nil, kb.UnpublishedWritesError(req.kbID)
 	}
 
 	manifestVersion, err := f.deps.ManifestStore.HeadVersion(ctx, req.kbID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if manifestVersion == "" {
 		// Unpublished rows make a knowledge base look absent, not empty.
 		if kb.HasPendingSession(req.kbDir) {
-			err := f.reuseLocalShardDB(ctx, req)
+			db, err := f.reuseLocalShardDB(ctx, req)
 			if err == nil {
-				return nil
+				return db, nil
 			}
 			// Reported as absent, a delete answers success for rows it never
 			// removed. A writer instead rebuilds, below.
 			if !req.allowBootstrap {
-				return fmt.Errorf("reuse local shard for %s: %w", req.kbID, err)
+				return nil, fmt.Errorf("reuse local shard for %s: %w", req.kbID, err)
 			}
 		}
 		return f.bootstrapMutableShardDB(ctx, req.kbDir, req.dbPath, req.embeddingDim, req.allowBootstrap, manifestVersion)
@@ -480,24 +472,24 @@ func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(ctx context.Context, r
 	localVersionPath := localShardManifestVersionPath(req.kbDir)
 	fresh, err := localShardDBIsFresh(req.kbDir, req.dbPath, localVersionPath, manifestVersion)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if fresh {
-		return nil
+		return f.openMutableShardDB(ctx, req.dbPath)
 	}
 	if kb.HasPendingSession(req.kbDir) {
-		return kb.UnpublishedWritesError(req.kbID)
+		return nil, kb.UnpublishedWritesError(req.kbID)
 	}
 	// An emptied knowledge base has nothing to reconstruct from, and refusing
 	// would wedge every later writer on a cold cache.
 	emptied, err := f.manifestHasNoShards(ctx, req.kbID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if emptied {
 		return f.bootstrapMutableShardDB(ctx, req.kbDir, req.dbPath, req.embeddingDim, req.allowBootstrap, manifestVersion)
 	}
-	return f.refreshMutableShardDB(
+	if err := f.refreshMutableShardDB(
 		ctx,
 		mutableShardRefresh{
 			kbID:             req.kbID,
@@ -505,7 +497,10 @@ func (f *DuckDBArtifactFormat) ensureMutableShardDBLocked(ctx context.Context, r
 			dbPath:           req.dbPath,
 			localVersionPath: localVersionPath,
 		},
-	)
+	); err != nil {
+		return nil, err
+	}
+	return f.openMutableShardDB(ctx, req.dbPath)
 }
 
 // manifestHasNoShards reports a published knowledge base holding nothing.
@@ -522,16 +517,14 @@ func (f *DuckDBArtifactFormat) manifestHasNoShards(ctx context.Context, kbID str
 
 // reuseLocalShardDB adopts a shard holding rows that were never published.
 // Only a writer carries a dimension, so only a writer can repair the schema.
-func (f *DuckDBArtifactFormat) reuseLocalShardDB(ctx context.Context, req mutableShardRequest) error {
+func (f *DuckDBArtifactFormat) reuseLocalShardDB(ctx context.Context, req mutableShardRequest) (*sql.DB, error) {
 	if _, err := os.Stat(req.dbPath); err != nil {
-		return err
+		return nil, err
 	}
 	if req.embeddingDim > 0 {
-		if err := f.createEmptyMutableShardDBLocked(ctx, req.kbDir, req.dbPath, req.embeddingDim); err != nil {
-			return err
-		}
+		return f.openBootstrapMutableShardDB(ctx, req.kbDir, req.dbPath, req.embeddingDim)
 	}
-	return nil
+	return f.openMutableShardDB(ctx, req.dbPath)
 }
 
 func (f *DuckDBArtifactFormat) bootstrapMutableShardDB(
@@ -541,12 +534,12 @@ func (f *DuckDBArtifactFormat) bootstrapMutableShardDB(
 	embeddingDim int,
 	allowBootstrap bool,
 	manifestVersion string,
-) error {
+) (*sql.DB, error) {
 	if !allowBootstrap {
-		return kb.ErrKBUninitialized
+		return nil, kb.ErrKBUninitialized
 	}
 	if embeddingDim <= 0 {
-		return fmt.Errorf("embedding dimension must be > 0")
+		return nil, fmt.Errorf("embedding dimension must be > 0")
 	}
 	// A published empty manifest (or deletion of a previously published KB)
 	// must not adopt stale rows from the old cache. An unpublished first-write
@@ -554,27 +547,39 @@ func (f *DuckDBArtifactFormat) bootstrapMutableShardDB(
 	localVersionPath := localShardManifestVersionPath(kbDir)
 	localVersion, err := readLocalShardManifestVersion(localVersionPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return nil, err
 	}
+	var db *sql.DB
 	if manifestVersion != "" || localVersion != "" {
 		if err := os.MkdirAll(kbDir, 0o755); err != nil {
-			return err
+			return nil, err
 		}
-		tmpPath, cleanup, err := reconstruct.TempPath(dbPath)
-		if err != nil {
-			return err
+		tmpPath, cleanup, tempErr := reconstruct.TempPath(dbPath)
+		if tempErr != nil {
+			return nil, tempErr
 		}
 		defer cleanup()
-		if err := f.createEmptyMutableShardDBLocked(ctx, kbDir, tmpPath, embeddingDim); err != nil {
-			return err
+		temporary, bootstrapErr := f.openBootstrapMutableShardDB(ctx, kbDir, tmpPath, embeddingDim)
+		if bootstrapErr != nil {
+			return nil, bootstrapErr
+		}
+		if err := temporary.Close(); err != nil {
+			return nil, fmt.Errorf("close replacement bootstrap db: %w", err)
 		}
 		if err := os.Rename(tmpPath, dbPath); err != nil {
-			return err
+			return nil, err
 		}
-	} else if err := f.createEmptyMutableShardDBLocked(ctx, kbDir, dbPath, embeddingDim); err != nil {
-		return err
+		db, err = f.openMutableShardDB(ctx, dbPath)
+	} else {
+		db, err = f.openBootstrapMutableShardDB(ctx, kbDir, dbPath, embeddingDim)
 	}
-	return writeLocalShardManifestVersion(localVersionPath, manifestVersion)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeLocalShardManifestVersion(localVersionPath, manifestVersion); err != nil {
+		return nil, closeMutableBootstrapDB(db, err)
+	}
+	return db, nil
 }
 
 func localShardDBIsFresh(kbDir string, dbPath string, localVersionPath string, manifestVersion string) (bool, error) {
@@ -616,21 +621,21 @@ func (f *DuckDBArtifactFormat) refreshMutableShardDB(ctx context.Context, req mu
 	return writeLocalShardManifestVersion(req.localVersionPath, doc.Version)
 }
 
-func (f *DuckDBArtifactFormat) createEmptyMutableShardDBLocked(
+func (f *DuckDBArtifactFormat) openBootstrapMutableShardDB(
 	ctx context.Context,
 	kbDir, dbPath string,
 	embeddingDim int,
-) error {
+) (*sql.DB, error) {
 	if embeddingDim <= 0 {
-		return fmt.Errorf("embedding dimension must be > 0")
+		return nil, fmt.Errorf("embedding dimension must be > 0")
 	}
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
-		return err
+		return nil, err
 	}
 
 	db, err := f.openConfiguredDB(ctx, dbPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	createDocsSQL := `
@@ -643,19 +648,21 @@ func (f *DuckDBArtifactFormat) createEmptyMutableShardDBLocked(
 		)
 	`
 	if _, err := db.ExecContext(ctx, createDocsSQL); err != nil {
-		return closeMutableBootstrapDB(db, fmt.Errorf("create docs table for shard bootstrap: %w", err))
+		return nil, closeMutableBootstrapDB(db, fmt.Errorf("create docs table for shard bootstrap: %w", err))
 	}
 	if err := ensureDocTombstonesTable(ctx, db); err != nil {
-		return closeMutableBootstrapDB(db, err)
+		return nil, closeMutableBootstrapDB(db, err)
 	}
 	if err := EnsureGraphTables(ctx, db); err != nil {
-		return closeMutableBootstrapDB(db, err)
+		return nil, closeMutableBootstrapDB(db, err)
 	}
-
-	if err := CheckpointAndCloseDB(ctx, db, "close db after shard bootstrap"); err != nil {
-		return err
+	if err := ensureDocsMetadataColumn(ctx, db); err != nil {
+		return nil, closeMutableBootstrapDB(db, err)
 	}
-	return nil
+	if err := CheckpointDB(ctx, db); err != nil {
+		return nil, closeMutableBootstrapDB(db, err)
+	}
+	return db, nil
 }
 
 // openMutableShardDB owns the handle until migration succeeds. Callers own the

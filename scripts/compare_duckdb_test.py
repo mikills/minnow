@@ -6,10 +6,24 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from compare_duckdb import SEEDS, WORKLOADS, aggregate, measure, report, require_ci, validate_tests
+from compare_duckdb import SEEDS, WORKLOADS, aggregate, measure, report, require_ci, validate_engines, validate_tests
 
 
 class ComparisonTest(unittest.TestCase):
+    def test_engine_modes(self):
+        stable = {"mode": "probe", "version": "v2.0.0", "source": "stable-source"}
+        engines = {"baseline": dict(stable, version="v1.5.0"), "candidate": stable}
+        validate_engines(engines)
+        with self.assertRaisesRegex(RuntimeError, "identical stable"):
+            validate_engines(engines, same_engine=True)
+        engines["baseline"] = dict(stable)
+        validate_engines(engines, same_engine=True)
+        with self.assertRaisesRegex(RuntimeError, "expected pre-2.0"):
+            validate_engines(engines)
+        engines["baseline"]["source"] = "different-source"
+        with self.assertRaisesRegex(RuntimeError, "identical stable"):
+            validate_engines(engines, same_engine=True)
+
     def test_ci_only(self):
         for env in ({}, {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "self-hosted"}):
             with self.assertRaises(RuntimeError):
@@ -40,6 +54,8 @@ class ComparisonTest(unittest.TestCase):
         text = report(summary, {"baseline": {"version": "v1.5.0"}, "candidate": {"version": "v2.0.0"}})
         self.assertIn("| change |", text)
         self.assertIn("+0.0%", text)
+        same_engine = report(summary, {label: {"version": "v2.0.0"} for label in summary}, same_engine=True)
+        self.assertIn("initialization revision comparison", same_engine)
         with self.assertRaises(RuntimeError):
             aggregate(records[:-1])
 

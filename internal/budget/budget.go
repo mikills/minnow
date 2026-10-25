@@ -31,8 +31,9 @@ type Manager struct {
 	// False when an operator pinned memory_limit. The governor still runs.
 	sizes bool
 
-	liveDatabases atomic.Int64
-	issued        atomic.Int64
+	liveDatabases        atomic.Int64
+	databaseOpenAttempts atomic.Uint64
+	issued               atomic.Int64
 
 	buildThreads *semaphore.Weighted
 	buildBudget  int

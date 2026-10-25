@@ -93,8 +93,19 @@ def aggregate(records):
     return result
 
 
-def report(summary, engines):
-    lines = ["## DuckDB engine comparison", "",
+def validate_engines(engines, same_engine=False):
+    if same_engine:
+        if (engines["baseline"]["version"] != "v2.0.0"
+                or not engines["baseline"].get("source")
+                or engines["candidate"] != engines["baseline"]):
+            raise RuntimeError(f"same-engine comparison requires identical stable 2.0 engine probes, got {engines}")
+    elif engines["candidate"]["version"] != "v2.0.0" or engines["baseline"]["version"] == "v2.0.0":
+        raise RuntimeError(f"expected pre-2.0 base vs stable 2.0, got {engines}")
+
+
+def report(summary, engines, same_engine=False):
+    title = "DuckDB initialization revision comparison" if same_engine else "DuckDB engine comparison"
+    lines = [f"## {title}", "",
              "Same hosted runner; sequential processes; three alternating rounds; compilation excluded.",
              "GOMAXPROCS=2, GOMEMLIMIT=384MiB, build -p=1, test -parallel=1; signatures enabled.",
              "Elapsed/CPU are medians of round sums; RSS is the median of round peak RSS.",
@@ -118,14 +129,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--rounds", type=int, default=3, choices=[3])
+    parser.add_argument("--same-engine", action="store_true",
+                        help="compare two application revisions with the identical stable 2.0 engine")
     args = parser.parse_args()
     require_ci(os.environ)
     root = args.root.resolve()
     results = root / "results"
     engines = {label: json.loads((results / f"{label}.engine.json").read_text())
                for label in ("baseline", "candidate")}
-    if engines["candidate"]["version"] != "v2.0.0" or engines["baseline"]["version"] == "v2.0.0":
-        raise RuntimeError(f"expected pre-2.0 base vs stable 2.0, got {engines}")
+    validate_engines(engines, args.same_engine)
     records = []
     try:
         for index in range(args.rounds):
@@ -137,7 +149,7 @@ def main():
                 for label in labels:
                     records.append(measure(root, label, index, workload))
         summary = aggregate(records)
-        text = report(summary, engines)
+        text = report(summary, engines, args.same_engine)
         (results / "summary.md").write_text(text)
         print(text)
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
@@ -145,7 +157,7 @@ def main():
     finally:
         (results / "measurements.json").write_text(json.dumps({
             "controls": CONTROLS, "engines": engines, "seeds": SEEDS,
-            "rounds": args.rounds, "measurements": records,
+            "rounds": args.rounds, "same_engine": args.same_engine, "measurements": records,
         }, indent=2) + "\n")
 
 
