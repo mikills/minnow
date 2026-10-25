@@ -110,15 +110,13 @@ them.
 
 - Go toolchain matching the module's version.
 - CGO-capable environment for the DuckDB driver.
-- `curl`, `tar`, and `sha256sum` or `shasum` for the first native-library download.
 - DuckDB extensions in `extensions/` (shipped with the repo; no network access needed by default).
 
-This checkout pins a DuckDB 2.0 **alpha**. Use the Make targets or
-`bash scripts/duckdb.sh <go command>` to link its actual static library; plain
-Go commands select an older engine from the upstream preview package. The
-checksum-verified library is downloaded once and cached in `.cache/duckdb/`.
-macOS ARM64 and Linux AMD64 are supported. `vss`, `fts`, and `httpfs` load
-offline; graph expansion uses BFS without DuckPGQ. Back up data before upgrading.
+This checkout pins **DuckDB v2.0.0** through the stable Go driver. Standard Go
+commands and Make targets use its bundled native libraries; no linking wrapper
+is needed. The first module download requires access to `go.duckdb.org`.
+Offline `vss`, `fts`, and `httpfs` bundles are supplied for macOS ARM64 and Linux
+AMD64; graph expansion uses BFS without DuckPGQ. Back up data before upgrading.
 
 ## Configuration
 

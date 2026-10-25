@@ -28,22 +28,22 @@ jobs:
           go-version-file: go.mod
 
       - name: Verify bundled extension checksums
-        working-directory: extensions/v2.0.0-alpha45672
+        working-directory: extensions/v2.0.0
         run: sha256sum -c SHA256SUMS
 
       - name: Build
         env:
           GOWORK: off
-        run: bash scripts/duckdb.sh build ./...
+        run: go build ./...
 
       - name: Build codeindex
         run: go build -o /tmp/minnow-codeindex ./codeindex
 
       - name: Validate deployment configuration
         run: |
-          OPENAI_API_KEY=test bash scripts/duckdb.sh run . config validate deploy/docker/minnow.yaml
-          OPENAI_API_KEY=test bash scripts/duckdb.sh run . config validate deploy/fly/minnow.yaml
-          bash scripts/duckdb.sh run . config validate deploy/docker/minnow.ollama.yaml
+          OPENAI_API_KEY=test go run . config validate deploy/docker/minnow.yaml
+          OPENAI_API_KEY=test go run . config validate deploy/fly/minnow.yaml
+          go run . config validate deploy/docker/minnow.ollama.yaml
           docker compose config --quiet
           MINNOW_EMBEDDER=openai OPENAI_API_KEY=test docker compose config --quiet
           docker compose -f compose.yaml -f compose.build.yaml config --quiet
@@ -52,7 +52,7 @@ jobs:
       - name: Test
         # sim runs seeded scenarios for about six minutes, close enough to Go's
         # ten minute default that a loaded runner trips it.
-        run: bash scripts/duckdb.sh test ./... -count=1 -tags=long -timeout 25m
+        run: go test ./... -count=1 -tags=long -timeout 25m
 
       - name: Test codeindex
         run: go test ./codeindex/...
@@ -103,7 +103,7 @@ jobs:
           MINNOW_MEASURE_INDEX_FLOOR: "1"
           MINNOW_FLOOR_ROWS: ${{ matrix.rows }}
           MINNOW_FLOOR_DIM: ${{ matrix.dim }}
-        run: bash scripts/duckdb.sh test ./kb/duckdb/ -run TestIndexBuildMemoryFloor -v -timeout 85m
+        run: go test ./kb/duckdb/ -run TestIndexBuildMemoryFloor -v -timeout 85m
 
   cgroup:
     name: memory governor on a real cgroup

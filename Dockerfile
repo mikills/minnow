@@ -8,8 +8,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/src/.cache/duckdb \
-    bash scripts/duckdb.sh build -trimpath -ldflags="-s -w" -o /out/minnow .
+    CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/minnow .
 
 FROM caddy:2.10 AS caddy
 
@@ -23,7 +22,7 @@ RUN apt-get update \
     && chown -R minnow:minnow /etc/minnow /var/lib/minnow
 
 COPY --from=build /out/minnow /usr/local/bin/minnow
-COPY --chown=minnow:minnow extensions/v2.0.0-alpha45672/linux_amd64/ /opt/minnow/extensions/v2.0.0-alpha45672/linux_amd64/
+COPY --chown=minnow:minnow extensions/v2.0.0/linux_amd64/ /opt/minnow/extensions/v2.0.0/linux_amd64/
 COPY --chown=minnow:minnow deploy/docker/minnow.yaml /etc/minnow/minnow.yaml
 COPY --chown=minnow:minnow deploy/docker/minnow.yaml /etc/minnow/minnow.openai.yaml
 COPY --chown=minnow:minnow deploy/docker/minnow.ollama.yaml /etc/minnow/minnow.ollama.yaml

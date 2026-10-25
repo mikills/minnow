@@ -5,23 +5,22 @@ SHELL := /bin/bash
 GOFILES := $(shell find . -name '*.go' -not -path './testdata/*')
 GOLINES := go run github.com/segmentio/golines@latest
 MAX_LEN ?= 120
-DUCKDB_GO := bash scripts/duckdb.sh
 ARGS ?=
 
 test:
-	$(DUCKDB_GO) test ./... -v -race -count=1 -timeout 25m
+	go test ./... -v -race -count=1 -timeout 25m
 	go test ./codeindex/... -count=1
 
 build:
-	GOWORK=off $(DUCKDB_GO) build ./...
-	GOWORK=off $(DUCKDB_GO) build -o minnow .
+	GOWORK=off go build ./...
+	GOWORK=off go build -o minnow .
 	go build -o /tmp/minnow-codeindex ./codeindex
 
 run:
-	$(DUCKDB_GO) run . $(ARGS)
+	go run . $(ARGS)
 
 install:
-	$(DUCKDB_GO) install .
+	go install .
 
 fmt:
 	$(GOLINES) --max-len=$(MAX_LEN) -w .

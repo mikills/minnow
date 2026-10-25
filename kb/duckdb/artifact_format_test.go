@@ -237,7 +237,7 @@ func testOfflineExtensions(t *testing.T) {
 	t.Cleanup(func() { _ = probe.Close() })
 	var version, platform string
 	require.NoError(t, probe.QueryRow(`SELECT version()`).Scan(&version))
-	require.Equal(t, connection.NativeVersion, version, "use bash scripts/duckdb.sh test to link the actual 2.0 library")
+	require.Equal(t, connection.NativeVersion, version, "the pinned driver must bundle the expected engine")
 	require.NoError(t, probe.QueryRow(`PRAGMA platform`).Scan(&platform))
 	t.Logf("DuckDB %s, platform %s", version, platform)
 

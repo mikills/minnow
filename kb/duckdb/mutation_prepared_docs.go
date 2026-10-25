@@ -33,6 +33,8 @@ func applyPreparedDocsAndGraphAppender(
 	}
 	defer conn.Close()
 	defer conn.ExecContext(context.WithoutCancel(ctx), fmt.Sprintf(`DROP TABLE IF EXISTS %s`, table))
+	// A failed DuckDB 2.0 flush drops its buffered rows. Never retry that
+	// appender: discard staging and let the operation rebuild the full batch.
 	if err := appendPreparedDocs(ctx, conn, table, docs); err != nil {
 		return err
 	}

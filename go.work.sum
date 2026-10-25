@@ -14,6 +14,17 @@ github.com/cockroachdb/apd/v3 v3.2.1/go.mod h1:klXJcjp+FffLTHlhIG69tezTDvdP065na
 github.com/containerd/console v1.0.5/go.mod h1:YynlIjWYF8myEu6sdkwKIvGQq+cOckRm6So2avqoYAk=
 github.com/creasty/defaults v1.8.0/go.mod h1:iGzKe6pbEHnpMPtfDXZEr0NVxWnPTjb1bbDy08fPzYM=
 github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815/go.mod h1:WwZ+bS3ebgob9U8Nd0kOddGdZWjyMGR8Wziv+TBNwSE=
+github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64 v0.10500.0/go.mod h1:EnAvZh1kNJHp5yF+M1ZHNEvapnmt6anq1xXHVrAGqMo=
+github.com/duckdb/duckdb-go-bindings/lib/darwin-amd64 v0.20000.0-3.preview/go.mod h1:EnAvZh1kNJHp5yF+M1ZHNEvapnmt6anq1xXHVrAGqMo=
+github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.10500.0 h1:8/J5noOOvIohkNaDFDMr5eYqk8bCRwkEUfGxi8QwsAg=
+github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.10500.0/go.mod h1:IGLSeEcFhNeZF16aVjQCULD7TsFZKG5G7SyKJAXKp5c=
+github.com/duckdb/duckdb-go-bindings/lib/darwin-arm64 v0.20000.0-3.preview/go.mod h1:IGLSeEcFhNeZF16aVjQCULD7TsFZKG5G7SyKJAXKp5c=
+github.com/duckdb/duckdb-go-bindings/lib/linux-amd64 v0.10500.0/go.mod h1:KAIynZ0GHCS7X5fRyuFnQMg/SZBPK/bS9OCOVojClxw=
+github.com/duckdb/duckdb-go-bindings/lib/linux-amd64 v0.20000.0-3.preview/go.mod h1:KAIynZ0GHCS7X5fRyuFnQMg/SZBPK/bS9OCOVojClxw=
+github.com/duckdb/duckdb-go-bindings/lib/linux-arm64 v0.10500.0/go.mod h1:81SGOYoEUs8qaAfSk1wRfM5oobrIJ5KI7AzYhK6/bvQ=
+github.com/duckdb/duckdb-go-bindings/lib/linux-arm64 v0.20000.0-3.preview/go.mod h1:81SGOYoEUs8qaAfSk1wRfM5oobrIJ5KI7AzYhK6/bvQ=
+github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.10500.0/go.mod h1:K25pJL26ARblGDeuAkrdblFvUen92+CwksLtPEHRqqQ=
+github.com/duckdb/duckdb-go-bindings/lib/windows-amd64 v0.20000.0-3.preview/go.mod h1:K25pJL26ARblGDeuAkrdblFvUen92+CwksLtPEHRqqQ=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/goccy/go-yaml v1.17.1/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
 github.com/gookit/color v1.5.4/go.mod h1:pZJOeOS8DM43rXbp4AZo1n9zCU2qjpcRko0b6/QJi9w=

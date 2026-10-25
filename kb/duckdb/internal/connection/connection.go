@@ -16,8 +16,8 @@ import (
 
 const DefaultExtensionDir = "extensions"
 
-// NativeVersion is pinned together with scripts/duckdb.sh and bundled extensions.
-const NativeVersion = "v2.0.0-alpha45672"
+// NativeVersion matches the engine bundled by duckdb-go and our offline extensions.
+const NativeVersion = "v2.0.0"
 
 func ResolveExtensionDir() string {
 	dir, err := os.Getwd()
@@ -105,7 +105,7 @@ func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
 		return fmt.Errorf("read DuckDB runtime version: %w", err)
 	}
 	if version != NativeVersion {
-		return fmt.Errorf("DuckDB runtime %s does not match %s; rebuild with make build or bash scripts/duckdb.sh build", version, NativeVersion)
+		return fmt.Errorf("DuckDB runtime %s does not match %s; rebuild with the pinned duckdb-go dependency", version, NativeVersion)
 	}
 	if cfg.ExtensionDir != "" {
 		if _, err := db.ExecContext(ctx, fmt.Sprintf(`SET extension_directory = '%s'`, QuoteSQLString(cfg.ExtensionDir))); err != nil {
@@ -179,7 +179,7 @@ func ConfigureRuntime(ctx context.Context, db *sql.DB, memLimit, tempDir string,
 	if threads <= 0 {
 		threads = 1
 	}
-	_, err := db.ExecContext(ctx, fmt.Sprintf(`PRAGMA threads = %d`, threads))
+	_, err := db.ExecContext(ctx, fmt.Sprintf(`SET threads = %d`, threads))
 	return err
 }
 

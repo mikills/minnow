@@ -39,7 +39,7 @@ image locally instead of pulling it.
 For globally installed MCP use with OpenAI embeddings:
 
 ```bash
-# From this checkout (links the pinned DuckDB 2.0 alpha):
+# From this checkout (links the pinned DuckDB 2.0 engine):
 make install
 go install github.com/mikills/minnow/codeindex@latest
 $(go env GOPATH)/bin/minnow setup
@@ -87,29 +87,21 @@ verified registration commands and token handling.
 
 The default config at `./minnow.yaml` is sufficient for local development (embedder-only, no external services). See [`docs/getting-started.md`](docs/getting-started.md) for a deployment-grade setup.
 
-### DuckDB 2.0 preview
+### DuckDB 2.0
 
-This checkout uses **DuckDB v2.0.0-alpha45672**, not a stable 2.0 release.
-`make build`, `make run`, `make install`, and `make test` link the actual native
-library using `scripts/duckdb.sh`. The first build downloads a checksum-pinned
-static archive into `.cache/duckdb/`; later builds and runtime extension loads
-work offline. Docker uses the same setup. Supported platforms are macOS ARM64
-and Linux AMD64.
+This checkout uses **DuckDB v2.0.0**, bundled by `duckdb-go v2.20000.0`.
+Standard `go build`, `go test`, and `go install` work without custom linking.
+The first build downloads native Go modules from `go.duckdb.org`; restricted
+module proxies must allow that origin. Subsequent builds can use the module cache.
 
-For other Go commands, use `bash scripts/duckdb.sh test ./kb/duckdb/...` (or
-`build`, `run`, `install`, etc.). Plain `go build`/`go install` still select an
-upstream preview archive containing DuckDB 1.5.4; database configuration rejects
-that mismatch rather than silently running the wrong engine.
+Signed `vss`, `fts`, and `httpfs` extensions are bundled for macOS ARM64 and
+Linux AMD64 and load offline. Signature verification stays enabled. DuckPGQ is
+not bundled; graph expansion uses BFS by default. Keep `UseDuckPGQ` false.
+Back up data before upgrading; do not assume files written by 2.0 can be
+reopened with 1.5.
 
-The bundled 2.0 extensions are `vss`, `fts`, and `httpfs`. DuckPGQ is not bundled
-for this alpha; graph expansion uses the existing BFS implementation by default.
-Keep `UseDuckPGQ` false. Back up existing data before trying an alpha; don't use
-it for production or assume files written by 2.0 can be reopened with 1.5.
-
-On Apple Silicon, Docker Desktop's default AMD64 emulation can report invalid
-extension signatures for this preview even when the signatures are valid.
-The same Linux binaries load successfully under QEMU. Use native Linux AMD64
-or QEMU for container validation; do not enable `allow_unsigned_extensions`.
+Engine performance comparisons run on GitHub-hosted Linux runners, not developer
+machines. See [the comparison procedure](BENCHMARK.md#duckdb-engine-comparison).
 
 ## What it does
 

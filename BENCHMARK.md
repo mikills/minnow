@@ -2,6 +2,31 @@
 
 End-to-end vector query latency over synthetic random vectors, top-10. Single-threaded client, warm state.
 
+## DuckDB engine comparison
+
+The **DuckDB comparison** GitHub Actions workflow compares the PR base engine
+(currently 1.5.0) with stable 2.0 on one GitHub-hosted Ubuntu AMD64 runner.
+It runs when a PR changes the driver, extension bundles, simulations or comparison
+tooling. An unchanged engine is skipped. Nothing runs until the branch is pushed.
+
+- Build both revisions sequentially before timing; verify linked versions and
+  read persisted HNSW/FTS indexes created by the base engine with the candidate.
+- Require identical simulation sources. Run the 15 existing `TestSim` scenarios
+  and tiered recovery separately, each with seeds `1, 2, 3, 7, 42, 100`.
+- Run three rounds, alternating engine order and rotating scenario order. Each
+  measured process has fresh test state and an isolated extension home.
+- Use `GOMAXPROCS=2`, `GOMEMLIMIT=384MiB`, build `-p=1`, test `-parallel=1`;
+  retain extension signature checks. No performance runs on developer machines.
+- Publish an actual base/candidate/change table in the Actions job summary and
+  upload raw logs, GNU time measurements, engine versions, commit hashes, module
+  pins, host information, and JSON results as the `duckdb-comparison` artifact.
+
+Elapsed and CPU numbers are medians of the three per-round sums; RSS is the median
+of the per-round maximum process RSS. These are correctness-simulation execution
+costs, **not query throughput**. They should not be compared directly with the
+older macOS measurements below. A failed, skipped or incomplete seed set fails
+the comparison instead of producing a misleading passing row.
+
 ## Setup
 
 - Hardware: Apple M4, local SSD.

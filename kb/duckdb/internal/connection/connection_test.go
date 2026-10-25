@@ -21,7 +21,7 @@ func TestRuntime(t *testing.T) {
 		var version, sourceID, codename string
 		require.NoError(t, db.QueryRowContext(t.Context(), `PRAGMA version`).Scan(&version, &sourceID, &codename))
 		require.Equal(t, NativeVersion, version)
-		require.Equal(t, "f2f9329721", sourceID)
+		require.Equal(t, "d54cbbe3df", sourceID)
 		t.Logf("DuckDB %s (%s)", version, sourceID)
 	})
 

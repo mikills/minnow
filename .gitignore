@@ -34,5 +34,5 @@ todo.md
 
 .claude/
 
-# Checksum-verified native DuckDB archives, downloaded by scripts/duckdb.sh
+# Local native-library caches from earlier builds
 /.cache/duckdb/

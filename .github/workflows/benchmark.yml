@@ -165,7 +165,7 @@ jobs:
           go_timeout=$(( ${{ needs.plan.outputs.timeout_minutes }} - 10 ))
           [ "$go_timeout" -gt 0 ] || go_timeout=${{ needs.plan.outputs.timeout_minutes }}
           /usr/bin/time -v -o "rss-${{ matrix.case }}.txt" \
-            bash scripts/duckdb.sh test ./kb/duckdb/ -bench=BenchmarkVectorQuery -run='^$' \
+            go test ./kb/duckdb/ -bench=BenchmarkVectorQuery -run='^$' \
               -benchtime=1x -v -timeout=${go_timeout}m \
             2>&1 | tee "bench-${{ matrix.case }}.log"
           exit "${PIPESTATUS[0]}"
