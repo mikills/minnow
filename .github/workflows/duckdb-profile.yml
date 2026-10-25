@@ -65,7 +65,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends linux-tools-generic heaptrack
           # The runner's kernel may differ from the tools-generic package.
           # Use the actual perf executable, not the version-matching wrapper.
-          perf=$(find /usr/lib/linux-tools -type f -name perf | sort -V | tail -n1)
+          perf=$(find -L /usr/lib/linux-tools -type f -name perf | sort -V | tail -n1)
+          echo "Using perf executable: $perf"
           test -x "$perf"
           echo "PERF=$perf" >> "$GITHUB_ENV"
           "$perf" version > profiles/tools.txt
@@ -102,11 +103,16 @@ jobs:
       - name: Preserve matching binaries and extensions for offline symbolization
         if: always()
         run: |
-          tar -czf profiles/symbols.tar.gz \
-            profiles/baseline-profile profiles/candidate-profile \
+          files=()
+          for file in profiles/baseline-profile profiles/candidate-profile \
             profiles/baseline.test profiles/candidate.test \
             baseline/extensions/v1.5.0/linux_amd64 \
-            candidate/extensions/v2.0.0/linux_amd64
+            candidate/extensions/v2.0.0/linux_amd64; do
+            if [ -e "$file" ]; then files+=("$file"); fi
+          done
+          if [ "${#files[@]}" -gt 0 ]; then
+            tar -czf profiles/symbols.tar.gz "${files[@]}"
+          fi
 
       - uses: actions/upload-artifact@v4
         if: always()
