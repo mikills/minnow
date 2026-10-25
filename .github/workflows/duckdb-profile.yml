@@ -88,6 +88,7 @@ jobs:
               go list -m all > "../profiles/$revision.modules.txt"
               go build -p=1 -o "$GITHUB_WORKSPACE/profiles/$revision-profile" \
                 "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/main.go" \
+                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/query_split.go" \
                 "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/memory_linux.go"
               go build -p=1 -o "$GITHUB_WORKSPACE/profiles/$revision-probe" \
                 "$GITHUB_WORKSPACE/candidate/scripts/duckdb_compat/main.go"

@@ -13,7 +13,13 @@ import subprocess
 from compare_duckdb import CONTROLS, require_ci
 
 
-MODES = {"core": 20, "vss": 20, "fts": 20, "configured": 20, "ingest": 20, "query": 1000}
+MODES = {"core": 20, "vss": 20, "fts": 20, "configured": 20, "ingest": 20, "query": 1000,
+         "query_split": 300}
+SPLIT_CASES = ("vector", "bm25", "bound_vector")
+SPLIT_STAGES = ("adhoc", "prepare", "fresh_execute", "stmt_close", "reuse_execute")
+SPLIT_PATH_STAGES = {"all": SPLIT_STAGES, "adhoc": ("adhoc",),
+                     "prepare": ("prepare", "stmt_close"), "reuse": ("reuse_execute",)}
+SPLIT_PLANS = set(SPLIT_CASES) | {"bound_vector_axis1"}
 
 
 def has_native_symbols(text):
@@ -41,22 +47,31 @@ def run(command, prefix, cwd, env, timeout=120):
         raise RuntimeError(f"{prefix.name}: exit {code}; see .err/.out")
 
 
-def validate_probe(data, mode, iterations, version):
+def validate_probe(data, mode, iterations, version, query_path="all"):
     if (data["version"], data["mode"], data["iterations"]) != (version, mode, iterations):
         raise RuntimeError("probe engine/workload mismatch")
     stages = defaultdict(int)
     for sample in data["samples"]:
         stages[sample["stage"]] += 1
-    opens = 1 if mode in ("ingest", "query") else iterations
+    opens = 1 if mode in ("ingest", "query", "query_split") else iterations
     expected = {"initial": 1, "open": opens, "close": opens, "after_gc": 1, "after_trim": 1}
-    if mode in ("vss", "configured", "ingest", "query"):
+    if mode in ("vss", "configured", "ingest", "query", "query_split"):
         expected["load_vss"] = opens
-    if mode in ("fts", "configured", "ingest", "query"):
+    if mode in ("fts", "configured", "ingest", "query", "query_split"):
         expected["load_fts"] = opens
-    if mode in ("ingest", "query"):
-        expected.update(append=8 if mode == "query" else iterations, hnsw=1, fts_index=1, checkpoint=1)
+    if mode in ("ingest", "query", "query_split"):
+        expected.update(append=iterations if mode == "ingest" else 8, hnsw=1, fts_index=1, checkpoint=1)
     if mode == "query":
         expected.update(vector_query=iterations, bm25_query=iterations)
+    if mode == "query_split":
+        if (query_path not in SPLIT_PATH_STAGES or data.get("query_path") != query_path
+                or set(data.get("query_plans", {})) != SPLIT_PLANS):
+            raise RuntimeError("query_split requires the requested measured paths and both parameter plans")
+        if not has_hnsw(data["query_plans"]["vector"]):
+            raise RuntimeError("literal vector fixture lost HNSW")
+        for case in SPLIT_CASES:
+            for stage in SPLIT_PATH_STAGES[query_path]:
+                expected[f"{stage}_{case}"] = iterations
     if dict(stages) != expected:
         raise RuntimeError(f"incomplete {mode} stages: {dict(stages)}, expected {expected}")
 
@@ -123,6 +138,63 @@ def summary(records, errors):
     return "\n".join(lines) + "\n"
 
 
+def has_hnsw(plan):
+    return "HNSW_INDEX_SCAN" in plan.upper().replace(" ", "_")
+
+
+def split_summary(records):
+    """Same-connection path costs; parameterized execution may still replan."""
+    grouped, indexed = defaultdict(list), defaultdict(list)
+    for record in records:
+        data = record["data"]
+        if data["mode"] != "query_split":
+            continue
+        label = record["label"]
+        for case in ("vector", "bound_vector"):
+            plans = [data["query_plans"][case]]
+            if case == "bound_vector":
+                plans.append(data["query_plans"]["bound_vector_axis1"])
+            indexed[(label, case)].append(all(has_hnsw(plan) for plan in plans))
+        stages = defaultdict(list)
+        for sample in data["samples"]:
+            stages[sample["stage"]].append(sample["elapsed_ns"] / 1e6)
+        for stage, values in stages.items():
+            grouped[(label, stage)].append(statistics.mean(values))
+    lines = ["", "### Query preparation versus execution", "",
+             "Same pinned connection and inputs; three rounds, warmups excluded. All values ms/operation.",
+             "Prepare includes whatever parsing/binding/optimization the engine performs at PrepareContext.",
+             "Execution includes binding, any deferred optimization/replanning, running, and scanning one ID.",
+             "Fixed-SQL reuse is an upper bound: Minnow embeds vector literals and BM25 search terms in its SQL.",
+             "The bound-vector case alternates directions, checks results, and saves EXPLAIN for both inputs.", "",
+             "| query | engine | ad hoc | prepare | fresh execute | stmt close | reused execute | reuse saving | HNSW in bound EXPLAIN |",
+             "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
+    for case in SPLIT_CASES:
+        for label in ("baseline", "candidate"):
+            values = []
+            for stage in SPLIT_STAGES:
+                rows = grouped[(label, f"{stage}_{case}")]
+                if len(rows) != 3:
+                    break
+                values.append(statistics.median(rows))
+            if len(values) != len(SPLIT_STAGES):
+                continue
+            adhoc, prepare, execute, close, reused = values
+            saving = f"{100 * (1 - reused / adhoc):+.1f}%" if adhoc else "n/a"
+            plan = "not applicable"
+            if case != "bm25":
+                plan = "yes" if len(indexed[(label, case)]) == 3 and all(indexed[(label, case)]) else "NO — reject variant"
+                if plan != "yes":
+                    saving = "not comparable"
+            lines.append(f"| {case} | {label} | {adhoc:.3f} | {prepare:.3f} | {execute:.3f} | {close:.3f} | "
+                         f"{reused:.3f} | {saving} | {plan} |")
+    lines += ["", "Do not infer production cache hit rates from fixed-query reuse. Parameterized timings are",
+              "only an optimization candidate if HNSW remains usable; SQL EXPLAIN does not prove every",
+              "internal prepared execution uses an identical plan. End-to-end validation remains necessary.",
+              "Native prepare/reuse captures include fixture setup and warmups; only the measured loop",
+              "selects a single path. Do not interpret their whole-process percentages as isolated stage costs."]
+    return "\n".join(lines) + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
@@ -143,7 +215,7 @@ def main():
             "engines": engines, "runs": records, "errors": errors,
             "completed": completed, "finished": finished,
         }, indent=2))
-        text = summary(records, errors)
+        text = summary(records, errors) + split_summary(records)
         if not finished:
             text = "**Partial diagnostics: profiling has not finished.**\n\n" + text
         (results / "summary.md").write_text(text)
@@ -171,7 +243,7 @@ def main():
         validate_probe(data, mode, iterations, engines[label])
         records.append({"label": label, "round": index, "data": data})
 
-    def cpu(label, name, command, is_sim=False):
+    def cpu(label, name, command, is_sim=False, mode=None, query_path="all"):
         prefix = results / f"cpu-{label}-{name}"
         perf = os.environ["PERF"]
         # DWARF capture/processing exceeded the budget on the 2.0 Go/C++ stacks
@@ -184,6 +256,9 @@ def main():
             output = Path(str(prefix) + ".out").read_text()
             if f"--- PASS: TestSim/{name}/seed_1 (" not in output or "--- SKIP:" in output:
                 raise RuntimeError(f"{name}: simulation seed did not pass")
+        elif mode is not None:
+            data = json.loads(Path(str(prefix) + ".out").read_text())
+            validate_probe(data, mode, MODES[mode], engines[label], query_path)
         report_prefix = results / f"{prefix.name}.leaf"
         run([perf, "report", "--stdio", "--no-children", "--call-graph", "none", "--sort", "dso,symbol",
              "--percent-limit", "0.5", "-i", str(prefix) + ".data"], report_prefix, root, env)
@@ -217,7 +292,11 @@ def main():
             for mode in ("configured", "ingest"):
                 attempt(f"heap {label} {mode}", lambda: heap(label, mode))
             for mode in ("configured", "query"):
-                attempt(f"cpu {label} {mode}", lambda: cpu(label, mode, target(label, mode, MODES[mode])))
+                attempt(f"cpu {label} {mode}", lambda: cpu(label, mode, target(label, mode, MODES[mode]), mode=mode))
+            for path in ("prepare", "reuse"):
+                command = target(label, "query_split", MODES["query_split"]) + ["-query-path", path]
+                attempt(f"cpu {label} query_split {path}",
+                        lambda: cpu(label, f"query_split_{path}", command, mode="query_split", query_path=path))
             for scenario in ("repeated_small_ingests", "random_ops_fuzz"):
                 command = [str(results / f"{label}.test"), "-test.v", "-test.count=1", "-test.parallel=1",
                            "-test.timeout=5m", f"-test.run=^TestSim$/^{scenario}$/^seed_1$"]

@@ -38,6 +38,15 @@ The probe refuses to execute locally. Profiling does not alter production code.
   appender batches, HNSW/FTS builds, checkpoints, and warm vector/BM25 queries.
   Memory inspection is outside operation timers. These are diagnostic fixtures,
   not a production throughput benchmark.
+- The query-split fixture measures ad hoc calls, prepare, first execution,
+  statement close, and reused execution on one pinned connection. Fixed vector
+  and BM25 SQL are compared with changing bound vectors. Results are checked,
+  plans for both bound inputs are saved, and parameterization that loses HNSW is
+  not reported as a usable optimization. Execution may include deferred binding and replanning;
+  prepared execution is not claimed to measure the executor in isolation.
+  Separate native CPU captures cover preparation-only and reused-execution loops.
+  These captures still include setup and warmups; their whole-process percentages
+  are not isolated stage costs.
 - Native CPU sampling uses Linux `perf` and software `cpu-clock:u` leaf samples.
   It also profiles the real repeated-ingest and random-operations simulations at
   seed 1. DWARF capture/processing exceeded the budget on 2.0 Go/C++ stacks, so the run

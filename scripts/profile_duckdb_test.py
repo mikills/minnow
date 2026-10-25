@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from profile_duckdb import has_native_symbols, run, summary, validate_probe
+from profile_duckdb import (SPLIT_CASES, SPLIT_PATH_STAGES,
+                           has_native_symbols, run, split_summary, summary, validate_probe)
 
 
 def configured(version="v2.0.0", iterations=20, elapsed=1500000):
@@ -18,6 +19,22 @@ def configured(version="v2.0.0", iterations=20, elapsed=1500000):
     stages += ["after_gc", "after_trim"]
     return {"mode": "configured", "version": version, "iterations": iterations,
             "samples": [sample(stage) for stage in stages]}
+
+
+def query_split(version="v2.0.0", iterations=2, path="all"):
+    data = configured(version, iterations=1)
+    data.update(mode="query_split", iterations=iterations, query_path=path,
+                query_plans={"vector": "Hnsw Index Scan", "bound_vector": "Hnsw Index Scan",
+                             "bound_vector_axis1": "Hnsw Index Scan", "bm25": "Projection"})
+    # One database, fixed seed data, both index builds and the checkpoint.
+    for stage in ["append"] * 8 + ["hnsw", "fts_index", "checkpoint"]:
+        data["samples"].append(dict(data["samples"][0], stage=stage))
+    for case in SPLIT_CASES:
+        for stage in SPLIT_PATH_STAGES[path]:
+            elapsed = 8000000 if stage == "adhoc" else 2000000
+            for _ in range(iterations):
+                data["samples"].append(dict(data["samples"][0], stage=f"{stage}_{case}", elapsed_ns=elapsed))
+    return data
 
 
 class ProfileTest(unittest.TestCase):
@@ -46,6 +63,41 @@ class ProfileTest(unittest.TestCase):
         self.assertIn("2.00 | 1.00 | 1.00 | 1.00 | 0.50 | 0.00", text)
         self.assertIn("perf unavailable", text)
         self.assertIn("not proof of a leak", text)
+
+    def test_query_split_completeness(self):
+        data = query_split()
+        validate_probe(data, "query_split", 2, "v2.0.0")
+        data["samples"].pop()
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
+            validate_probe(data, "query_split", 2, "v2.0.0")
+        data = query_split()
+        data["query_path"] = "reuse"
+        with self.assertRaisesRegex(RuntimeError, "requested measured paths"):
+            validate_probe(data, "query_split", 2, "v2.0.0")
+        for path in ("prepare", "reuse", "adhoc"):
+            with self.subTest(path=path):
+                validate_probe(query_split(path=path), "query_split", 2, "v2.0.0", path)
+        data = query_split()
+        del data["query_plans"]["bound_vector_axis1"]
+        with self.assertRaisesRegex(RuntimeError, "both parameter plans"):
+            validate_probe(data, "query_split", 2, "v2.0.0")
+        data = query_split()
+        data["query_plans"]["vector"] = "Seq Scan"
+        with self.assertRaisesRegex(RuntimeError, "lost HNSW"):
+            validate_probe(data, "query_split", 2, "v2.0.0")
+
+    def test_query_split_summary_rejects_lost_index(self):
+        records = [{"label": label, "round": index, "data": query_split(version)}
+                   for index in range(3)
+                   for label, version in (("baseline", "v1.5.0"), ("candidate", "v2.0.0"))]
+        text = split_summary(records)
+        self.assertIn("8.000 | 2.000 | 2.000 | 2.000 | 2.000 | +75.0% | yes", text)
+        self.assertIn("deferred optimization", text)
+        for record in records:
+            if record["label"] == "candidate":
+                record["data"]["query_plans"]["bound_vector_axis1"] = "Seq Scan"
+        text = split_summary(records)
+        self.assertIn("not comparable | NO — reject variant", text)
 
     def test_dotted_output_names_and_timeout_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:

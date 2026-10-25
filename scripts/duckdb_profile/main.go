@@ -43,6 +43,7 @@ type probe struct {
 	Iterations int               `json:"iterations"`
 	Samples    []sample          `json:"samples"`
 	Plans      map[string]string `json:"query_plans,omitempty"`
+	QueryPath  string            `json:"query_path,omitempty"`
 }
 
 func allowed() bool {
@@ -50,7 +51,8 @@ func allowed() bool {
 }
 
 func main() {
-	mode := flag.String("mode", "configured", "core, vss, fts, configured, ingest, or query")
+	mode := flag.String("mode", "configured", "core, vss, fts, configured, ingest, query, or query_split")
+	queryPath := flag.String("query-path", "all", "query_split path: all, adhoc, prepare, or reuse")
 	extensions := flag.String("extensions", "", "absolute offline extension directory")
 	expect := flag.String("expect", "", "required engine version")
 	iterations := flag.Int("iterations", 20, "bounded operation count")
@@ -59,7 +61,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "profiling is restricted to GitHub-hosted Linux Actions runners")
 		os.Exit(1)
 	}
-	p := probe{Mode: *mode, Iterations: *iterations}
+	p := probe{Mode: *mode, Iterations: *iterations, QueryPath: *queryPath}
 	if err := p.run(*extensions, *expect); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -83,7 +85,7 @@ func (p *probe) timed(stage string, operation func() error) error {
 	s := sample{Stage: stage, ElapsedNS: elapsed,
 		UserNS: after.Utime.Nano() - before.Utime.Nano(), SystemNS: after.Stime.Nano() - before.Stime.Nano()}
 	// Keep /proc and allocator inspection out of the hot query loop.
-	if stage != "vector_query" && stage != "bm25_query" {
+	if !hotQueryStage(stage) {
 		if statErr := s.memory(); statErr != nil {
 			return statErr
 		}
@@ -146,9 +148,17 @@ func (p *probe) run(extensions, expect string) error {
 		return fmt.Errorf("extensions, expect, and 1..10000 iterations are required")
 	}
 	switch p.Mode {
-	case "core", "vss", "fts", "configured", "ingest", "query":
+	case "core", "vss", "fts", "configured", "ingest", "query", "query_split":
 	default:
 		return fmt.Errorf("unknown mode %q", p.Mode)
+	}
+	if p.QueryPath != "all" && p.Mode != "query_split" {
+		return fmt.Errorf("query-path is only valid with query_split")
+	}
+	switch p.QueryPath {
+	case "all", "adhoc", "prepare", "reuse":
+	default:
+		return fmt.Errorf("unknown query-path %q", p.QueryPath)
 	}
 	dir, err := os.MkdirTemp("", "duckdb-profile-")
 	if err != nil {
@@ -159,12 +169,12 @@ func (p *probe) run(extensions, expect string) error {
 		return err
 	}
 	count := p.Iterations
-	if p.Mode == "ingest" || p.Mode == "query" {
+	if p.workloadDB() {
 		count = 1
 	}
 	for i := 0; i < count; i++ {
 		path := ""
-		if p.Mode == "ingest" || p.Mode == "query" {
+		if p.workloadDB() {
 			path = filepath.Join(dir, "data.duckdb")
 		}
 		if err := p.database(path, extensions, expect); err != nil {
@@ -222,10 +232,10 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 		return err
 	}
 	queries := []struct{ stage, query string }{}
-	if p.Mode == "vss" || p.Mode == "configured" || p.Mode == "ingest" || p.Mode == "query" {
+	if p.Mode == "vss" || p.Mode == "configured" || p.workloadDB() {
 		queries = append(queries, struct{ stage, query string }{"load_vss", "LOAD vss"})
 	}
-	if p.Mode == "fts" || p.Mode == "configured" || p.Mode == "ingest" || p.Mode == "query" {
+	if p.Mode == "fts" || p.Mode == "configured" || p.workloadDB() {
 		queries = append(queries, struct{ stage, query string }{"load_fts", "LOAD fts"})
 	}
 	for _, query := range queries {
@@ -233,7 +243,7 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 			return err
 		}
 	}
-	if p.Mode != "ingest" && p.Mode != "query" {
+	if !p.workloadDB() {
 		return nil
 	}
 	if _, err := db.Exec(`SET hnsw_enable_experimental_persistence = true;
@@ -241,7 +251,7 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 		return err
 	}
 	batches := p.Iterations
-	if p.Mode == "query" {
+	if p.Mode == "query" || p.Mode == "query_split" {
 		batches = 8
 	}
 	for batch := 0; batch < batches; batch++ {
@@ -257,6 +267,9 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 		if err := p.timed(query.stage, func() error { _, err := db.Exec(query.query); return err }); err != nil {
 			return err
 		}
+	}
+	if p.Mode == "query_split" {
+		return p.splitQueries(db)
 	}
 	if p.Mode == "query" {
 		p.Plans = map[string]string{}
@@ -295,6 +308,22 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 		}
 	}
 	return nil
+}
+
+func (p *probe) workloadDB() bool {
+	return p.Mode == "ingest" || p.Mode == "query" || p.Mode == "query_split"
+}
+
+func hotQueryStage(stage string) bool {
+	if stage == "vector_query" || stage == "bm25_query" {
+		return true
+	}
+	for _, prefix := range []string{"adhoc_", "prepare_", "fresh_execute_", "reuse_execute_", "stmt_close_"} {
+		if strings.HasPrefix(stage, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 var profileQueries = []struct{ stage, query string }{
