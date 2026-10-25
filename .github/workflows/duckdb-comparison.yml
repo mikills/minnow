@@ -72,12 +72,15 @@ jobs:
         id: engines
         run: |
           set -euo pipefail
+          # Compile the exact same query fixture against both application revisions.
+          cp candidate/kb/duckdb/query_cache_benchmark_test.go baseline/kb/duckdb/query_cache_benchmark_test.go
           for revision in baseline candidate; do
             (
               cd "$revision"
               git rev-parse HEAD > "../results/$revision.sha"
               go list -m all > "../results/$revision.modules.txt"
               go test -p=1 -c -o "$GITHUB_WORKSPACE/results/$revision.test" ./sim
+              go test -p=1 -c -o "$GITHUB_WORKSPACE/results/$revision-query.test" ./kb/duckdb
               go build -p=1 -o "$GITHUB_WORKSPACE/results/$revision-probe" \
                 "$GITHUB_WORKSPACE/candidate/scripts/duckdb_compat/main.go"
               "../results/$revision-probe" > "../results/$revision.engine.json"
@@ -108,14 +111,14 @@ jobs:
           go test -p=1 -parallel=1 -count=1 -run '^(TestRuntime|TestExtensions|TestAppender)$' \
             ./kb/duckdb ./kb/duckdb/internal/connection
           go test -race -p=1 -parallel=1 -count=1 -timeout=3m \
-            -run '^(TestMutableOpen|TestShardOpen|TestShardConnPool.*)$' ./kb/duckdb
+            -run '^(TestMutableOpen|TestShardOpen|TestShardConnPool.*|TestShardQueryCache|TestBoundVector|TestPreparedVectorPlan)$' ./kb/duckdb
 
       - name: Compare isolated simulation execution (three alternating rounds)
         if: steps.engines.outputs.compare == 'true'
         run: |
           args=()
           if [ "$COMPARE_SAME_ENGINE" = true ]; then args+=(--same-engine); fi
-          python3 candidate/scripts/compare_duckdb.py --root "$GITHUB_WORKSPACE" --rounds 3 "${args[@]}"
+          python3 candidate/scripts/compare_duckdb.py --root "$GITHUB_WORKSPACE" --rounds 3 --queries "${args[@]}"
 
       - uses: actions/upload-artifact@v4
         if: always()

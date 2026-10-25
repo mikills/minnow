@@ -27,13 +27,27 @@ costs, **not query throughput**. They should not be compared directly with the
 older macOS measurements below. A failed, skipped or incomplete seed set fails
 the comparison instead of producing a misleading passing row.
 
-### Initialization revision comparison
+### Same-engine revision comparison
 
-For initialization optimizations, dispatch **DuckDB comparison** on the candidate
+For application optimizations, dispatch **DuckDB comparison** on the candidate
 branch with `same_engine=true` and `baseline_ref` set to the pre-optimization 2.0
-commit (currently `c6030fb3371177f3335934da4fd6eb7d0a4c3655`). Both engine/source
+commit (`f8b27e34441b1b40117c13ae06841aa9937984a5` before query caching). Both engine/source
 probes must match. This isolates the application change from the engine upgrade;
 the usual pull-request comparison still measures main's 1.5 against 2.0.
+
+The workflow also compiles the exact same `BenchmarkWarmShardQuery` fixture into
+both revisions and measures warm production shard paths: 32/512-dimensional
+vectors, ref-only ranking plus hydration, metadata filtering, document scopes,
+BM25, and statement-cache churn. Each case alternates vectors and runs for two
+seconds in three rounds. Fixture setup and warmup are outside query timers;
+whole-process peak RSS includes setup. The fixture refuses local execution.
+
+Immutable pooled shards cache their metadata-column capability and retain at
+most eight prepared vector statements per handle. Only unfiltered, unscoped
+top-k queries use bound vectors; scoped/filtered SQL remains unchanged. Bound
+values preserve the existing six-decimal literal rounding. Eviction closes every
+statement before closing its database. Schema/statement caches never apply to
+mutable or caller-owned direct database handles.
 
 ### Native profiling
 

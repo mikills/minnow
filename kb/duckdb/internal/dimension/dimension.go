@@ -10,7 +10,9 @@ import (
 	kb "github.com/mikills/minnow/kb"
 )
 
-func ReadDuckDBEmbedding(ctx context.Context, db *sql.DB) (int, error) {
+func ReadDuckDBEmbedding(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (int, error) {
 	var dataType string
 	err := db.QueryRowContext(ctx, `
 		SELECT data_type

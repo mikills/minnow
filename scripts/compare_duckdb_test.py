@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from compare_duckdb import SEEDS, WORKLOADS, aggregate, measure, report, require_ci, validate_engines, validate_tests
+from compare_duckdb import (QUERY_CASES, SEEDS, WORKLOADS, aggregate, measure, measure_query,
+                           parse_query_result, query_report, report, require_ci, validate_engines, validate_tests)
 
 
 class ComparisonTest(unittest.TestCase):
@@ -55,7 +56,7 @@ class ComparisonTest(unittest.TestCase):
         self.assertIn("| change |", text)
         self.assertIn("+0.0%", text)
         same_engine = report(summary, {label: {"version": "v2.0.0"} for label in summary}, same_engine=True)
-        self.assertIn("initialization revision comparison", same_engine)
+        self.assertIn("same-engine revision comparison", same_engine)
         with self.assertRaises(RuntimeError):
             aggregate(records[:-1])
 
@@ -96,6 +97,42 @@ class ComparisonTest(unittest.TestCase):
                     measure(root, "candidate", 0, ("TestSim", "warm_vs_cold"))
                 kill.assert_called_once()
                 self.assertEqual(kill.call_args.args[0], 12345)
+
+    def test_query_results(self):
+        output = "BenchmarkWarmShardQuery/full_512-2 123 1500000 ns/op 4096 B/op 12 allocs/op\nPASS\n"
+        self.assertEqual(parse_query_result(output, "full_512")["ns_per_op"], 1500000)
+        for bad in ("PASS\n", output + output, output + "--- SKIP: missing", output.replace("123 ", "0 ")):
+            with self.assertRaises(RuntimeError):
+                parse_query_result(bad, "full_512")
+        records = [{"label": label, "case": case, "round": index,
+                    "ns_per_op": ns, "process_peak_rss_mib": 128}
+                   for index in range(3) for case in QUERY_CASES
+                   for label, ns in (("baseline", 2000000), ("candidate", 1000000))]
+        self.assertIn("2.000 | 1.000 | -50.0%", query_report(records))
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
+            query_report(records[:-1])
+
+    def test_query_process_controls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "results").mkdir()
+            process = MagicMock()
+            process.__enter__.return_value = process
+            process.wait.return_value = 0
+
+            def spawn(command, **kwargs):
+                kwargs["stdout"].write("BenchmarkWarmShardQuery/full_512-2 123 1500000 ns/op 4096 B/op 12 allocs/op\nPASS\n")
+                Path(command[command.index("-o") + 1]).write_text("1 2 3 4096")
+                self.assertEqual(kwargs["env"]["GOMAXPROCS"], "2")
+                self.assertEqual(kwargs["cwd"], root / "baseline" / "kb" / "duckdb")
+                self.assertIn("-test.benchtime=2s", command)
+                self.assertIn("-test.run=^$", command)
+                return process
+
+            with patch("compare_duckdb.subprocess.Popen", side_effect=spawn):
+                result = measure_query(root, "baseline", 0, "full_512")
+            self.assertEqual(result["process_peak_rss_mib"], 4)
+            self.assertEqual(result["ns_per_op"], 1500000)
 
 
 if __name__ == "__main__":

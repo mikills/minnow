@@ -13,9 +13,11 @@ import (
 
 // Callers must hold mu while using db.
 type shardConn struct {
-	db      *sql.DB
-	mu      sync.Mutex
-	lastUse time.Time
+	db               *sql.DB
+	mu               sync.Mutex
+	lastUse          time.Time
+	metadataExpr     string
+	vectorStatements []shardVectorStatement
 }
 
 var errShardConnPoolEvicting = errors.New("DuckDB shard cache path is being evicted")
@@ -121,7 +123,7 @@ func (p *shardConnPool) GetOrOpen(ctx context.Context, localPath string, maxEntr
 
 		for _, stale := range toClose {
 			stale.mu.Lock()
-			if err := stale.db.Close(); err != nil {
+			if err := stale.close(); err != nil {
 				slog.Default().Warn("close LRU shard connection failed", logKeyError, err)
 			}
 			stale.mu.Unlock()
@@ -213,7 +215,7 @@ func (p *shardConnPool) BeginEviction(prefix string) func() {
 
 	for _, sc := range toClose {
 		sc.mu.Lock()
-		if err := sc.db.Close(); err != nil {
+		if err := sc.close(); err != nil {
 			slog.Default().Warn("close shard connection failed", logKeyError, err)
 		}
 		sc.mu.Unlock()
@@ -336,7 +338,7 @@ func (p *shardConnPool) CloseAll() {
 
 	for _, sc := range entries {
 		sc.mu.Lock()
-		if err := sc.db.Close(); err != nil {
+		if err := sc.close(); err != nil {
 			slog.Default().Warn("close shard connection failed", logKeyError, err)
 		}
 		sc.mu.Unlock()
