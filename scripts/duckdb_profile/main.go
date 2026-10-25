@@ -28,16 +28,21 @@ type sample struct {
 	UserNS    int64             `json:"user_ns"`
 	SystemNS  int64             `json:"system_ns"`
 	GoHeap    uint64            `json:"go_heap_bytes"`
+	GoSys     uint64            `json:"go_sys_bytes"`
+	GoHeapSys uint64            `json:"go_heap_sys_bytes"`
+	GoRelease uint64            `json:"go_heap_released_bytes"`
+	GoStacks  uint64            `json:"go_stack_in_use_bytes"`
 	OS        map[string]uint64 `json:"os_kib"`
 	Allocator map[string]uint64 `json:"glibc_bytes"`
 }
 
 type probe struct {
-	Mode       string   `json:"mode"`
-	Version    string   `json:"version"`
-	Source     string   `json:"source"`
-	Iterations int      `json:"iterations"`
-	Samples    []sample `json:"samples"`
+	Mode       string            `json:"mode"`
+	Version    string            `json:"version"`
+	Source     string            `json:"source"`
+	Iterations int               `json:"iterations"`
+	Samples    []sample          `json:"samples"`
+	Plans      map[string]string `json:"query_plans,omitempty"`
 }
 
 func allowed() bool {
@@ -91,6 +96,10 @@ func (s *sample) memory() error {
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	s.GoHeap = memory.HeapAlloc
+	s.GoSys = memory.Sys
+	s.GoHeapSys = memory.HeapSys
+	s.GoRelease = memory.HeapReleased
+	s.GoStacks = memory.StackInuse
 	data, err := os.ReadFile("/proc/self/smaps_rollup")
 	if err != nil {
 		return err
@@ -250,11 +259,32 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 		}
 	}
 	if p.Mode == "query" {
+		p.Plans = map[string]string{}
+		for _, query := range profileQueries {
+			rows, err := db.Query("EXPLAIN " + query.query)
+			if err != nil {
+				return err
+			}
+			var plan strings.Builder
+			for rows.Next() {
+				var key, value string
+				if err := rows.Scan(&key, &value); err != nil {
+					rows.Close()
+					return err
+				}
+				plan.WriteString(value)
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return err
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			p.Plans[query.stage] = plan.String()
+		}
 		for i := 0; i < p.Iterations; i++ {
-			for _, query := range []struct{ stage, query string }{
-				{"vector_query", `SELECT id FROM docs ORDER BY array_distance(embedding, [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]::FLOAT[32]) LIMIT 1`},
-				{"bm25_query", `SELECT id FROM docs WHERE fts_main_docs.match_bm25(id, 'search') IS NOT NULL LIMIT 1`},
-			} {
+			for _, query := range profileQueries {
 				if err := p.timed(query.stage, func() error {
 					var id string
 					return db.QueryRow(query.query).Scan(&id)
@@ -265,6 +295,11 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 		}
 	}
 	return nil
+}
+
+var profileQueries = []struct{ stage, query string }{
+	{"vector_query", `SELECT id FROM docs ORDER BY array_distance(embedding, [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]::FLOAT[32]) LIMIT 1`},
+	{"bm25_query", `SELECT id FROM docs WHERE fts_main_docs.match_bm25(id, 'search') IS NOT NULL LIMIT 1`},
 }
 
 func appendBatch(db *sql.DB, batch int) error {

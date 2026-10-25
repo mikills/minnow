@@ -15,7 +15,7 @@ from compare_duckdb import CONTROLS, require_ci
 MODES = {"core": 20, "vss": 20, "fts": 20, "configured": 20, "ingest": 20, "query": 1000}
 
 
-def run(command, prefix, cwd, env, timeout=600):
+def run(command, prefix, cwd, env, timeout=120):
     """Keep stdout (JSON or report) separate from profiler diagnostics."""
     with Path(str(prefix) + ".out").open("w") as output, Path(str(prefix) + ".err").open("w") as errors:
         with subprocess.Popen(command, cwd=cwd, env=env, stdout=output, stderr=errors,
@@ -104,7 +104,7 @@ def summary(records, errors):
                       sample["go_heap_bytes"] / 1048576, allocator["system_current"] / 1048576,
                       (allocator["fast"] + allocator["rest"]) / 1048576, allocator["mmap"] / 1048576]
             lines.append(f"| {label} | {point} | " + " | ".join(f"{value:.2f}" for value in values) + " |")
-    lines += ["", "See `.leaf.txt`/`.callers.txt` for native CPU attribution and `.allocations.txt` for heaptrack stacks.",
+    lines += ["", "See `.leaf.txt` for native CPU self-time attribution and `.allocations.txt` for heaptrack stacks.",
               "Heaptrack's outstanding-at-exit totals are not proof of a leak; interception/symbolization can be incomplete.",
               "The malloc_trim experiment is diagnostic only and does not change production settings."]
     if errors:
@@ -125,13 +125,28 @@ def main():
     if engines != {"baseline": "v1.5.0", "candidate": "v2.0.0"}:
         raise RuntimeError(f"expected 1.5.0 versus stable 2.0.0, got {engines}")
     env = dict(os.environ, **CONTROLS)
-    records, errors = [], []
+    records, errors, completed = [], [], []
 
-    def attempt(operation):
+    def save(finished=False):
+        (results / "phases.json").write_text(json.dumps({
+            "engines": engines, "runs": records, "errors": errors,
+            "completed": completed, "finished": finished,
+        }, indent=2))
+        text = summary(records, errors)
+        if not finished:
+            text = "**Partial diagnostics: profiling has not finished.**\n\n" + text
+        (results / "summary.md").write_text(text)
+        return text
+
+    def attempt(description, operation):
+        print(description, flush=True)
         try:
             operation()
+            completed.append(description)
         except (RuntimeError, OSError, ValueError) as error:
             errors.append(str(error))
+        finally:
+            save()
 
     def target(label, mode, iterations):
         return [str(results / f"{label}-profile"), "-mode", mode, "-iterations", str(iterations),
@@ -148,18 +163,20 @@ def main():
     def cpu(label, name, command, is_sim=False):
         prefix = results / f"cpu-{label}-{name}"
         perf = os.environ["PERF"]
-        run([perf, "record", "-e", "cpu-clock:u", "-F", "99", "--call-graph", "dwarf,8192",
+        # DWARF capture/processing exceeded the budget on the 2.0 Go/C++ stacks
+        # in the first run. Leaf samples retain native symbol attribution without that
+        # unwind cost. Skip build-id post-processing too; matching ELF files
+        # and the DSOs remain available for reports and in the artifact.
+        run([perf, "record", "-e", "cpu-clock:u", "-F", "199", "--no-buildid", "--no-buildid-cache",
              "-o", str(prefix) + ".data", "--"] + command, prefix, root / label / "sim", env)
         if is_sim:
             output = Path(str(prefix) + ".out").read_text()
             if f"--- PASS: TestSim/{name}/seed_1 (" not in output or "--- SKIP:" in output:
                 raise RuntimeError(f"{name}: simulation seed did not pass")
-        for suffix, options in (("leaf", ["--no-children", "--sort", "dso,symbol"]),
-                                ("callers", ["--children", "-g", "graph,0.5,caller"])):
-            report_prefix = results / f"{prefix.name}.{suffix}"
-            run([perf, "report", "--stdio", "--percent-limit", "0.5", "-i", str(prefix) + ".data"] + options,
-                report_prefix, root, env)
-            Path(str(report_prefix) + ".out").rename(results / f"{prefix.name}.{suffix}.txt")
+        report_prefix = results / f"{prefix.name}.leaf"
+        run([perf, "report", "--stdio", "--no-children", "--call-graph", "none", "--sort", "dso,symbol",
+             "--percent-limit", "0.5", "-i", str(prefix) + ".data"], report_prefix, root, env)
+        Path(str(report_prefix) + ".out").rename(results / f"{prefix.name}.leaf.txt")
         text = (results / f"{prefix.name}.leaf.txt").read_text()
         if "duckdb::" not in text and "duckdb_mbedtls" not in text:
             raise RuntimeError(f"{prefix.name}: native DuckDB symbols unavailable in perf report")
@@ -176,25 +193,27 @@ def main():
             report_prefix, root, env)
         Path(str(report_prefix) + ".out").rename(results / f"{prefix.name}.allocations.txt")
 
+    finished = False
     try:
         for index in range(3):
             for position, (mode, iterations) in enumerate(MODES.items()):
                 labels = ("baseline", "candidate") if (index + position) % 2 == 0 else ("candidate", "baseline")
                 for label in labels:
-                    attempt(lambda: phase(label, mode, iterations, index))
+                    attempt(f"phase {label} {mode} round={index}", lambda: phase(label, mode, iterations, index))
         for label in ("baseline", "candidate"):
+            # Capture allocation evidence before CPU processing, so a sampling
+            # tool problem cannot prevent both engines' allocation traces.
+            for mode in ("configured", "ingest"):
+                attempt(f"heap {label} {mode}", lambda: heap(label, mode))
             for mode in ("configured", "query"):
-                attempt(lambda: cpu(label, mode, target(label, mode, MODES[mode])))
+                attempt(f"cpu {label} {mode}", lambda: cpu(label, mode, target(label, mode, MODES[mode])))
             for scenario in ("repeated_small_ingests", "random_ops_fuzz"):
                 command = [str(results / f"{label}.test"), "-test.v", "-test.count=1", "-test.parallel=1",
                            "-test.timeout=5m", f"-test.run=^TestSim$/^{scenario}$/^seed_1$"]
-                attempt(lambda: cpu(label, scenario, command, is_sim=True))
-            for mode in ("configured", "ingest"):
-                attempt(lambda: heap(label, mode))
+                attempt(f"cpu {label} {scenario}", lambda: cpu(label, scenario, command, is_sim=True))
+        finished = True
     finally:
-        (results / "phases.json").write_text(json.dumps({"engines": engines, "runs": records, "errors": errors}, indent=2))
-        text = summary(records, errors)
-        (results / "summary.md").write_text(text)
+        text = save(finished=finished)
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
             output.write(text)
         print(text)

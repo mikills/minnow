@@ -38,9 +38,10 @@ The probe refuses to execute locally. Profiling does not alter production code.
   appender batches, HNSW/FTS builds, checkpoints, and warm vector/BM25 queries.
   Memory inspection is outside operation timers. These are diagnostic fixtures,
   not a production throughput benchmark.
-- Native CPU sampling uses Linux `perf`, software `cpu-clock:u` events, and DWARF
-  call graphs. It also profiles the real repeated-ingest and random-operations
-  simulations at seed 1. Both self-time and caller reports are saved.
+- Native CPU sampling uses Linux `perf` and software `cpu-clock:u` leaf samples.
+  It also profiles the real repeated-ingest and random-operations simulations at
+  seed 1. DWARF capture/processing exceeded the budget on 2.0 Go/C++ stacks, so the run
+  uses native function self-time without unwinding or build-id post-processing.
 - `heaptrack` records native allocation stacks separately for configured
   open/close cycles and ingestion. Profiled wall times are not benchmark results.
 - Process RSS/anonymous memory, Go heap, and all-arena glibc `malloc_info` counters
@@ -53,6 +54,8 @@ The `duckdb-native-profiles` artifact includes raw CPU/allocation traces, readab
 reports, per-operation JSON, tool/host metadata, and matching binaries/extensions
 for symbolization. Missing permissions, failed workloads, and unavailable native
 symbols are reported as failures rather than silently replaced with Go-only data.
+Each command is capped at two minutes and partial results are saved after every
+operation, so a profiler timeout does not discard completed measurements.
 
 ## Setup
 
