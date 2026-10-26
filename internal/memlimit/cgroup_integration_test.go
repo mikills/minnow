@@ -128,6 +128,8 @@ func TestCgroupIntegration(t *testing.T) {
 		// and Watch's backstop calculation remain under test.
 		const testBudget int64 = 256 << 20
 		require.GreaterOrEqual(t, ceiling, 4*testBudget, "the test needs hard-limit headroom")
+		require.Equal(t, "0", readValue(t, filepath.Join(dir, "memory.swap.max")),
+			"the bounded anonymous pressure fixture requires swap disabled in its test cgroup")
 		watcher, err := Watch(dir, testBudget)
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, watcher.Close()) })
@@ -188,11 +190,16 @@ func TestCgroupIntegration(t *testing.T) {
 		elapsed := time.Since(start)
 		runtime.KeepAlive(hog)
 		after := pressureTotal(t, pressure)
-		t.Logf("pressure stimulus/wait=%s allocated=%dMiB err=%v some total=%d -> %d",
-			elapsed, len(hog), waitErr, before, after)
+		t.Logf("pressure stimulus/wait=%s allocated=%dMiB err=%v some total=%d -> %d memory.current=%s memory.swap.current=%s",
+			elapsed, len(hog), waitErr, before, after, readValue(t, filepath.Join(dir, "memory.current")),
+			readValue(t, filepath.Join(dir, "memory.swap.current")))
 		require.True(t, stopped, "pressure notification did not arrive before the watchdog")
 		require.NoError(t, waitErr, "reclaiming past memory.high did not wake the watcher")
-		require.GreaterOrEqual(t, after-before, uint64(150000), "the allocation did not produce enough memory stalls")
+		// The exported total uses PSI_AVGS; privileged triggers use PSI_POLL.
+		// Their independently sampled, CPU-weighted totals need not agree at
+		// the threshold. The infinite wait above proves a notification arrived;
+		// this counter only corroborates that the stimulus produced stalls.
+		require.Greater(t, after, before, "the allocation did not produce memory stalls")
 
 		hog = nil
 		debug.FreeOSMemory()

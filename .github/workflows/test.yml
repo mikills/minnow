@@ -133,6 +133,9 @@ jobs:
           sudo mkdir -p /sys/fs/cgroup/minnow-test
           echo "+memory" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null
           echo $((2 * 1024 * 1024 * 1024)) | sudo tee /sys/fs/cgroup/minnow-test/memory.max > /dev/null
+          # Keep the bounded anonymous stimulus resident: swapping it out can
+          # satisfy memory.high before the PSI trigger threshold is reached.
+          echo 0 | sudo tee /sys/fs/cgroup/minnow-test/memory.swap.max > /dev/null
           echo max | sudo tee /sys/fs/cgroup/minnow-test/memory.high > /dev/null
           sudo sh -c 'echo $$ > /sys/fs/cgroup/minnow-test/cgroup.procs; \
             exec env MINNOW_CGROUP_IT=1 /tmp/memlimit.test -test.v -test.count=3 -test.timeout=10m -test.run TestCgroupIntegration'
