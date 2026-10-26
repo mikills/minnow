@@ -3,6 +3,7 @@ package blobstore
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +19,7 @@ func TestBlobLocal(t *testing.T) {
 	t.Run("upload_if_not_exists_cross_instance", testBlobLocalUploadIfNotExistsCrossInstance)
 	t.Run("delete", testBlobLocalDelete)
 	t.Run("list", testBlobLocalList)
+	t.Run("list_disappearance", testBlobLocalListDisappearance)
 }
 
 func testBlobLocalUploadIfMatch(t *testing.T) {
@@ -188,4 +190,52 @@ func testBlobLocalList(t *testing.T) {
 	require.Len(t, filtered, 2)
 	require.Equal(t, "dir/b.txt", filtered[0].Key)
 	require.Equal(t, "dir/c.log", filtered[1].Key)
+}
+
+func testBlobLocalListDisappearance(t *testing.T) {
+	t.Run("vanished_entry", func(t *testing.T) {
+		root := t.TempDir()
+		store := &LocalBlobStore{Root: root}
+		for _, key := range []string{"a-active.json", "b-completed.json"} {
+			require.NoError(t, os.WriteFile(filepath.Join(root, key), []byte("marker"), 0o644))
+		}
+		visited := false
+		objects, err := store.list(t.Context(), "", func(root string, visit fs.WalkDirFunc) error {
+			return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+				if entry != nil && entry.Name() == "b-completed.json" {
+					// Directory enumeration has captured the entry. Its Info now
+					// fails because another deletion completed and removed it.
+					visited = true
+					require.NoError(t, os.Remove(path))
+				}
+				return visit(path, entry, walkErr)
+			})
+		})
+		require.True(t, visited)
+		require.NoError(t, err)
+		require.Len(t, objects, 1, "skip only the vanished file, not the other deletion's active marker")
+		require.Equal(t, "a-active.json", objects[0].Key)
+		_, err = store.Head(t.Context(), "a-active.json")
+		require.NoError(t, err, "another deletion's durable marker still exists")
+		objects, err = store.List(t.Context(), "")
+		require.NoError(t, err)
+		require.Len(t, objects, 1)
+		require.Equal(t, "a-active.json", objects[0].Key)
+	})
+
+	t.Run("vanished_root_during_walk", func(t *testing.T) {
+		store := &LocalBlobStore{Root: t.TempDir()}
+		objects, err := store.list(t.Context(), "", func(root string, visit fs.WalkDirFunc) error {
+			return &os.PathError{Op: "readdir", Path: root, Err: os.ErrNotExist}
+		})
+		require.ErrorIs(t, err, os.ErrNotExist)
+		require.Nil(t, objects)
+	})
+
+	t.Run("missing_root_before_walk", func(t *testing.T) {
+		store := &LocalBlobStore{Root: filepath.Join(t.TempDir(), "not-created")}
+		objects, err := store.List(t.Context(), "")
+		require.NoError(t, err)
+		require.Empty(t, objects, "a genuinely absent root remains an empty store")
+	})
 }

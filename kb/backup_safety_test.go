@@ -108,6 +108,7 @@ func TestBackupSafety(t *testing.T) {
 		require.ErrorIs(t, err, ErrBackupNotFound)
 		_, err = loader.ManifestStore.Get(ctx, "dst")
 		require.ErrorIs(t, err, ErrManifestNotFound)
+		require.Empty(t, loader.refOwnersOf(ctx, manifest.Shards[0].Key))
 	})
 
 	t.Run("restore_src_missing", func(t *testing.T) {
@@ -119,6 +120,9 @@ func TestBackupSafety(t *testing.T) {
 		require.NoError(t, os.Remove(filepath.Join(root, filepath.FromSlash(manifest.Shards[0].Key))))
 		_, err = loader.RestoreBackupZeroCopy(ctx, "src", "b1", "dst", "r1")
 		require.ErrorIs(t, err, ErrBackupCorrupt)
+		_, err = loader.GetBranch(ctx, "src", "r1")
+		require.ErrorIs(t, err, ErrBackupNotFound)
+		require.Empty(t, loader.refOwnersOf(ctx, manifest.Shards[0].Key))
 	})
 
 	t.Run("branch_delete_fanout", func(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -355,6 +356,13 @@ func (l *LocalBlobStore) Delete(ctx context.Context, key string) error {
 }
 
 func (l *LocalBlobStore) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	return l.list(ctx, prefix, filepath.WalkDir)
+}
+
+// The walker seam lets correctness tests force a file to vanish after directory
+// enumeration. A failed traversal is never a successful empty snapshot: callers
+// use listings as reachability/deletion fences and must be able to fail closed.
+func (l *LocalBlobStore) list(ctx context.Context, prefix string, walk func(string, fs.WalkDirFunc) error) ([]ObjectInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -366,7 +374,7 @@ func (l *LocalBlobStore) List(ctx context.Context, prefix string) ([]ObjectInfo,
 	}
 
 	items := make([]ObjectInfo, 0)
-	err := filepath.WalkDir(l.Root, func(path string, d os.DirEntry, walkErr error) error {
+	err := walk(l.Root, func(path string, d os.DirEntry, walkErr error) error {
 		item, ok, err := l.blobListItem(ctx, prefix, path, d, walkErr)
 		if err != nil || !ok {
 			return err
@@ -375,10 +383,6 @@ func (l *LocalBlobStore) List(ctx context.Context, prefix string) ([]ObjectInfo,
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return []ObjectInfo{}, nil
-		}
-
 		return nil, err
 	}
 
@@ -411,6 +415,12 @@ func (l *LocalBlobStore) blobListItem(
 	}
 	info, err := d.Info()
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Only this already-enumerated file vanished. Preserve other
+			// results and continue walking; never turn the entire list into
+			// an empty success and hide another actor's active markers.
+			return ObjectInfo{}, false, nil
+		}
 		return ObjectInfo{}, false, err
 	}
 	return localObjectInfo(key, info), true, nil

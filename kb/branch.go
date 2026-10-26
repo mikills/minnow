@@ -190,9 +190,6 @@ func (l *KB) BranchKBFrom(ctx context.Context, srcKBID, branchID, dstKBID, paren
 	if err := checkShardIntegrity(doc.Manifest.Shards); err != nil {
 		return nil, err
 	}
-	if err := l.verifyBranchSourceShards(ctx, doc.Manifest.Shards); err != nil {
-		return nil, err
-	}
 	if err := l.rejectTombstonedTarget(ctx, dstKBID); err != nil {
 		return nil, err
 	}
@@ -224,33 +221,48 @@ func (l *KB) BranchKBFrom(ctx context.Context, srcKBID, branchID, dstKBID, paren
 		return nil, err
 	}
 	rec.RecordSHA256 = sum
-	// Marker-first: pins exist before the new manifest points at shared
-	// bytes, so no GC sweep can observe an unpinned reference.
-	written, err := l.writeBranchMarkers(ctx, rec)
+	data, err := json.Marshal(rec)
 	if err != nil {
 		return nil, err
 	}
-	rollback := func(mainErr error) error {
-		errs := []error{mainErr}
-		for _, key := range written {
-			if delErr := l.BlobStore.Delete(ctx, key); delErr != nil {
-				errs = append(errs, fmt.Errorf("rollback branch marker %s: %w", key, delErr))
-			}
+	pin, err := l.beginPublicationPin(ctx, srcKBID, data)
+	if err != nil {
+		return nil, err
+	}
+	if err := l.confirmPinnedSource(ctx, srcKBID, doc.Version); err != nil {
+		if errors.Is(err, ErrBlobVersionMismatch) {
+			err = fmt.Errorf("%w: %w", ErrBackupExists, err)
 		}
-		return errors.Join(errs...)
+		return nil, pin.release(ctx, err)
+	}
+	// Pin first, confirm the source, then verify bytes. Verifying before pinning
+	// leaves a window in which deletion can remove already-verified shards.
+	if err := l.verifyBranchSourceShards(ctx, doc.Manifest.Shards); err != nil {
+		return nil, pin.release(ctx, err)
 	}
 	next := doc.Manifest
 	next.KBID = dstKBID
 	if now, err := l.clockNow(); err != nil {
-		return nil, rollback(err)
+		return nil, pin.release(ctx, err)
 	} else {
 		next.CreatedAt = now
 	}
+	// Only a source-confirmed branch gets a public marker and ref-table owner.
+	// Once a public write is attempted, never delete markers/owners by logical
+	// ID on failure: a replacement or an uncertain destination commit may need
+	// them. Retained audit pins are explicitly removed with DeleteBranch after
+	// the caller reconciles the destination.
+	if _, err := l.writeBranchMarkers(ctx, rec); err != nil {
+		if errors.Is(err, ErrBackupExists) {
+			return nil, pin.release(ctx, err)
+		}
+		return nil, pin.retain(err)
+	}
 	if err := l.publishCloneManifestCreateOnly(ctx, dstKBID, next); err != nil {
-		return nil, rollback(err)
+		return nil, pin.retain(err)
 	}
 	l.recordBranchOrigin(ctx, dstKBID, srcKBID, branchID)
-	return rec, nil
+	return rec, pin.release(ctx, nil)
 }
 
 // RestoreBackupZeroCopy publishes dstKBID from a backup descriptor without
@@ -288,9 +300,6 @@ func (l *KB) RestoreBackupZeroCopy(ctx context.Context, srcKBID, backupID, dstKB
 	if err := checkManifestFormatSupported(&desc.ManifestSnapshot); err != nil {
 		return nil, err
 	}
-	if err := l.verifyBackupSourceShards(ctx, desc.Shards); err != nil {
-		return nil, err
-	}
 	if err := l.rejectTombstonedTarget(ctx, dstKBID); err != nil {
 		return nil, err
 	}
@@ -318,36 +327,58 @@ func (l *KB) RestoreBackupZeroCopy(ctx context.Context, srcKBID, backupID, dstKB
 		return nil, err
 	}
 	rec.RecordSHA256 = sum
-	written, err := l.writeBranchMarkers(ctx, rec)
+	data, err := json.Marshal(rec)
 	if err != nil {
 		return nil, err
 	}
-	rollback := func(mainErr error) error {
-		errs := []error{mainErr}
-		for _, key := range written {
-			if delErr := l.BlobStore.Delete(ctx, key); delErr != nil {
-				errs = append(errs, fmt.Errorf("rollback restore marker %s: %w", key, delErr))
-			}
-		}
-		return errors.Join(errs...)
+	pin, err := l.beginPublicationPin(ctx, srcKBID, data)
+	if err != nil {
+		return nil, err
+	}
+	// A restore pins a descriptor, not the live source manifest: restoring from
+	// an intact backup remains valid even when the live manifest is absent.
+	current, err := l.GetBackup(ctx, srcKBID, backupID)
+	if err != nil {
+		return nil, pin.release(ctx, err)
+	}
+	if current.DescriptorSHA256 != desc.DescriptorSHA256 {
+		return nil, pin.release(ctx, fmt.Errorf("%w: backup changed while pinning: %w", ErrBackupExists, ErrBlobVersionMismatch))
+	}
+	// A late restore pin must not enter after a deleter's final pin scan.
+	// The durable tombstone distinguishes an active deletion from a legitimately
+	// manifestless backup. It is read AFTER the provisional pin is durable. A
+	// later deleter must see that pin or its committed successor; a completed
+	// delete clears the tombstone only after physical cleanup (then verification
+	// below either succeeds safely or rejects already-deleted data).
+	if err := l.rejectTombstonedTarget(ctx, srcKBID); err != nil {
+		return nil, pin.release(ctx, err)
+	}
+	if err := l.verifyBackupSourceShards(ctx, desc.Shards); err != nil {
+		return nil, pin.release(ctx, err)
 	}
 	next := desc.ManifestSnapshot
 	next.KBID = dstKBID
 	if now, err := l.clockNow(); err != nil {
-		return nil, rollback(err)
+		return nil, pin.release(ctx, err)
 	} else {
 		next.CreatedAt = now
 	}
+	if _, err := l.writeBranchMarkers(ctx, rec); err != nil {
+		if errors.Is(err, ErrBackupExists) {
+			return nil, pin.release(ctx, err)
+		}
+		return nil, pin.retain(err)
+	}
 	if err := l.publishCloneManifestCreateOnly(ctx, dstKBID, next); err != nil {
-		return nil, rollback(err)
+		return nil, pin.retain(err)
 	}
 	l.recordBranchOrigin(ctx, dstKBID, srcKBID, restoreID)
-	return rec, nil
+	return rec, pin.release(ctx, nil)
 }
 
 // verifyBranchSourceShards Heads every shard a zero-copy branch would
-// reference before any marker or manifest is published. A missing source
-// fails with ErrBackupCorrupt (never a publish of a dangling reference);
+// reference after provisional pinning but before a public marker or manifest
+// is published. A missing source fails with ErrBackupCorrupt;
 // size mismatches against the manifest record fail the same way. SHA
 // integrity of the bytes themselves is enforced on read (shardcache
 // VerifyDownloaded) rather than by re-downloading every source here.
@@ -421,7 +452,9 @@ func (l *KB) writeBranchMarkers(ctx context.Context, rec *BranchRecord) ([]strin
 		keys = append(keys, shard.Key)
 	}
 	if err := l.AddRefOwners(ctx, keys, branchRefOwner(rec)); err != nil {
-		_ = l.BlobStore.Delete(ctx, key)
+		// Do not roll back public pins by logical ID. Ref-table writes may have
+		// committed despite their error, and a concurrent replacement may use
+		// the same branch ID. The caller retains its unique provisional pin.
 		return nil, fmt.Errorf("record shard references for branch %q: %w", rec.BranchID, err)
 	}
 	return []string{key}, nil
