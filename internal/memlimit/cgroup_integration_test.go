@@ -5,6 +5,7 @@ package memlimit
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -34,8 +35,42 @@ func readValue(t *testing.T, path string) string {
 	return strings.TrimSpace(string(raw))
 }
 
+func pressureTotal(t *testing.T, path string) uint64 {
+	t.Helper()
+	for _, line := range strings.Split(readValue(t, path), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "some" {
+			continue
+		}
+		for _, field := range fields[1:] {
+			if value, ok := strings.CutPrefix(field, "total="); ok {
+				total, err := strconv.ParseUint(value, 10, 64)
+				require.NoError(t, err)
+				return total
+			}
+		}
+	}
+	t.Fatalf("no cumulative some pressure in %s", path)
+	return 0
+}
+
+func requirePrivatePressure(t *testing.T, watcher *Watcher) {
+	t.Helper()
+	// Deadlines require runtime poll registration. Our epoll must be the only
+	// poller allowed to consume this descriptor's PSI notification latch.
+	require.ErrorIs(t, watcher.file.SetReadDeadline(time.Time{}), os.ErrNoDeadline)
+}
+
 func TestCgroupIntegration(t *testing.T) {
 	dir := requireOwnCgroup(t)
+
+	t.Run("global pressure can be armed without a runtime poller", func(t *testing.T) {
+		watcher, err := watchPressure(globalPressurePath)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, watcher.Close()) })
+		requirePrivatePressure(t, watcher)
+		require.NoError(t, watcher.Close())
+	})
 
 	t.Run("the ceiling is the cgroup limit, not the host", func(t *testing.T) {
 		limit := Detect()
@@ -63,6 +98,7 @@ func TestCgroupIntegration(t *testing.T) {
 
 		watcher, err := Watch(dir, ceiling)
 		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, watcher.Close()) })
 		require.True(t, watcher.Enforced(), "the cgroup was writable but nothing was enforced")
 		// Stall time, not the events counter: memory.high is policed against
 		// memory.current, so page cache at the mark wakes an events watcher
@@ -84,9 +120,16 @@ func TestCgroupIntegration(t *testing.T) {
 	})
 
 	t.Run("crossing the mark wakes the watcher, and quiet blocks it", func(t *testing.T) {
-		watcher, err := Watch(dir, Detect().Ceiling)
+		ceiling := Detect().Ceiling
+		watcher, err := Watch(dir, ceiling)
 		require.NoError(t, err)
-		defer func() { _ = watcher.Close() }()
+		t.Cleanup(func() { require.NoError(t, watcher.Close()) })
+		require.Equal(t, "memory.pressure", watcher.Source())
+		require.True(t, watcher.Enforced())
+		requirePrivatePressure(t, watcher.(*Watcher))
+		pressure := filepath.Join(dir, "memory.pressure")
+		before := pressureTotal(t, pressure)
+		t.Logf("watcher source=%s enforced=%t some total=%d", watcher.Source(), watcher.Enforced(), before)
 
 		hog := make([][]byte, 0, 64)
 		for range cap(hog) {
@@ -96,22 +139,64 @@ func TestCgroupIntegration(t *testing.T) {
 			}
 			hog = append(hog, block)
 		}
-		require.NoError(t, watcher.Wait(20000), "reclaiming past memory.high did not wake the watcher")
-		require.Len(t, hog, cap(hog))
+		// Wait treats a timeout as success for the governor's periodic sampling.
+		// An infinite wait plus a watchdog makes a missed notification fail here.
+		expired := make(chan struct{})
+		watchdog := time.AfterFunc(20*time.Second, func() {
+			watcher.Interrupt()
+			close(expired)
+		})
+		start := time.Now()
+		err = watcher.Wait(-1)
+		elapsed := time.Since(start)
+		runtime.KeepAlive(hog)
+		stopped := watchdog.Stop()
+		if !stopped {
+			<-expired
+		}
+		after := pressureTotal(t, pressure)
+		t.Logf("pressure wait=%s err=%v some total=%d -> %d", elapsed, err, before, after)
+		require.True(t, stopped, "pressure notification did not arrive before the watchdog")
+		require.NoError(t, err, "reclaiming past memory.high did not wake the watcher")
+		require.Greater(t, after, before, "the allocation did not produce memory stalls")
 
 		hog = nil
 		debug.FreeOSMemory()
 		require.Eventually(t, func() bool {
 			usage := Current(dir)
-			return usage.Ok && float64(usage.Bytes) < float64(Detect().Ceiling)*0.5
+			return usage.Ok && float64(usage.Bytes) < float64(ceiling)*0.5
 		}, 20*time.Second, 200*time.Millisecond, "memory was never returned")
 
-		// Page cache still sits near the mark here, so an events watcher would
-		// keep firing. Stall time has stopped, so this one has to go quiet.
-		start := time.Now()
-		_ = watcher.Wait(1000)
-		require.GreaterOrEqual(t, time.Since(start), 900*time.Millisecond,
-			"the watcher woke with no stall to report")
+		// Low usage alone does not establish quiet: reclaim can still be stalling
+		// and PSI can retain a rate-limited notification from its tracking window.
+		// Keep the same watcher; require two full one-second windows with no new
+		// stall time, then consume at most one already-latched notification.
+		total := pressureTotal(t, pressure)
+		stableSince := time.Now()
+		deadline := stableSince.Add(20 * time.Second)
+		for time.Now().Before(deadline) && time.Since(stableSince) < 2*time.Second {
+			time.Sleep(200 * time.Millisecond)
+			current := pressureTotal(t, pressure)
+			if current != total {
+				t.Logf("settling some total=%d -> %d", total, current)
+				total, stableSince = current, time.Now()
+			}
+		}
+		require.GreaterOrEqual(t, time.Since(stableSince), 2*time.Second,
+			"PSI did not stabilize within 20s; some total=%d", total)
+		require.NoError(t, watcher.Wait(0), "draining the pending pressure notification")
+		for i := range 3 {
+			start := time.Now()
+			err := watcher.Wait(1000)
+			elapsed := time.Since(start)
+			current := pressureTotal(t, pressure)
+			t.Logf("quiet wait %d=%s err=%v some total=%d -> %d", i+1, elapsed, err, total, current)
+			require.NoError(t, err)
+			// Incidental subthreshold stalls do not warrant a notification.
+			require.GreaterOrEqual(t, elapsed, 900*time.Millisecond,
+				"the watcher woke with no stall to report")
+			total = current
+		}
 	})
 
 	t.Run("an Interrupt after Close does not write to a released descriptor", func(t *testing.T) {

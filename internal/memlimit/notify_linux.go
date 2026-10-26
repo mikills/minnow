@@ -123,11 +123,16 @@ const globalPressurePath = "/proc/pressure/memory"
 
 // 150ms of stall in any second means reclaim is already costing real time.
 func watchPressure(path string) (*Watcher, error) {
-	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	// PSI consumes its notification latch when polled. OpenFile also registers
+	// with Go's runtime poller, which can consume a notification before our
+	// epoll sees it. NewFile leaves a blocking descriptor out of that poller.
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := file.WriteString("some 150000 1000000"); err != nil {
+	file := os.NewFile(uintptr(fd), path)
+	// The global /proc handler replaces the last byte with a NUL terminator.
+	if _, err := file.WriteString("some 150000 1000000\n"); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("arm pressure trigger on %s: %w", path, err)
 	}

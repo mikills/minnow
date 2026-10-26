@@ -108,6 +108,7 @@ jobs:
   cgroup:
     name: memory governor on a real cgroup
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -117,6 +118,7 @@ jobs:
 
       - name: Check the runner has cgroup v2
         run: |
+          uname -r
           test -f /sys/fs/cgroup/cgroup.controllers
           grep -q memory /sys/fs/cgroup/cgroup.controllers
 
@@ -133,7 +135,7 @@ jobs:
           echo $((2 * 1024 * 1024 * 1024)) | sudo tee /sys/fs/cgroup/minnow-test/memory.max > /dev/null
           echo max | sudo tee /sys/fs/cgroup/minnow-test/memory.high > /dev/null
           sudo sh -c 'echo $$ > /sys/fs/cgroup/minnow-test/cgroup.procs; \
-            exec env MINNOW_CGROUP_IT=1 /tmp/memlimit.test -test.v -test.count=1 -test.run TestCgroupIntegration'
+            exec env MINNOW_CGROUP_IT=1 /tmp/memlimit.test -test.v -test.count=3 -test.timeout=10m -test.run TestCgroupIntegration'
 
       - name: Confirm memory.high was put back
         if: always()
