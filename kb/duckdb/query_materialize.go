@@ -21,7 +21,7 @@ type shardRankedDocRef struct {
 
 func queryTopKRefsWithDB(
 	ctx context.Context,
-	db *sql.DB,
+	db docQueryer,
 	queryVec []float32,
 	k int,
 	opts vectorQueryOpts,
@@ -32,22 +32,7 @@ func queryTopKRefsWithDB(
 	if err := validateQueryVectorForDB(ctx, db, queryVec, opts.validateDimension, "query vector dimension is incompatible with stored vectors"); err != nil {
 		return nil, err
 	}
-	vecStr := FormatVectorForSQL(queryVec)
-	whereClause, err := buildWhereClause(opts.filter, opts.documentIDs != nil)
-	if err != nil {
-		return nil, err
-	}
-	distanceExpr := fmt.Sprintf("array_distance(embedding, %s::FLOAT[%d])", vecStr, len(queryVec))
-	orderExpr := distanceExpr
-	if opts.documentIDs != nil {
-		orderExpr = "(" + distanceExpr + " + 0.0)"
-	}
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, %s as distance
-		FROM docs%s
-		ORDER BY %s
-		LIMIT %d
-	`, distanceExpr, whereClause, orderExpr, k), documentScopeArgs(opts.documentIDs)...)
+	rows, err := queryVectorRows(ctx, db, queryVec, k, opts, "id, %s AS distance")
 	if err != nil {
 		return nil, kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("query refs failed: %w", err),
@@ -69,7 +54,7 @@ func queryTopKRefsWithDB(
 	return refs, nil
 }
 
-func queryDocPayloadsByID(ctx context.Context, db *sql.DB, ids []string) (map[string]docPayload, error) {
+func queryDocPayloadsByID(ctx context.Context, db docQueryer, ids []string) (map[string]docPayload, error) {
 	if len(ids) == 0 {
 		return map[string]docPayload{}, nil
 	}
@@ -107,7 +92,7 @@ func queryDocPayloadsByID(ctx context.Context, db *sql.DB, ids []string) (map[st
 	return payloads, nil
 }
 
-func queryMetadataByIDs(ctx context.Context, db *sql.DB, ids []string) (map[string]map[string]any, error) {
+func queryMetadataByIDs(ctx context.Context, db docQueryer, ids []string) (map[string]map[string]any, error) {
 	if len(ids) == 0 {
 		return map[string]map[string]any{}, nil
 	}
@@ -145,7 +130,7 @@ type docPayload struct {
 	Metadata  map[string]any
 }
 
-func hydrateRankedResults(ctx context.Context, db *sql.DB, refs []rankedDocRef) ([]kb.QueryResult, error) {
+func hydrateRankedResults(ctx context.Context, db docQueryer, refs []rankedDocRef) ([]kb.QueryResult, error) {
 	ids := make([]string, 0, len(refs))
 	for _, ref := range refs {
 		ids = append(ids, ref.ID)

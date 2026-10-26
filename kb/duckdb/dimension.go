@@ -2,14 +2,13 @@ package duckdb
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	kb "github.com/mikills/minnow/kb"
 	"github.com/mikills/minnow/kb/duckdb/internal/dimension"
 )
 
-func duckDBEmbeddingDimension(ctx context.Context, db *sql.DB) (int, error) {
+func duckDBEmbeddingDimension(ctx context.Context, db docQueryer) (int, error) {
 	return dimension.ReadDuckDBEmbedding(ctx, db)
 }
 

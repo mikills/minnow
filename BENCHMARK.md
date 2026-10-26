@@ -2,6 +2,217 @@
 
 End-to-end vector query latency over synthetic random vectors, top-10. Single-threaded client, warm state.
 
+## DuckDB engine comparison
+
+The **DuckDB comparison** GitHub Actions workflow compares the PR base engine
+(currently 1.5.0) with stable 2.0 on one GitHub-hosted Ubuntu AMD64 runner.
+It runs when a PR changes the driver, extension bundles, simulations or comparison
+tooling. An unchanged engine is skipped. Nothing runs until the branch is pushed.
+
+- Build both revisions sequentially before timing; verify linked versions and
+  read persisted HNSW/FTS indexes created by the base engine with the candidate.
+- Require identical simulation sources. Run the 15 existing `TestSim` scenarios
+  and tiered recovery separately, each with seeds `1, 2, 3, 7, 42, 100`.
+- Run three rounds, alternating engine order and rotating scenario order. Each
+  measured process has fresh test state and an isolated extension home.
+- Use `GOMAXPROCS=2`, `GOMEMLIMIT=384MiB`, build `-p=1`, test `-parallel=1`;
+  retain extension signature checks. No performance runs on developer machines.
+- Publish an actual base/candidate/change table in the Actions job summary and
+  upload raw logs, GNU time measurements, engine versions, commit hashes, module
+  pins, host information, and JSON results as the `duckdb-comparison` artifact.
+
+Elapsed and CPU numbers are medians of the three per-round sums; RSS is the median
+of the per-round maximum process RSS. These are correctness-simulation execution
+costs, **not query throughput**. They should not be compared directly with the
+older macOS measurements below. A failed, skipped or incomplete seed set fails
+the comparison instead of producing a misleading passing row.
+
+### Same-engine revision comparison
+
+For application optimizations, dispatch **DuckDB comparison** on the candidate
+branch with `same_engine=true` and `baseline_ref` set to the pre-optimization 2.0
+commit (`f8b27e34441b1b40117c13ae06841aa9937984a5` before query caching). Both engine/source
+probes must match. This isolates the application change from the engine upgrade;
+the usual pull-request comparison still measures main's 1.5 against 2.0.
+
+The workflow also compiles the exact same `BenchmarkWarmShardQuery` fixture into
+both revisions and measures warm production shard paths: 32/512-dimensional
+vectors, ref-only ranking plus hydration, metadata filtering, document scopes,
+BM25, and statement-cache churn. Each case alternates vectors and runs for two
+seconds in three rounds. Fixture setup and warmup are outside query timers;
+whole-process peak RSS includes setup. The fixture refuses local execution.
+
+Immutable pooled shards cache their metadata-column capability and retain at
+most eight prepared vector statements per handle. Only unfiltered, unscoped
+top-k queries use bound vectors; scoped/filtered SQL remains unchanged. Bound
+values preserve the existing six-decimal literal rounding. Eviction closes every
+statement before closing its database. Schema/statement caches never apply to
+mutable or caller-owned direct database handles.
+
+Internal mutable staging handles load VSS but defer FTS: they mutate/inspect rows,
+then checkpoint and close before a separate index builder seals the snapshot.
+Builders, published readers and public direct-access handles retain both extensions.
+
+### Native profiling
+
+The **DuckDB profile** Actions workflow runs diagnostics on one GitHub-hosted
+Ubuntu AMD64 runner. It builds the same diagnostic source against 1.5.0 and
+2.0.0, then runs each process sequentially with the comparison's resource controls.
+The probe refuses to execute locally. Profiling does not alter production code.
+
+- Three alternating phase runs separate core open/close, signed VSS/FTS loading,
+  appender batches, HNSW/FTS builds, checkpoints, and warm vector/BM25 queries.
+  Memory inspection is outside operation timers. These are diagnostic fixtures,
+  not a production throughput benchmark.
+- The query-split fixture measures ad hoc calls, prepare, first execution,
+  statement close, and reused execution on one pinned connection. Fixed vector
+  and BM25 SQL are compared with changing bound vectors. Results are checked,
+  plans for both bound inputs are saved, and parameterization that loses HNSW is
+  not reported as a usable optimization. Execution may include deferred binding and replanning;
+  prepared execution is not claimed to measure the executor in isolation.
+  Separate native CPU captures cover preparation-only and reused-execution loops.
+  These captures still include setup and warmups; their whole-process percentages
+  are not isolated stage costs.
+- Native CPU sampling uses Linux `perf` and software `cpu-clock:u` leaf samples.
+  It also profiles the real repeated-ingest and random-operations simulations at
+  seed 1. DWARF capture/processing exceeded the budget on 2.0 Go/C++ stacks, so the run
+  uses native function self-time without unwinding or build-id post-processing.
+- `heaptrack` records native allocation stacks separately for configured
+  open/close cycles and ingestion. Profiled wall times are not benchmark results.
+- Process RSS/anonymous memory, Go heap, and all-arena glibc `malloc_info` counters
+  are captured across open/load/close cycles, after Go GC, and after a diagnostic
+  `malloc_trim`. The trim experiment is not a proposed production optimization.
+  glibc/heaptrack do not necessarily see alternative allocators or Go's mmap heap;
+  retained RSS or allocations outstanding at process exit do not prove a leak.
+
+The `duckdb-native-profiles` artifact includes raw CPU/allocation traces, readable
+reports, per-operation JSON, tool/host metadata, and matching binaries/extensions
+for symbolization. Missing permissions, failed workloads, and unavailable native
+symbols are reported as failures rather than silently replaced with Go-only data.
+Each command is capped at two minutes and partial results are saved after every
+operation, so a profiler timeout does not discard completed measurements.
+
+### Same-binary parser comparison
+
+Dispatch **DuckDB profile** with `parser_only=true` and `memory_only=false`.
+It builds one stable 2.0 candidate probe and runs PEG versus legacy in fresh,
+sequential processes on one hosted runner, in three alternating paired rounds.
+Both arms load the same signed `legacy_parser` extension before selecting a
+parser; settings/security checks bracket each database workload. Both arms use
+strict parser override policy, preventing silent legacy-to-PEG fallback. The official
+Linux AMD64 download and decompressed bytes are SHA-256 pinned in the workflow,
+staged only in the diagnostic directory, and verified by DuckDB on load.
+
+Startup `memory_limit=128MB`, `threads=1`, Go controls, fixture data, and extension
+bytes match. Query-split runs verify results and HNSW for both bound directions;
+reports show per-operation medians and medians of within-round percentage
+changes. Failed runs preserve raw outputs and partial summaries; incomplete pairs
+are excluded. The `duckdb-parser` artifact includes engine/build provenance,
+input hashes, controls, plans, raw timings, and lifecycle memory snapshots.
+
+Preparation may include binding/planning; execution may include deferred planning.
+The initial open still uses PEG and both arms map `legacy_parser`, so this does
+not isolate all startup grammar residency. Post-close/GC RSS is observational,
+not proof of live allocations or a leak. Huge-page and allocator experiments are
+separate. Production parser changes still require full compatibility, query, and
+simulation comparisons; this diagnostic does not change production selection.
+
+### BM25 query shape
+
+Dispatch **DuckDB profile** with `bm25_only=true` (other diagnostic-only switches
+false). One 2.0 test binary compares frozen pre-fix BM25 SQL against the production
+materialized query using the same upstream scoring macro. Only physical
+row IDs/scores are materialized; payloads are joined after the top-k limit, so
+duplicate document IDs cannot multiply results or bypass filters. Full, filtered,
+and scoped workloads use one warm immutable 1024-row shard, three alternating
+paired rounds and fresh processes. Setup, plans and warmup are outside timers;
+correctness checks compare ranking, scores, payloads, filters/scopes, quoted
+terms and old schemas without metadata. A separate reproducer records the pre-fix
+OR-filter/NULL-score precedence bug. Exact SQL and EXPLAIN are saved in the
+`duckdb-bm25` artifact. Check for optimizer filter pushdown before attributing any
+difference to scoring once. Whole-process CPU/RSS includes setup; these timings
+are not end-to-end service benchmarks.
+
+### Native memory attribution
+
+Dispatch **DuckDB profile** on the feature branch with `memory_only=true` and `baseline_ref=main` to
+compare the same probe source against 1.5.0 and 2.0.0 on one hosted Linux AMD64
+runner. This manual-only mode runs no CPU sampling, allocation interposer,
+simulation suite, or throughput benchmark. It changes no production settings.
+
+- Three alternating rounds of fresh core, VSS-only, FTS-only, configured, and
+  ingestion processes. Lifecycle modes open/load/close 20 databases; ingestion
+  uses one database, 10,240 rows, both index builds, checkpoint and close.
+- Limits (`memory_limit=128MB`, `threads=1`) are supplied at startup, with signed
+  offline extensions. The raw output records actual settings.
+- Each lifecycle snapshot records `duckdb_memory()` by tag while the database is
+  open, epoch-refreshed counters from the binary's own `duckdb_je_mallctl`, resident
+  mappings by path from `/proc/self/smaps`, rollup RSS/anonymous/huge pages, Go
+  live/reserved/released memory, and glibc counters. Inspection is outside timers
+  but still perturbs these diagnostics. Closed databases have unavailable DuckDB
+  counters, not fabricated zero usage.
+- After all databases are closed and Go GC has run, explicitly purge jemalloc's
+  arenas, sample again, then run glibc `malloc_trim` and sample separately. Purge
+  does not flush other threads' tcaches. Missing allocator symbols/counters or
+  failed interventions fail validation while preserving the raw evidence.
+
+The `duckdb-memory` artifact contains JSON, per-process logs, host/THP metadata,
+engine versions, module pins, commit hashes, symbols and actual paired tables.
+jemalloc `resident` is an estimate, `allocated` has thread-cache/statistics
+limitations, and `retained` is **virtual address space, not resident RAM**. These
+counters overlap; do not add them to RSS or DuckDB buffer-manager totals. Private
+extension allocators may not be covered by the main binary's jemalloc counters.
+RSS remaining after purge does not by itself prove a leak.
+
+### Transparent huge-page attribution
+
+Dispatch **DuckDB huge-page attribution** (`duckdb-memory.yml`) with a 1.5 baseline.
+It also runs on pull requests changing this diagnostic, using the PR base engine.
+It compares default versus disabled process THP separately within each released
+engine, on one runner, in three alternating rounds of fresh sequential processes.
+A CI-only launcher sets `PR_SET_THP_DISABLE` before exec so startup allocations are
+included; the probe verifies the inherited policy at every lifecycle snapshot and
+checks signature/loading policy and limits before and after each database workload.
+Ingest also verifies row count, all exact axis-0 vector matches and a BM25 result.
+These are stored-vector/BM25 smoke checks; HNSW index construction is exercised,
+but they establish no ANN recall guarantee.
+
+The first THP run (`40364516953`) incorrectly required an exact-nearest result from
+an approximate HNSW query. All twelve ingest cases returned the same wrong-axis
+row across both engines and policies. The 10,240-row fixture has 320 identical
+vectors per axis. The underlying ANN recall discrepancy remains unresolved; the
+failed artifacts are preserved, and the exact scan does not resolve it. Shared
+HNSW query-split and production-query benchmark fixtures retain their checks.
+
+The 60 runs cover core, VSS, FTS, configured and ingestion modes with the existing
+memory-attribution instrumentation. The report compares pre-purge, post-close/GC
+RSS, anonymous and huge-page residency, with Go-named mappings shown separately.
+Raw JSON retains per-path huge-page counters, all lifecycle points and allocator
+statistics. This process-wide intervention includes Go and is not a DuckDB-only
+allocator setting or throughput result. It changes no production policy and is
+separate from parser experiments. The `duckdb-thp` artifact preserves partial
+evidence and source/binary/extension hashes; unavailable controls fail the run.
+
+To measure the application trade-off, dispatch the same workflow with
+`performance_only=true`. Both arms execute the same physical 2.0 simulation/query
+binaries from one checkout; the baseline-ref input is unused in this mode.
+The existing 96 seed cases per round and seven warm-query cases run sequentially
+in three alternating rounds. The launcher checks/logs its policy before exec,
+which Linux preserves across exec. The application comparison now applies the
+policy through the shipped `minnow-exec` launcher; a CI-only helper verifies its
+inherited state after exec without changing it. Both arms run as the runner user
+inside the same 2 GiB cgroup with swap disabled. The artifact includes its limits,
+peak usage, pressure and OOM counters. Application and launcher hashes are checked
+before and after measurement.
+Measurements are saved atomically after every process. Reports remain marked
+incomplete until every simulation/query pair, final binary-integrity check and
+cgroup-limit/OOM-counter validation pass. Missing cgroup evidence fails the run.
+This run uses ordinary application budgets and no allocator/mapping inspection;
+it reports paired CPU/elapsed/peak-RSS and query latency in `duckdb-thp-performance`.
+The comparison does not change the global host policy. Shipped Linux deployments
+enable the launcher's `MINNOW_DISABLE_THP=1` option; see
+[deployment configuration](deploy/README.md#linux-transparent-huge-pages) for opt-out.
+
 ## Setup
 
 - Hardware: Apple M4, local SSD.

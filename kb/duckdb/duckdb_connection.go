@@ -32,6 +32,14 @@ func (f *DuckDBArtifactFormat) openBuildDB(ctx context.Context, dbPath string) (
 }
 
 func (f *DuckDBArtifactFormat) openWithThreads(ctx context.Context, dbPath string, threads int) (*sql.DB, error) {
+	return f.openDatabase(ctx, dbPath, threads, false)
+}
+
+func (f *DuckDBArtifactFormat) openStagingDB(ctx context.Context, dbPath string) (*sql.DB, error) {
+	return f.openDatabase(ctx, dbPath, f.deps.DuckDBThreads, true)
+}
+
+func (f *DuckDBArtifactFormat) openDatabase(ctx context.Context, dbPath string, threads int, skipFTS bool) (*sql.DB, error) {
 	// Each database gets the planned share or what the budget has left. The
 	// limit is fixed here for good: DuckDB takes one connection at a time, so a
 	// later SET would queue behind whatever long build it needed to reach.
@@ -45,6 +53,7 @@ func (f *DuckDBArtifactFormat) openWithThreads(ctx context.Context, dbPath strin
 			TempDir:      f.deps.TempDir,
 			OfflineExt:   f.deps.OfflineExt,
 			Threads:      threads,
+			SkipFTS:      skipFTS,
 			OnClose:      release,
 		},
 	)
@@ -53,6 +62,10 @@ func (f *DuckDBArtifactFormat) openWithThreads(ctx context.Context, dbPath strin
 		return nil, err
 	}
 	return db, nil
+}
+
+func (f *DuckDBArtifactFormat) loadFTS(ctx context.Context, db *sql.DB) error {
+	return connection.LoadFTS(ctx, db, f.deps.ExtensionDir, f.deps.OfflineExt)
 }
 
 func (f *DuckDBArtifactFormat) OpenConfiguredDB(ctx context.Context, dbPath string) (*sql.DB, error) {

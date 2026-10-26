@@ -597,7 +597,7 @@ discovering tools that always error.
 Stdio mode is launched with:
 
 ```bash
-go run . mcp stdio
+make run ARGS="mcp stdio"
 ```
 
 In stdio mode, Minnow writes logs to stderr so stdout is reserved for MCP

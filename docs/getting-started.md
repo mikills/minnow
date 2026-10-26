@@ -112,6 +112,12 @@ them.
 - CGO-capable environment for the DuckDB driver.
 - DuckDB extensions in `extensions/` (shipped with the repo; no network access needed by default).
 
+This checkout pins **DuckDB v2.0.0** through the stable Go driver. Standard Go
+commands and Make targets use its bundled native libraries; no linking wrapper
+is needed. The first module download requires access to `go.duckdb.org`.
+Offline `vss`, `fts`, and `httpfs` bundles are supplied for macOS ARM64 and Linux
+AMD64; graph expansion uses BFS without DuckPGQ. Back up data before upgrading.
+
 ## Configuration
 
 minnow reads a single YAML file (discovered via `$MINNOW_CONFIG`, `./minnow.yaml`,
@@ -124,7 +130,7 @@ schema, discovery rules, env vars, and secret handling live in
 
 ```bash
 cp examples/minnow.min.yaml minnow.yaml
-go run .
+make run
 ```
 
 ## Install for MCP
@@ -132,7 +138,7 @@ go run .
 Install the binary globally:
 
 ```bash
-go install github.com/mikills/minnow@latest
+make install
 $(go env GOPATH)/bin/minnow setup
 ```
 
@@ -210,7 +216,7 @@ branch before deleting it to remove its remote scope and local state.
 The minimal config enables MCP for local coding-agent workflows:
 
 - Streamable HTTP: `http://127.0.0.1:8080/mcp` (override `http.address` in the YAML)
-- Stdio (for editor registration): `go run . mcp stdio`
+- Stdio (for editor registration): `make run ARGS="mcp stdio"`
 
 For branch-aware code search, register the local read-only codeindex MCP. It
 resolves the current Git branch and calls hosted Minnow over HTTP:
@@ -262,7 +268,7 @@ Before rolling out a config, run the built-in validator. It loads, interpolates
 Mongo connection, no port bind.
 
 ```bash
-go run . config validate ./minnow.yaml
+make run ARGS="config validate ./minnow.yaml"
 # => config OK
 ```
 

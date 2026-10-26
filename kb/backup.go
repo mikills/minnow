@@ -549,7 +549,7 @@ func (l *KB) CreateBackup(ctx context.Context, kbID, backupID string) (*BackupDe
 	if err != nil {
 		return nil, err
 	}
-	if _, err := l.uploadBytesCreateOnly(ctx, BackupDescriptorKey(kbID, backupID), data); err != nil {
+	if err := l.publishManifestPin(ctx, kbID, doc.Version, BackupDescriptorKey(kbID, backupID), data); err != nil {
 		return nil, err
 	}
 	return desc, nil
@@ -712,7 +712,7 @@ func (l *KB) CreateSnapshotFrom(ctx context.Context, kbID, snapshotID, parentBac
 	if err != nil {
 		return nil, err
 	}
-	if _, err := l.uploadBytesCreateOnly(ctx, SnapshotRecordKey(kbID, snapshotID), data); err != nil {
+	if err := l.publishManifestPin(ctx, kbID, doc.Version, SnapshotRecordKey(kbID, snapshotID), data); err != nil {
 		return nil, err
 	}
 	return rec, nil
@@ -799,12 +799,11 @@ func (l *KB) DeleteSnapshot(ctx context.Context, kbID, snapshotID string) error 
 // snapshot records, or branch markers. DeleteKnowledgeBase refuses while
 // this is true.
 //
-// This is a guard, not a fence: it runs before DeleteKnowledgeBase deletes
-// the manifest, so a concurrent CreateBackup/CreateSnapshot/BranchKB that
-// lands between the check and the delete is not stopped (guard→delete
-// TOCTOU). Likewise a direct ManifestStore.Delete bypasses this guard
-// entirely — only DeleteKnowledgeBase enforces it. Callers that need a hard
-// guarantee must quiesce backup/snapshot/branch writers first.
+// This initial guard does not serialize concurrent creators. Safety additionally
+// depends on creators confirming the source after publishing their pin, and on
+// DeleteKnowledgeBase scanning pins again after removing the source manifest.
+// A direct ManifestStore.Delete bypasses this guard and must not delete bytes
+// without its own reachability checks.
 func (l *KB) HasBackupsOrBranches(ctx context.Context, kbID string) (bool, error) {
 	if err := validateKBID(kbID); err != nil {
 		return false, err
@@ -816,6 +815,13 @@ func (l *KB) HasBackupsOrBranches(ctx context.Context, kbID string) (bool, error
 		// Callers that intentionally run without a blob store must handle
 		// this error.
 		return false, fmt.Errorf("blob store is not configured")
+	}
+	pending, err := l.BlobStore.List(ctx, publicationPinPrefix(kbID))
+	if err != nil {
+		return false, fmt.Errorf("list provisional pins for %q: %w", kbID, err)
+	}
+	if len(pending) > 0 {
+		return true, nil
 	}
 	backups, err := l.BlobStore.List(ctx, BackupPrefix(kbID))
 	if err != nil {
@@ -858,60 +864,67 @@ func remapShardKey(srcKBID, dstKBID, srcKey string) string {
 // live manifest stopped referencing it.
 //
 // List failures are returned (the caller retries the GC entry) while single
-// unreadable markers are skipped best-effort: one corrupt descriptor must not
-// wedge GC for the whole KB. Unreadable markers fail closed nowhere —
-// operators should delete or repair corrupt markers.
+// unreadable public markers are skipped best-effort. Provisional pins fail
+// closed on unreadable/malformed data and are fully scanned before public
+// namespaces, so a pending-to-public handoff cannot fall between both scans.
 func (l *KB) backupPinnedShardKeys(ctx context.Context, kbID string) (map[string]struct{}, error) {
 	pinned := make(map[string]struct{})
 	if l.BlobStore == nil {
 		return pinned, nil
 	}
-	markerKeys := make([]string, 0)
-	for _, prefix := range []string{BackupPrefix(kbID), SnapshotPrefix(kbID), BranchPrefix(kbID)} {
+	for _, prefix := range []string{publicationPinPrefix(kbID), BackupPrefix(kbID), SnapshotPrefix(kbID), BranchPrefix(kbID)} {
 		objects, err := l.BlobStore.List(ctx, prefix)
 		if err != nil {
 			return nil, fmt.Errorf("list backup markers for shard gc %q: %w", kbID, err)
 		}
 		for _, obj := range objects {
-			markerKeys = append(markerKeys, obj.Key)
-		}
-	}
-	for _, key := range markerKeys {
-		data, err := l.BlobStore.DownloadBytes(ctx, key)
-		if err != nil {
-			continue
-		}
-		var doc struct {
-			Shards []struct {
-				Key string `json:"key"`
-			} `json:"shards"`
-			Manifest struct {
+			key := obj.Key
+			data, err := l.BlobStore.DownloadBytes(ctx, key)
+			if err != nil {
+				if strings.HasPrefix(key, publicationPinPrefix(kbID)) && !errors.Is(err, ErrBlobNotFound) && !errors.Is(err, os.ErrNotExist) {
+					return nil, fmt.Errorf("read provisional pin %s: %w", key, err)
+				}
+				continue
+			}
+			var doc struct {
 				Shards []struct {
 					Key string `json:"key"`
 				} `json:"shards"`
-			} `json:"manifest"`
-			ManifestSnapshot struct {
-				Shards []struct {
-					Key string `json:"key"`
-				} `json:"shards"`
-			} `json:"manifest_snapshot"`
-		}
-		if err := json.Unmarshal(data, &doc); err != nil {
-			continue
-		}
-		for _, s := range doc.Shards {
-			if s.Key != "" {
-				pinned[s.Key] = struct{}{}
+				Manifest struct {
+					Shards []struct {
+						Key string `json:"key"`
+					} `json:"shards"`
+				} `json:"manifest"`
+				ManifestSnapshot struct {
+					Shards []struct {
+						Key string `json:"key"`
+					} `json:"shards"`
+				} `json:"manifest_snapshot"`
 			}
-		}
-		for _, s := range doc.Manifest.Shards {
-			if s.Key != "" {
-				pinned[s.Key] = struct{}{}
+			if err := json.Unmarshal(data, &doc); err != nil {
+				if strings.HasPrefix(key, publicationPinPrefix(kbID)) {
+					return nil, fmt.Errorf("read provisional pin %s: %w", key, err)
+				}
+				continue
 			}
-		}
-		for _, s := range doc.ManifestSnapshot.Shards {
-			if s.Key != "" {
-				pinned[s.Key] = struct{}{}
+			if strings.HasPrefix(key, publicationPinPrefix(kbID)) &&
+				len(doc.Shards)+len(doc.Manifest.Shards)+len(doc.ManifestSnapshot.Shards) == 0 {
+				return nil, fmt.Errorf("%w: provisional pin %s contains no shard references", ErrBackupCorrupt, key)
+			}
+			for _, s := range doc.Shards {
+				if s.Key != "" {
+					pinned[s.Key] = struct{}{}
+				}
+			}
+			for _, s := range doc.Manifest.Shards {
+				if s.Key != "" {
+					pinned[s.Key] = struct{}{}
+				}
+			}
+			for _, s := range doc.ManifestSnapshot.Shards {
+				if s.Key != "" {
+					pinned[s.Key] = struct{}{}
+				}
 			}
 		}
 	}

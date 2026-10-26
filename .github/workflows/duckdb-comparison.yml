@@ -1,0 +1,134 @@
+name: DuckDB comparison
+
+on:
+  pull_request:
+    paths:
+      - go.mod
+      - go.sum
+      - 'kb/duckdb/**'
+      - 'extensions/**'
+      - 'sim/**'
+      - 'scripts/duckdb_compat/**'
+      - 'scripts/compare_duckdb*'
+      - .github/workflows/duckdb-comparison.yml
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: 'Baseline commit or ref (main for the engine upgrade)'
+        required: true
+        default: main
+      same_engine:
+        description: 'Compare application revisions using the identical stable 2.0 engine'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: duckdb-comparison-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: '1'
+      GOWORK: 'off'
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 384MiB
+      COMPARE_SAME_ENGINE: ${{ inputs.same_engine || false }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || inputs.baseline_ref }}
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: candidate/go.mod
+          cache-dependency-path: |
+            baseline/go.sum
+            candidate/go.sum
+
+      - name: Check comparison tooling and record host
+        run: |
+          python3 -m unittest discover -s candidate/scripts -p 'compare_duckdb_test.py' -v
+          mkdir -p results
+          uname -a > results/host.txt
+          lscpu >> results/host.txt
+          free -m >> results/host.txt
+          go version >> results/host.txt
+
+      # Build everything before starting the timer. Each revision has its own
+      # module graph, binary, extension directory and runtime version probe.
+      - name: Compile both engines sequentially
+        id: engines
+        run: |
+          set -euo pipefail
+          # Compile the exact same query fixture against both application revisions.
+          cp candidate/kb/duckdb/query_cache_benchmark_test.go baseline/kb/duckdb/query_cache_benchmark_test.go
+          for revision in baseline candidate; do
+            (
+              cd "$revision"
+              git rev-parse HEAD > "../results/$revision.sha"
+              go list -m all > "../results/$revision.modules.txt"
+              go test -p=1 -c -o "$GITHUB_WORKSPACE/results/$revision.test" ./sim
+              go test -p=1 -c -o "$GITHUB_WORKSPACE/results/$revision-query.test" ./kb/duckdb
+              go build -p=1 -o "$GITHUB_WORKSPACE/results/$revision-probe" \
+                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_compat/main.go"
+              "../results/$revision-probe" > "../results/$revision.engine.json"
+            )
+          done
+          if [ "$COMPARE_SAME_ENGINE" != true ] && cmp -s results/baseline.engine.json results/candidate.engine.json; then
+            echo 'compare=false' >> "$GITHUB_OUTPUT"
+            echo 'Engine unchanged; no performance comparison needed.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'compare=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require identical simulation workloads
+        if: steps.engines.outputs.compare == 'true'
+        run: diff -ru baseline/sim candidate/sim
+
+      - name: Verify signed extensions and persisted index compatibility
+        if: steps.engines.outputs.compare == 'true'
+        run: |
+          set -euo pipefail
+          (cd candidate/extensions/v2.0.0 && sha256sum -c SHA256SUMS)
+          results/candidate-probe -expect v2.0.0
+          results/baseline-probe -mode write -file "$RUNNER_TEMP/legacy.duckdb" \
+            -extensions "$GITHUB_WORKSPACE/baseline/extensions"
+          results/candidate-probe -mode read -file "$RUNNER_TEMP/legacy.duckdb" \
+            -extensions "$GITHUB_WORKSPACE/candidate/extensions" -expect v2.0.0
+          cd candidate
+          go test -p=1 -parallel=1 -count=1 -run '^(TestRuntime|TestExtensions|TestAppender)$' \
+            ./kb/duckdb ./kb/duckdb/internal/connection
+          go test -race -p=1 -parallel=1 -count=1 -timeout=3m \
+            -run '^(TestMutableOpen|TestShardOpen|TestShardConnPool.*|TestShardQueryCache|TestBoundVector|TestPreparedVectorPlan)$' ./kb/duckdb
+
+      - name: Compare isolated simulation execution (three alternating rounds)
+        if: steps.engines.outputs.compare == 'true'
+        run: |
+          args=()
+          if [ "$COMPARE_SAME_ENGINE" = true ]; then args+=(--same-engine); fi
+          python3 candidate/scripts/compare_duckdb.py --root "$GITHUB_WORKSPACE" --rounds 3 --queries "${args[@]}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: duckdb-comparison
+          path: |
+            results/*.json
+            results/*.txt
+            results/*.sha
+            results/*.time
+            results/*.log
+            results/*.md
+          if-no-files-found: warn

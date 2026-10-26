@@ -48,13 +48,18 @@ type vectorQueryOpts struct {
 	documentIDs       []string
 }
 
+type docQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func QueryTopKWithDB(ctx context.Context, db *sql.DB, queryVec []float32, k int) ([]kb.QueryResult, error) {
 	return queryTopKWithDB(ctx, db, queryVec, k, vectorQueryOpts{validateDimension: true})
 }
 
 func queryTopKWithDB(
 	ctx context.Context,
-	db *sql.DB,
+	db docQueryer,
 	queryVec []float32,
 	k int,
 	opts vectorQueryOpts,
@@ -66,26 +71,11 @@ func queryTopKWithDB(
 		return nil, err
 	}
 
-	vecStr := FormatVectorForSQL(queryVec)
 	metadataExpr, err := docsMetadataSelectExpr(ctx, db)
 	if err != nil {
 		return nil, err
 	}
-	whereClause, err := buildWhereClause(opts.filter, opts.documentIDs != nil)
-	if err != nil {
-		return nil, err
-	}
-	distanceExpr := fmt.Sprintf("array_distance(embedding, %s::FLOAT[%d])", vecStr, len(queryVec))
-	orderExpr := distanceExpr
-	if opts.documentIDs != nil {
-		orderExpr = "(" + distanceExpr + " + 0.0)"
-	}
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, content, %s as distance, media_refs, %s
-		FROM docs%s
-		ORDER BY %s
-		LIMIT %d
-	`, distanceExpr, metadataExpr, whereClause, orderExpr, k), documentScopeArgs(opts.documentIDs)...)
+	rows, err := queryVectorRows(ctx, db, queryVec, k, opts, "id, content, %s AS distance, media_refs, "+metadataExpr)
 	if err != nil {
 		return nil, kb.WrapEmbeddingDimensionMismatch(
 			fmt.Errorf("query failed: %w", err),
@@ -122,7 +112,7 @@ func scanQueryResults(rows *sql.Rows, cap int) ([]kb.QueryResult, error) {
 
 func validateQueryVectorForDB(
 	ctx context.Context,
-	db *sql.DB,
+	db docQueryer,
 	queryVec []float32,
 	validateDimension bool,
 	operation string,
@@ -250,7 +240,10 @@ func queryDocMatchesForIDs(
 	return results, nil
 }
 
-func docsMetadataSelectExpr(ctx context.Context, db *sql.DB) (string, error) {
+func docsMetadataSelectExpr(ctx context.Context, db docQueryer) (string, error) {
+	if sc, ok := db.(*shardConn); ok {
+		return sc.metadataSelectExpr(ctx)
+	}
 	hasMetadata, err := docsColumnExists(ctx, db, "metadata")
 	if err != nil {
 		return "", err
@@ -261,7 +254,7 @@ func docsMetadataSelectExpr(ctx context.Context, db *sql.DB) (string, error) {
 	return "NULL AS metadata", nil
 }
 
-func docsColumnExists(ctx context.Context, db *sql.DB, columnName string) (bool, error) {
+func docsColumnExists(ctx context.Context, db docQueryer, columnName string) (bool, error) {
 	var count int
 	if err := db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
@@ -393,7 +386,7 @@ func documentScopeArgs(ids []string) []any {
 // Results are ordered by BM25 score descending; at most k rows are returned.
 func queryBM25WithDB(
 	ctx context.Context,
-	db *sql.DB,
+	db docQueryer,
 	queryText string,
 	k int,
 	filter *search.FilterExpr,
@@ -415,18 +408,21 @@ func queryBM25WithDB(
 	}
 	// match_bm25 does not support bound parameters; escape once and reuse.
 	escapedQuery := quoteSQLStringLiteral(queryText)
-	bm25Cond := "fts_main_docs.match_bm25(id, " + escapedQuery + ", fields := 'content') IS NOT NULL"
-	if whereClause != "" {
-		whereClause = whereClause + " AND " + bm25Cond
-	} else {
-		whereClause = " WHERE " + bm25Cond
-	}
+	// Expand the scoring macro once, retaining only physical row keys and scores
+	// before top-k. Document IDs need not be unique; hydrate by rowid so a join
+	// cannot multiply results or reintroduce payloads excluded by the filter.
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, content, fts_main_docs.match_bm25(id, %s, fields := 'content') AS bm25_score, media_refs, %s
-		FROM docs%s
-		ORDER BY bm25_score DESC
-		LIMIT %d
-	`, escapedQuery, metadataExpr, whereClause, k), documentScopeArgs(documentIDs)...)
+		WITH scored AS MATERIALIZED (
+			SELECT docs.rowid AS row_id, fts_main_docs.match_bm25(id, %s, fields := 'content') AS bm25_score
+			FROM docs%s
+		), ranked AS (
+			SELECT row_id, bm25_score FROM scored
+			WHERE bm25_score IS NOT NULL ORDER BY bm25_score DESC LIMIT %d
+		)
+		SELECT docs.id, content, ranked.bm25_score, media_refs, %s
+		FROM ranked JOIN docs ON docs.rowid = ranked.row_id
+		ORDER BY ranked.bm25_score DESC
+	`, escapedQuery, whereClause, k, metadataExpr), documentScopeArgs(documentIDs)...)
 	if err != nil {
 		return nil, fmt.Errorf("bm25 query failed: %w", err)
 	}

@@ -7,6 +7,7 @@ ENV GOWORK=off
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+RUN mkdir -p /out && cc -O2 -Wall -Wextra -Werror deploy/linux/minnow-exec.c -o /out/minnow-exec
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/minnow .
 
@@ -22,7 +23,8 @@ RUN apt-get update \
     && chown -R minnow:minnow /etc/minnow /var/lib/minnow
 
 COPY --from=build /out/minnow /usr/local/bin/minnow
-COPY --chown=minnow:minnow extensions/v1.5.0/linux_amd64/ /opt/minnow/extensions/v1.5.0/linux_amd64/
+COPY --from=build /out/minnow-exec /usr/local/bin/minnow-exec
+COPY --chown=minnow:minnow extensions/v2.0.0/linux_amd64/ /opt/minnow/extensions/v2.0.0/linux_amd64/
 COPY --chown=minnow:minnow deploy/docker/minnow.yaml /etc/minnow/minnow.yaml
 COPY --chown=minnow:minnow deploy/docker/minnow.yaml /etc/minnow/minnow.openai.yaml
 COPY --chown=minnow:minnow deploy/docker/minnow.ollama.yaml /etc/minnow/minnow.ollama.yaml
@@ -30,6 +32,7 @@ COPY --chown=minnow:minnow deploy/docker/minnow.ollama.yaml /etc/minnow/minnow.o
 USER minnow
 ENV MINNOW_CONFIG=/etc/minnow/minnow.yaml \
     MINNOW_LOG_FORMAT=json \
+    MINNOW_DISABLE_THP=1 \
     GOMEMLIMIT=768MiB
 EXPOSE 8080
 VOLUME ["/var/lib/minnow"]
@@ -47,4 +50,4 @@ RUN chmod 0555 /usr/local/bin/start-minnow \
 ENTRYPOINT ["/usr/local/bin/start-minnow"]
 
 FROM runtime-base AS runtime
-ENTRYPOINT ["/usr/local/bin/minnow"]
+ENTRYPOINT ["/usr/local/bin/minnow-exec", "/usr/local/bin/minnow"]

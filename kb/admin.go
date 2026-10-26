@@ -2,6 +2,7 @@ package kb
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,38 @@ const kbTombstoneSuffix = ".tombstone.json"
 
 // KBTombstoneKey returns the blob key for a KB's deletion tombstone.
 func KBTombstoneKey(kbID string) string { return kbID + kbTombstoneSuffix }
+
+func deletionMarkerPrefix(kbID string) string { return kbID + ".deletions/" }
+
+// A deletion owns an immutable, never-reused marker. Concurrent cleanup can
+// remove only its own marker; one completed deletion cannot clear another's
+// active fence. Unlike a shared key, delayed delete retries cannot erase a new
+// owner's marker. Uncertain writes/cleanup leave this marker for reconciliation.
+type kbDeletion struct {
+	kb  *KB
+	key string
+}
+
+func (l *KB) beginKBDeletion(ctx context.Context, kbID string) (*kbDeletion, error) {
+	deletion := &kbDeletion{kb: l, key: deletionMarkerPrefix(kbID) + rand.Text() + ".json"}
+	data, err := json.Marshal(KBTombstone{Version: 1, KBID: kbID, DeletedAt: nowFrom(l.Clock), Reason: "delete"})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := l.uploadBytesCreateOnly(ctx, deletion.key, data); err != nil {
+		return nil, fmt.Errorf("write deletion marker %s (reconcile if outcome is uncertain): %w", deletion.key, err)
+	}
+	return deletion, nil
+}
+
+func (d *kbDeletion) clear(ctx context.Context) error {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := d.kb.BlobStore.Delete(cleanup, d.key); err != nil {
+		return fmt.Errorf("release deletion marker %s: %w", d.key, err)
+	}
+	return nil
+}
 
 // KBTombstone marks a KB id as deleted. While a tombstone is present the
 // shard reconcile skips the KBID entirely: leftover blobs under its prefixes
@@ -66,13 +99,19 @@ func (l *KB) IsTombstoned(ctx context.Context, kbID string) (bool, error) {
 		return true, nil
 	}
 	if errors.Is(err, ErrBlobNotFound) || errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		owners, listErr := l.BlobStore.List(ctx, deletionMarkerPrefix(kbID))
+		if listErr != nil {
+			return false, fmt.Errorf("list active deletions for %q: %w", kbID, listErr)
+		}
+		return len(owners) > 0, nil
 	}
 	return false, fmt.Errorf("head tombstone for %q: %w", kbID, err)
 }
 
-// ClearTombstone removes a KB's deletion tombstone, re-admitting the KBID
-// to reconcile and to clone/branch/restore targets.
+// ClearTombstone removes manual/legacy tombstones and retained per-deletion
+// markers, re-admitting the KBID to reconcile and clone/branch/restore targets.
+// This is operator recovery: first quiesce every deleter and investigate partial
+// cleanup. Active deleters must never call it; they clear only their own marker.
 func (l *KB) ClearTombstone(ctx context.Context, kbID string) error {
 	if strings.TrimSpace(kbID) == "" {
 		return fmt.Errorf("kb_id required")
@@ -80,7 +119,17 @@ func (l *KB) ClearTombstone(ctx context.Context, kbID string) error {
 	if l.BlobStore == nil {
 		return fmt.Errorf("blob store is not configured")
 	}
-	return l.BlobStore.Delete(ctx, KBTombstoneKey(kbID))
+	owners, err := l.BlobStore.List(ctx, deletionMarkerPrefix(kbID))
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, owner := range owners {
+		if err := l.BlobStore.Delete(ctx, owner.Key); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(append(errs, l.BlobStore.Delete(ctx, KBTombstoneKey(kbID)))...)
 }
 
 // rejectTombstonedTarget refuses to publish a new manifest under a
@@ -102,12 +151,12 @@ func (l *KB) rejectTombstonedTarget(ctx context.Context, kbID string) error {
 //
 // Guard limits: HasBackupsOrBranches runs before the manifest delete, so a
 // backup/snapshot/branch created concurrently between the check and the
-// delete is not stopped (guard→delete TOCTOU) — quiesce backup writers before
-// deleting a KB when that matters. A direct ManifestStore.Delete bypasses the
-// guard entirely; only this method enforces it. Shard deletes additionally
-// re-check the pin set after the manifest delete and skip pinned bytes, so
-// a marker that lands in the race still keeps its bytes; GC reclaims them
-// once the markers are gone.
+// delete is not stopped by that initial guard. Creators publish a provisional pin and
+// then confirm their source still exists at the captured version; shard cleanup
+// scans pins AFTER removing the source manifest. Thus either cleanup sees the
+// pin and keeps its bytes, or the creator detects deletion and releases its own pin rather
+// than publishing a dangling reference. A direct ManifestStore.Delete bypasses
+// these cleanup checks and must not unconditionally delete shared shard bytes.
 //
 // Tombstone: the delete writes a tombstone marker BEFORE the manifest delete
 // and removes it after fully successful cleanup. A surviving tombstone means
@@ -146,35 +195,25 @@ func (l *KB) DeleteKnowledgeBase(ctx context.Context, kbID string) error {
 		return fmt.Errorf("%w: %q", ErrDeleteBlockedByBackups, kbID)
 	}
 
-	var tombstoneErr error
-	tombstoned := false
-	if l.BlobStore != nil {
-		if tombstoneErr = l.TombstoneKnowledgeBase(ctx, kbID, "delete"); tombstoneErr == nil {
-			tombstoned = true
-		}
+	deletion, err := l.beginKBDeletion(ctx, kbID)
+	if err != nil {
+		// Restores use active deletion markers as a late-publication fence.
+		// Without durable ownership, no physical cleanup may begin.
+		return fmt.Errorf("write tombstone for %q: %w", kbID, err)
 	}
 
 	if err := l.ManifestStore.Delete(ctx, kbID); err != nil {
-		if tombstoned {
-			if clearErr := l.ClearTombstone(ctx, kbID); clearErr != nil {
-				return errors.Join(
-					fmt.Errorf("delete manifest %q: %w", kbID, err),
-					fmt.Errorf("rollback tombstone for %q: %w", kbID, clearErr),
-				)
-			}
-		}
-		return fmt.Errorf("delete manifest %q: %w", kbID, err)
+		return errors.Join(fmt.Errorf("delete manifest %q: %w", kbID, err), deletion.clear(ctx))
 	}
 
 	cleanupErrs := l.cleanupDeletedKB(ctx, kbID, manifest)
-	if tombstoneErr != nil {
-		cleanupErrs = append(cleanupErrs, fmt.Errorf("write tombstone for %q: %w", kbID, tombstoneErr))
-	}
 	// Fully successful cleanup leaves no tombstone: the id is clean and
 	// immediately reusable. A surviving tombstone always signals partial
 	// cleanup for reconcile to skip.
-	if len(cleanupErrs) == 0 && tombstoned {
-		_ = l.ClearTombstone(ctx, kbID)
+	if len(cleanupErrs) == 0 {
+		if err := deletion.clear(ctx); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+		}
 	}
 
 	if len(cleanupErrs) > 0 {

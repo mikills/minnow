@@ -28,11 +28,15 @@ func TestMutableShardRefresh(t *testing.T) {
 		if err := kb.MarkPendingSession(kbDir); err != nil {
 			t.Fatal(err)
 		}
-		err := f.ensureMutableShardDBLocked(context.Background(), mutableShardRequest{
+		db, err := f.prepareMutableShardDBLocked(context.Background(), mutableShardRequest{
 			kbID:   "kb-1",
 			kbDir:  kbDir,
 			dbPath: filepath.Join(kbDir, vectorsDuckDBFileName),
 		})
+		if db != nil {
+			db.Close()
+			t.Fatal("refused session returned a database handle")
+		}
 		if !errors.Is(err, kb.ErrUnpublishedWrites) {
 			t.Fatalf("stale local shard with unpublished writes was not refused: %v", err)
 		}
@@ -53,7 +57,11 @@ func TestUnpublishedKnowledgeBaseIsNotUninitialized(t *testing.T) {
 	req := mutableShardRequest{kbID: "kb-1", kbDir: kbDir, dbPath: dbPath, embeddingDim: 8}
 
 	t.Run("an absent knowledge base is still refused", func(t *testing.T) {
-		err := f.ensureMutableShardDBLocked(ctx, req)
+		db, err := f.prepareMutableShardDBLocked(ctx, req)
+		if db != nil {
+			db.Close()
+			t.Fatal("absent knowledge base returned a database handle")
+		}
 		if !errors.Is(err, kb.ErrKBUninitialized) {
 			t.Fatalf("a knowledge base with no rows anywhere was accepted: %v", err)
 		}
@@ -62,7 +70,11 @@ func TestUnpublishedKnowledgeBaseIsNotUninitialized(t *testing.T) {
 	t.Run("a knowledge base holding deferred rows is reachable", func(t *testing.T) {
 		bootstrap := req
 		bootstrap.allowBootstrap = true
-		if err := f.ensureMutableShardDBLocked(ctx, bootstrap); err != nil {
+		db, err := f.prepareMutableShardDBLocked(ctx, bootstrap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
 			t.Fatal(err)
 		}
 		if err := kb.MarkPendingSession(kbDir); err != nil {
@@ -72,14 +84,22 @@ func TestUnpublishedKnowledgeBaseIsNotUninitialized(t *testing.T) {
 		// base, but it must reach one whose rows are sitting on disk uncommitted.
 		joining := req
 		joining.joinsSession = true
-		if err := f.ensureMutableShardDBLocked(ctx, joining); err != nil {
+		db, err = f.prepareMutableShardDBLocked(ctx, joining)
+		if err != nil {
 			t.Fatalf("deferred rows were reported as an uninitialized knowledge base: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
 		}
 	})
 
 	t.Run("a write outside the session is refused", func(t *testing.T) {
 		// The session does not move the manifest, so the local shard looks fresh.
-		err := f.ensureMutableShardDBLocked(ctx, req)
+		db, err := f.prepareMutableShardDBLocked(ctx, req)
+		if db != nil {
+			db.Close()
+			t.Fatal("unrelated write returned a database handle")
+		}
 		if !errors.Is(err, kb.ErrUnpublishedWrites) {
 			t.Fatalf("an unrelated write joined an open session: %v", err)
 		}

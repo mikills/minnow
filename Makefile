@@ -1,21 +1,26 @@
 SHELL := /bin/bash
 
-.PHONY: test build run fmt release release-major
+.PHONY: test build run install fmt release release-major
 
 GOFILES := $(shell find . -name '*.go' -not -path './testdata/*')
 GOLINES := go run github.com/segmentio/golines@latest
 MAX_LEN ?= 120
+ARGS ?=
 
 test:
-	go test ./... -v -race -count=1
+	go test ./... -v -race -count=1 -timeout 25m
 	go test ./codeindex/... -count=1
 
 build:
 	GOWORK=off go build ./...
+	GOWORK=off go build -o minnow .
 	go build -o /tmp/minnow-codeindex ./codeindex
 
 run:
-	go run .
+	go run . $(ARGS)
+
+install:
+	go install .
 
 fmt:
 	$(GOLINES) --max-len=$(MAX_LEN) -w .

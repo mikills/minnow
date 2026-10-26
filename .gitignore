@@ -33,3 +33,6 @@ todo.md
 /codeindex/codeindex
 
 .claude/
+
+# Local native-library caches from earlier builds
+/.cache/duckdb/

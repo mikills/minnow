@@ -12,6 +12,7 @@ services:
       - OPENAI_API_KEY
       - GOMEMLIMIT=${GOMEMLIMIT:-768MiB}
       - MINNOW_DUCKDB_MEMORY_LIMIT=${MINNOW_DUCKDB_MEMORY_LIMIT:-512MB}
+      - MINNOW_DISABLE_THP=${MINNOW_DISABLE_THP:-1}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

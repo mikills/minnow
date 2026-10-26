@@ -226,7 +226,7 @@ func (f *DuckDBArtifactFormat) fetchVectorsFromShards(ctx context.Context, kbID 
 		if err != nil {
 			return nil, fmt.Errorf("fetch vectors shard %s: %w", shard.ShardID, err)
 		}
-		metaByID, err := queryMetadataByIDs(ctx, conn.db, remaining)
+		metaByID, err := queryMetadataByIDs(ctx, conn, remaining)
 		conn.mu.Unlock()
 		if err != nil {
 			return nil, fmt.Errorf("fetch vectors shard %s: %w", shard.ShardID, err)
@@ -304,7 +304,7 @@ func (f *DuckDBArtifactFormat) searchBM25AllShards(
 		if err != nil {
 			return nil, fmt.Errorf("open shard %s for bm25: %w", shard.ShardID, err)
 		}
-		rows, err := queryBM25WithDB(ctx, conn.db, queryText, k, filter, documentIDs)
+		rows, err := queryBM25WithDB(ctx, conn, queryText, k, filter, documentIDs)
 		conn.mu.Unlock()
 		if err != nil {
 			return nil, fmt.Errorf("bm25 shard %s: %w", shard.ShardID, err)

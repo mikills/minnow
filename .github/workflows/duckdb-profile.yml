@@ -1,0 +1,316 @@
+name: DuckDB profile
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/duckdb_profile/**'
+      - 'scripts/profile_duckdb*'
+      - 'scripts/memory_duckdb*'
+      - 'scripts/parser_duckdb*'
+      - 'scripts/bm25_duckdb*'
+      - kb/duckdb/bm25_shape_benchmark_test.go
+      - .github/workflows/duckdb-profile.yml
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: 'Baseline ref with DuckDB 1.5.0'
+        default: main
+        required: true
+      memory_only:
+        description: 'Only attribute native memory; skip perf, heaptrack and simulations'
+        type: boolean
+        default: false
+      parser_only:
+        description: 'Compare PEG and legacy in one 2.0 binary; separate from memory attribution'
+        type: boolean
+        default: false
+      bm25_only:
+        description: 'Compare current BM25 SQL with a test-only materialized query'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: duckdb-profile-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  profile:
+    if: ${{ !inputs.parser_only && !inputs.bm25_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: '1'
+      GOWORK: 'off'
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 384MiB
+      PYTHONDONTWRITEBYTECODE: '1'
+      RESULTS_DIR: ${{ inputs.memory_only && 'memory' || 'profiles' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || inputs.baseline_ref }}
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: candidate/go.mod
+          cache-dependency-path: |
+            baseline/go.sum
+            candidate/go.sum
+
+      - name: Check tooling and matched workloads
+        run: |
+          diff -ru baseline/sim candidate/sim
+          python3 -m unittest discover -s candidate/scripts -p '*duckdb_test.py' -v
+          mkdir -p "$RESULTS_DIR"
+          uname -a > "$RESULTS_DIR/host.txt"
+          lscpu >> "$RESULTS_DIR/host.txt"
+          free -m >> "$RESULTS_DIR/host.txt"
+          go version >> "$RESULTS_DIR/host.txt"
+          cat /sys/kernel/mm/transparent_hugepage/enabled >> "$RESULTS_DIR/host.txt"
+          cat /sys/kernel/mm/transparent_hugepage/defrag >> "$RESULTS_DIR/host.txt"
+
+      - name: Install native profilers
+        if: ${{ !inputs.memory_only }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends linux-tools-generic heaptrack
+          # The runner's kernel may differ from the tools-generic package.
+          # Use the actual perf executable, not the version-matching wrapper.
+          perf=$(find -L /usr/lib/linux-tools -type f -name perf | sort -V | tail -n1)
+          echo "Using perf executable: $perf"
+          test -x "$perf"
+          echo "PERF=$perf" >> "$GITHUB_ENV"
+          "$perf" version > profiles/tools.txt
+          heaptrack --version >> profiles/tools.txt
+          heaptrack_print --version >> profiles/tools.txt
+          # Software cpu-clock samples avoid depending on a hosted VM's PMU.
+          # Record any restriction; the runner reports unavailable diagnostics.
+          sudo sysctl kernel.perf_event_paranoid=-1 >> profiles/tools.txt 2>&1 || true
+          "$perf" record -e cpu-clock:u -o profiles/permission-check.data -- sleep 0.1 \
+            > profiles/permission-check.out 2> profiles/permission-check.err || true
+
+      - name: Build matched probes and simulations sequentially (outside measurement)
+        env:
+          MEMORY_ONLY: ${{ inputs.memory_only || false }}
+        run: |
+          set -euo pipefail
+          for revision in baseline candidate; do
+            (
+              cd "$revision"
+              git rev-parse HEAD > "../$RESULTS_DIR/$revision.sha"
+              go list -m all > "../$RESULTS_DIR/$revision.modules.txt"
+              go build -p=1 -o "$GITHUB_WORKSPACE/$RESULTS_DIR/$revision-profile" \
+                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/main.go" \
+                 "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/query_split.go" \
+                 "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/memory_attribution.go" \
+                 "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/memory_linux.go"
+              go build -p=1 -o "$GITHUB_WORKSPACE/$RESULTS_DIR/$revision-probe" \
+                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_compat/main.go"
+              "../$RESULTS_DIR/$revision-probe" > "../$RESULTS_DIR/$revision.engine.json"
+              if [ "$MEMORY_ONLY" != true ]; then
+                go test -p=1 -c -o "$GITHUB_WORKSPACE/profiles/$revision.test" ./sim
+              fi
+              nm -C "../$RESULTS_DIR/$revision-profile" > "../$RESULTS_DIR/$revision.symbols.txt"
+            )
+          done
+          (cd candidate && go test -p=1 -parallel=1 -timeout=1m -run '^(TestMemory|TestQuerySplit|TestParser)$' ./scripts/duckdb_profile)
+
+      - name: Run phase diagnostics, native CPU sampling, and allocation tracing sequentially
+        if: ${{ !inputs.memory_only }}
+        run: python3 candidate/scripts/profile_duckdb.py --root "$GITHUB_WORKSPACE"
+
+      - name: Attribute native memory with post-close arena purge
+        if: ${{ inputs.memory_only }}
+        run: python3 candidate/scripts/memory_duckdb.py --root "$GITHUB_WORKSPACE"
+
+      - name: Preserve matching binaries and extensions for offline symbolization
+        if: ${{ always() && !inputs.memory_only }}
+        run: |
+          files=()
+          for file in profiles/baseline-profile profiles/candidate-profile \
+            profiles/baseline.test profiles/candidate.test \
+            baseline/extensions/v1.5.0/linux_amd64 \
+            candidate/extensions/v2.0.0/linux_amd64; do
+            if [ -e "$file" ]; then files+=("$file"); fi
+          done
+          if [ "${#files[@]}" -gt 0 ]; then
+            tar -czf profiles/symbols.tar.gz "${files[@]}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && !inputs.memory_only }}
+        with:
+          name: duckdb-native-profiles
+          retention-days: 7
+          path: |
+            profiles/*.json
+            profiles/*.txt
+            profiles/*.md
+            profiles/*.sha
+            profiles/*.time
+            profiles/*.out
+            profiles/*.err
+            profiles/*.data
+            profiles/*.gz
+            profiles/*.zst
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && inputs.memory_only }}
+        with:
+          name: duckdb-memory
+          retention-days: 7
+          path: |
+            memory/*.json
+            memory/*.md
+            memory/*.txt
+            memory/*.sha
+            memory/*.out
+            memory/*.err
+          if-no-files-found: warn
+
+  parser:
+    if: ${{ inputs.parser_only && !inputs.bm25_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: '1'
+      GOWORK: 'off'
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 384MiB
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: candidate/go.mod
+          cache-dependency-path: candidate/go.sum
+      - name: Check controls and tooling
+        env:
+          MEMORY_ONLY: ${{ inputs.memory_only }}
+        run: |
+          test "$MEMORY_ONLY" != true
+          python3 -m unittest discover -s candidate/scripts -p '*duckdb_test.py' -v
+          mkdir -p parser
+          uname -a > parser/host.txt
+          lscpu >> parser/host.txt
+          free -m >> parser/host.txt
+          go version >> parser/host.txt
+          cat /sys/kernel/mm/transparent_hugepage/enabled >> parser/host.txt
+          cat /sys/kernel/mm/transparent_hugepage/defrag >> parser/host.txt
+      - name: Stage matched signed extensions
+        run: |
+          set -euo pipefail
+          (cd candidate/extensions/v2.0.0 && sha256sum -c SHA256SUMS)
+          mkdir -p parser/extensions/v2.0.0/linux_amd64
+          cp candidate/extensions/v2.0.0/linux_amd64/*.duckdb_extension parser/extensions/v2.0.0/linux_amd64/
+          url=https://extensions.duckdb.org/v2.0.0/linux_amd64/legacy_parser.duckdb_extension.gz
+          echo "$url" > parser/legacy-parser-source.txt
+          curl --fail --location --retry 3 --max-time 120 -o parser/legacy_parser.gz "$url"
+          echo '2da013c24c51210768122ae601d3576801169a39f7b2840e858bbd711ffcbfad  parser/legacy_parser.gz' | sha256sum -c -
+          gzip -dc parser/legacy_parser.gz > parser/extensions/v2.0.0/linux_amd64/legacy_parser.duckdb_extension
+          echo 'db3a894d309dd415c9fcedf44613d4a5554cd862527dfced35c1e360214391ba  parser/extensions/v2.0.0/linux_amd64/legacy_parser.duckdb_extension' | sha256sum -c -
+      - name: Build one candidate binary outside measurement
+        working-directory: candidate
+        run: |
+          git rev-parse HEAD > ../parser/candidate.sha
+          go list -m all > ../parser/candidate.modules.txt
+          go test -p=1 -parallel=1 -timeout=1m -run '^(TestMemory|TestQuerySplit|TestParser)$' ./scripts/duckdb_profile
+          go build -p=1 -o ../parser/candidate-profile ./scripts/duckdb_profile
+          go build -p=1 -o ../parser/candidate-probe ./scripts/duckdb_compat
+          ../parser/candidate-probe > ../parser/candidate.engine.json
+          sha256sum ../parser/candidate-profile ../parser/extensions/v2.0.0/linux_amd64/*.duckdb_extension > ../parser/inputs.sha256
+      - name: Compare parsers in sequential fresh processes
+        run: python3 candidate/scripts/parser_duckdb.py --root "$GITHUB_WORKSPACE"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: duckdb-parser
+          retention-days: 7
+          path: |
+            parser/*.json
+            parser/*.md
+            parser/*.txt
+            parser/*.sha
+            parser/*.sha256
+            parser/*.out
+            parser/*.err
+            parser/legacy_parser.gz
+          if-no-files-found: warn
+
+  bm25:
+    if: ${{ inputs.bm25_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: '1'
+      GOWORK: 'off'
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 384MiB
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: candidate/go.mod
+          cache-dependency-path: candidate/go.sum
+      - name: Check controls and tooling
+        env:
+          MEMORY_ONLY: ${{ inputs.memory_only }}
+          PARSER_ONLY: ${{ inputs.parser_only }}
+        run: |
+          test "$MEMORY_ONLY" != true
+          test "$PARSER_ONLY" != true
+          python3 -m unittest discover -s candidate/scripts -p '*duckdb_test.py' -v
+          mkdir -p bm25
+          uname -a > bm25/host.txt
+          lscpu >> bm25/host.txt
+          free -m >> bm25/host.txt
+          go version >> bm25/host.txt
+          cat /sys/kernel/mm/transparent_hugepage/enabled >> bm25/host.txt
+      - name: Verify correctness and build one candidate binary
+        working-directory: candidate
+        run: |
+          (cd extensions/v2.0.0 && sha256sum -c SHA256SUMS)
+          git rev-parse HEAD > ../bm25/candidate.sha
+          go list -m all > ../bm25/candidate.modules.txt
+          go test -p=1 -parallel=1 -count=1 -timeout=2m -run '^TestBM25Shape$' ./kb/duckdb
+          go test -p=1 -c -o ../bm25/candidate-query.test ./kb/duckdb
+          go build -p=1 -o ../bm25/candidate-probe ./scripts/duckdb_compat
+          ../bm25/candidate-probe > ../bm25/candidate.engine.json
+          sha256sum ../bm25/candidate-query.test extensions/v2.0.0/linux_amd64/*.duckdb_extension > ../bm25/inputs.sha256
+      - name: Compare BM25 query shapes sequentially
+        run: python3 candidate/scripts/bm25_duckdb.py --root "$GITHUB_WORKSPACE"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: duckdb-bm25
+          retention-days: 7
+          path: |
+            bm25/*.json
+            bm25/*.md
+            bm25/*.txt
+            bm25/*.sha
+            bm25/*.sha256
+            bm25/*.out
+            bm25/*.err
+            bm25/*.time
+          if-no-files-found: warn

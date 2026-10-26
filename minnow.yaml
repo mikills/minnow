@@ -1,4 +1,4 @@
-# Default minnow config. Sufficient for `go run .` from the repo root.
+# Default minnow config. Sufficient for `make run` from the repo root.
 # Every other knob (HTTP port, blob/cache paths, DuckDB memory, sharding
 # thresholds, scheduler cadence, worker sizing, media timings) falls back
 # to the schema default.
@@ -9,7 +9,7 @@ embedder:
     dim: 384
 
 # Local developer default: expose MCP for coding agents at /mcp and via
-# `go run . mcp stdio`. Indexing is enabled so agents can build/update a KB.
+# `make run ARGS="mcp stdio"`. Indexing is enabled so agents can build/update a KB.
 # Destructive/admin tools stay opt-in.
 mcp:
   enabled: true

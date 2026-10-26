@@ -14,6 +14,7 @@ import (
 // It never blocks. Opens nest, so waiting on a slot could wait on one the
 // caller already holds. The share shrinks as more open instead.
 func (m *Manager) OpenDatabase(configured string) (limit string, release func()) {
+	m.databaseOpenAttempts.Add(1)
 	m.liveDatabases.Add(1)
 	if !m.sizes {
 		m.issued.Add(0)
@@ -78,6 +79,10 @@ func (m *Manager) IssuedBytes() int64 { return m.issued.Load() }
 
 // LiveDatabases is how many DuckDB databases are open right now.
 func (m *Manager) LiveDatabases() int64 { return m.liveDatabases.Load() }
+
+// DatabaseOpenAttempts counts initialization attempts, including failed opens.
+// Unlike LiveDatabases it does not fall when a handle closes.
+func (m *Manager) DatabaseOpenAttempts() uint64 { return m.databaseOpenAttempts.Load() }
 
 // SetEmbedBudgetForTest drives contention without running 64 requests.
 func (m *Manager) SetEmbedBudgetForTest(n int) {

@@ -32,14 +32,15 @@ docker compose up -d              # pulls ghcr.io/mikills/minnow
 curl -s http://127.0.0.1:8080/healthz
 ```
 
-From a source checkout, `go run .` serves the same thing, and
+From a source checkout, `make run` serves the same thing, and
 `docker compose -f compose.yaml -f compose.build.yaml up --build` builds the
 image locally instead of pulling it.
 
 For globally installed MCP use with OpenAI embeddings:
 
 ```bash
-go install github.com/mikills/minnow@latest
+# From this checkout (links the pinned DuckDB 2.0 engine):
+make install
 go install github.com/mikills/minnow/codeindex@latest
 $(go env GOPATH)/bin/minnow setup
 minnow config init dev-openai
@@ -78,13 +79,29 @@ with `CODEINDEX_MINNOW_URL`, or either identity with `--kb`/`--index-key`.
 The default `minnow.yaml` also exposes MCP for coding agents:
 
 - Streamable HTTP: `http://127.0.0.1:8080/mcp`
-- Stdio: `go run . mcp stdio`
+- Stdio: `make run ARGS="mcp stdio"`
 
 Codex CLI, Claude Code, and OpenCode can connect directly to a hosted streamable
 HTTP endpoint; see [MCP endpoints](docs/getting-started.md#mcp-endpoints) for
 verified registration commands and token handling.
 
 The default config at `./minnow.yaml` is sufficient for local development (embedder-only, no external services). See [`docs/getting-started.md`](docs/getting-started.md) for a deployment-grade setup.
+
+### DuckDB 2.0
+
+This checkout uses **DuckDB v2.0.0**, bundled by `duckdb-go v2.20000.0`.
+Standard `go build`, `go test`, and `go install` work without custom linking.
+The first build downloads native Go modules from `go.duckdb.org`; restricted
+module proxies must allow that origin. Subsequent builds can use the module cache.
+
+Signed `vss`, `fts`, and `httpfs` extensions are bundled for macOS ARM64 and
+Linux AMD64 and load offline. Signature verification stays enabled. DuckPGQ is
+not bundled; graph expansion uses BFS by default. Keep `UseDuckPGQ` false.
+Back up data before upgrading; do not assume files written by 2.0 can be
+reopened with 1.5.
+
+Engine performance comparisons run on GitHub-hosted Linux runners, not developer
+machines. See [the comparison procedure](BENCHMARK.md#duckdb-engine-comparison).
 
 ## What it does
 

@@ -16,6 +16,9 @@ import (
 
 const DefaultExtensionDir = "extensions"
 
+// NativeVersion matches the engine bundled by duckdb-go and our offline extensions.
+const NativeVersion = "v2.0.0"
+
 func ResolveExtensionDir() string {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -40,6 +43,9 @@ type Config struct {
 	TempDir      string
 	OfflineExt   bool
 	Threads      int
+	// SkipFTS is for internal staging handles that only mutate or inspect rows.
+	// Published-shard readers, index builders and public handles still load FTS.
+	SkipFTS bool
 	// OnClose runs when sql.DB.Close closes the connector, which is how the
 	// process budget learns a database is no longer holding its share.
 	OnClose func()
@@ -97,6 +103,13 @@ func (c *closingConnector) Close() error {
 }
 
 func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
+	var version, sourceID, codename string
+	if err := db.QueryRowContext(ctx, `PRAGMA version`).Scan(&version, &sourceID, &codename); err != nil {
+		return fmt.Errorf("read DuckDB runtime version: %w", err)
+	}
+	if version != NativeVersion {
+		return fmt.Errorf("DuckDB runtime %s does not match %s; rebuild with the pinned duckdb-go dependency", version, NativeVersion)
+	}
 	if cfg.ExtensionDir != "" {
 		if _, err := db.ExecContext(ctx, fmt.Sprintf(`SET extension_directory = '%s'`, QuoteSQLString(cfg.ExtensionDir))); err != nil {
 			return fmt.Errorf("set extension_directory: %w", err)
@@ -108,8 +121,10 @@ func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
 	if err := LoadVSS(ctx, db, cfg.ExtensionDir, cfg.OfflineExt); err != nil {
 		return err
 	}
-	if err := LoadFTS(ctx, db, cfg.ExtensionDir, cfg.OfflineExt); err != nil {
-		return err
+	if !cfg.SkipFTS {
+		if err := LoadFTS(ctx, db, cfg.ExtensionDir, cfg.OfflineExt); err != nil {
+			return err
+		}
 	}
 	return ConfigureRuntime(ctx, db, cfg.MemoryLimit, cfg.TempDir, cfg.Threads)
 }
@@ -169,7 +184,7 @@ func ConfigureRuntime(ctx context.Context, db *sql.DB, memLimit, tempDir string,
 	if threads <= 0 {
 		threads = 1
 	}
-	_, err := db.ExecContext(ctx, fmt.Sprintf(`PRAGMA threads = %d`, threads))
+	_, err := db.ExecContext(ctx, fmt.Sprintf(`SET threads = %d`, threads))
 	return err
 }
 
