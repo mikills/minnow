@@ -23,27 +23,34 @@ import (
 )
 
 type sample struct {
-	Stage     string            `json:"stage"`
-	ElapsedNS int64             `json:"elapsed_ns"`
-	UserNS    int64             `json:"user_ns"`
-	SystemNS  int64             `json:"system_ns"`
-	GoHeap    uint64            `json:"go_heap_bytes"`
-	GoSys     uint64            `json:"go_sys_bytes"`
-	GoHeapSys uint64            `json:"go_heap_sys_bytes"`
-	GoRelease uint64            `json:"go_heap_released_bytes"`
-	GoStacks  uint64            `json:"go_stack_in_use_bytes"`
-	OS        map[string]uint64 `json:"os_kib"`
-	Allocator map[string]uint64 `json:"glibc_bytes"`
+	Stage     string                   `json:"stage"`
+	ElapsedNS int64                    `json:"elapsed_ns"`
+	UserNS    int64                    `json:"user_ns"`
+	SystemNS  int64                    `json:"system_ns"`
+	GoHeap    uint64                   `json:"go_heap_bytes"`
+	GoSys     uint64                   `json:"go_sys_bytes"`
+	GoHeapSys uint64                   `json:"go_heap_sys_bytes"`
+	GoRelease uint64                   `json:"go_heap_released_bytes"`
+	GoStacks  uint64                   `json:"go_stack_in_use_bytes"`
+	OS        map[string]uint64        `json:"os_kib"`
+	Allocator map[string]uint64        `json:"glibc_bytes"`
+	Jemalloc  *jemallocSample          `json:"jemalloc,omitempty"`
+	DuckDB    []duckDBMemory           `json:"duckdb_memory,omitempty"`
+	Mappings  map[string]mappingMemory `json:"mappings,omitempty"`
 }
 
 type probe struct {
-	Mode       string            `json:"mode"`
-	Version    string            `json:"version"`
-	Source     string            `json:"source"`
-	Iterations int               `json:"iterations"`
-	Samples    []sample          `json:"samples"`
-	Plans      map[string]string `json:"query_plans,omitempty"`
-	QueryPath  string            `json:"query_path,omitempty"`
+	Mode              string            `json:"mode"`
+	Version           string            `json:"version"`
+	Source            string            `json:"source"`
+	Iterations        int               `json:"iterations"`
+	Samples           []sample          `json:"samples"`
+	Plans             map[string]string `json:"query_plans,omitempty"`
+	QueryPath         string            `json:"query_path,omitempty"`
+	MemoryAttribution bool              `json:"memory_attribution,omitempty"`
+	Settings          map[string]string `json:"settings,omitempty"`
+	Diagnostics       []string          `json:"diagnostics,omitempty"`
+	memoryDB          *sql.DB
 }
 
 func allowed() bool {
@@ -56,12 +63,13 @@ func main() {
 	extensions := flag.String("extensions", "", "absolute offline extension directory")
 	expect := flag.String("expect", "", "required engine version")
 	iterations := flag.Int("iterations", 20, "bounded operation count")
+	memoryAttribution := flag.Bool("memory-attribution", false, "collect native allocator, DuckDB and mapping counters; purge arenas after close (diagnostic only)")
 	flag.Parse()
 	if !allowed() {
 		fmt.Fprintln(os.Stderr, "profiling is restricted to GitHub-hosted Linux Actions runners")
 		os.Exit(1)
 	}
-	p := probe{Mode: *mode, Iterations: *iterations, QueryPath: *queryPath}
+	p := probe{Mode: *mode, Iterations: *iterations, QueryPath: *queryPath, MemoryAttribution: *memoryAttribution}
 	if err := p.run(*extensions, *expect); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -86,6 +94,11 @@ func (p *probe) timed(stage string, operation func() error) error {
 		UserNS: after.Utime.Nano() - before.Utime.Nano(), SystemNS: after.Stime.Nano() - before.Stime.Nano()}
 	// Keep /proc and allocator inspection out of the hot query loop.
 	if !hotQueryStage(stage) {
+		if p.MemoryAttribution {
+			if statErr := p.attributeMemory(&s); statErr != nil {
+				return statErr
+			}
+		}
 		if statErr := s.memory(); statErr != nil {
 			return statErr
 		}
@@ -155,6 +168,9 @@ func (p *probe) run(extensions, expect string) error {
 	if p.QueryPath != "all" && p.Mode != "query_split" {
 		return fmt.Errorf("query-path is only valid with query_split")
 	}
+	if p.MemoryAttribution && (p.Mode == "query" || p.Mode == "query_split") {
+		return fmt.Errorf("memory attribution is restricted to lifecycle/ingest probes")
+	}
 	switch p.QueryPath {
 	case "all", "adhoc", "prepare", "reuse":
 	default:
@@ -183,6 +199,16 @@ func (p *probe) run(extensions, expect string) error {
 	}
 	if err := p.timed("after_gc", func() error { runtime.GC(); return nil }); err != nil {
 		return err
+	}
+	if p.MemoryAttribution {
+		if err := p.timed("after_jemalloc_purge", func() error {
+			if purgeErr := purgeJemalloc(); purgeErr != nil {
+				p.Diagnostics = append(p.Diagnostics, purgeErr.Error())
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 	}
 	// Diagnostic only: does returning glibc's free pages reduce residual RSS?
 	// This is never applied to the production server or to the timed operations.
@@ -219,11 +245,18 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 				return fmt.Errorf("%s must stay disabled", setting)
 			}
 		}
+		if p.MemoryAttribution {
+			p.memoryDB = db
+		}
 		return nil
 	})
 	if db != nil {
 		defer func() {
-			if closeErr := p.timed("close", db.Close); err == nil {
+			if closeErr := p.timed("close", func() error {
+				closeErr := db.Close()
+				p.memoryDB = nil // Never reopen a closed DB just to inspect its counters.
+				return closeErr
+			}); err == nil {
 				err = closeErr
 			}
 		}()

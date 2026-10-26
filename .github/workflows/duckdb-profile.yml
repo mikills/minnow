@@ -5,6 +5,7 @@ on:
     paths:
       - 'scripts/duckdb_profile/**'
       - 'scripts/profile_duckdb*'
+      - 'scripts/memory_duckdb*'
       - .github/workflows/duckdb-profile.yml
   workflow_dispatch:
     inputs:
@@ -12,6 +13,10 @@ on:
         description: 'Baseline ref with DuckDB 1.5.0'
         default: main
         required: true
+      memory_only:
+        description: 'Only attribute native memory; skip perf, heaptrack and simulations'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -30,6 +35,7 @@ jobs:
       GOMAXPROCS: '2'
       GOMEMLIMIT: 384MiB
       PYTHONDONTWRITEBYTECODE: '1'
+      RESULTS_DIR: ${{ inputs.memory_only && 'memory' || 'profiles' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,13 +58,16 @@ jobs:
         run: |
           diff -ru baseline/sim candidate/sim
           python3 -m unittest discover -s candidate/scripts -p '*duckdb_test.py' -v
-          mkdir -p profiles
-          uname -a > profiles/host.txt
-          lscpu >> profiles/host.txt
-          free -m >> profiles/host.txt
-          go version >> profiles/host.txt
+          mkdir -p "$RESULTS_DIR"
+          uname -a > "$RESULTS_DIR/host.txt"
+          lscpu >> "$RESULTS_DIR/host.txt"
+          free -m >> "$RESULTS_DIR/host.txt"
+          go version >> "$RESULTS_DIR/host.txt"
+          cat /sys/kernel/mm/transparent_hugepage/enabled >> "$RESULTS_DIR/host.txt"
+          cat /sys/kernel/mm/transparent_hugepage/defrag >> "$RESULTS_DIR/host.txt"
 
       - name: Install native profilers
+        if: ${{ !inputs.memory_only }}
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -79,30 +88,41 @@ jobs:
             > profiles/permission-check.out 2> profiles/permission-check.err || true
 
       - name: Build matched probes and simulations sequentially (outside measurement)
+        env:
+          MEMORY_ONLY: ${{ inputs.memory_only || false }}
         run: |
           set -euo pipefail
           for revision in baseline candidate; do
             (
               cd "$revision"
-              git rev-parse HEAD > "../profiles/$revision.sha"
-              go list -m all > "../profiles/$revision.modules.txt"
-              go build -p=1 -o "$GITHUB_WORKSPACE/profiles/$revision-profile" \
+              git rev-parse HEAD > "../$RESULTS_DIR/$revision.sha"
+              go list -m all > "../$RESULTS_DIR/$revision.modules.txt"
+              go build -p=1 -o "$GITHUB_WORKSPACE/$RESULTS_DIR/$revision-profile" \
                 "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/main.go" \
-                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/query_split.go" \
-                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/memory_linux.go"
-              go build -p=1 -o "$GITHUB_WORKSPACE/profiles/$revision-probe" \
+                 "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/query_split.go" \
+                 "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/memory_attribution.go" \
+                 "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/memory_linux.go"
+              go build -p=1 -o "$GITHUB_WORKSPACE/$RESULTS_DIR/$revision-probe" \
                 "$GITHUB_WORKSPACE/candidate/scripts/duckdb_compat/main.go"
-              "../profiles/$revision-probe" > "../profiles/$revision.engine.json"
-              go test -p=1 -c -o "$GITHUB_WORKSPACE/profiles/$revision.test" ./sim
-              nm -C "../profiles/$revision-profile" > "../profiles/$revision.symbols.txt"
+              "../$RESULTS_DIR/$revision-probe" > "../$RESULTS_DIR/$revision.engine.json"
+              if [ "$MEMORY_ONLY" != true ]; then
+                go test -p=1 -c -o "$GITHUB_WORKSPACE/profiles/$revision.test" ./sim
+              fi
+              nm -C "../$RESULTS_DIR/$revision-profile" > "../$RESULTS_DIR/$revision.symbols.txt"
             )
           done
+          (cd candidate && go test -p=1 -parallel=1 -timeout=1m -run '^(TestMemory|TestQuerySplit)$' ./scripts/duckdb_profile)
 
       - name: Run phase diagnostics, native CPU sampling, and allocation tracing sequentially
+        if: ${{ !inputs.memory_only }}
         run: python3 candidate/scripts/profile_duckdb.py --root "$GITHUB_WORKSPACE"
 
+      - name: Attribute native memory with post-close arena purge
+        if: ${{ inputs.memory_only }}
+        run: python3 candidate/scripts/memory_duckdb.py --root "$GITHUB_WORKSPACE"
+
       - name: Preserve matching binaries and extensions for offline symbolization
-        if: always()
+        if: ${{ always() && !inputs.memory_only }}
         run: |
           files=()
           for file in profiles/baseline-profile profiles/candidate-profile \
@@ -116,7 +136,7 @@ jobs:
           fi
 
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ always() && !inputs.memory_only }}
         with:
           name: duckdb-native-profiles
           retention-days: 7
@@ -131,4 +151,18 @@ jobs:
             profiles/*.data
             profiles/*.gz
             profiles/*.zst
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && inputs.memory_only }}
+        with:
+          name: duckdb-memory
+          retention-days: 7
+          path: |
+            memory/*.json
+            memory/*.md
+            memory/*.txt
+            memory/*.sha
+            memory/*.out
+            memory/*.err
           if-no-files-found: warn

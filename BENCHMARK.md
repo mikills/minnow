@@ -88,6 +88,37 @@ symbols are reported as failures rather than silently replaced with Go-only data
 Each command is capped at two minutes and partial results are saved after every
 operation, so a profiler timeout does not discard completed measurements.
 
+### Native memory attribution
+
+Dispatch **DuckDB profile** on the feature branch with `memory_only=true` and `baseline_ref=main` to
+compare the same probe source against 1.5.0 and 2.0.0 on one hosted Linux AMD64
+runner. This manual-only mode runs no CPU sampling, allocation interposer,
+simulation suite, or throughput benchmark. It changes no production settings.
+
+- Three alternating rounds of fresh core, VSS-only, FTS-only, configured, and
+  ingestion processes. Lifecycle modes open/load/close 20 databases; ingestion
+  uses one database, 10,240 rows, both index builds, checkpoint and close.
+- Limits (`memory_limit=128MB`, `threads=1`) are supplied at startup, with signed
+  offline extensions. The raw output records actual settings.
+- Each lifecycle snapshot records `duckdb_memory()` by tag while the database is
+  open, epoch-refreshed counters from the binary's own `duckdb_je_mallctl`, resident
+  mappings by path from `/proc/self/smaps`, rollup RSS/anonymous/huge pages, Go
+  live/reserved/released memory, and glibc counters. Inspection is outside timers
+  but still perturbs these diagnostics. Closed databases have unavailable DuckDB
+  counters, not fabricated zero usage.
+- After all databases are closed and Go GC has run, explicitly purge jemalloc's
+  arenas, sample again, then run glibc `malloc_trim` and sample separately. Purge
+  does not flush other threads' tcaches. Missing allocator symbols/counters or
+  failed interventions fail validation while preserving the raw evidence.
+
+The `duckdb-memory` artifact contains JSON, per-process logs, host/THP metadata,
+engine versions, module pins, commit hashes, symbols and actual paired tables.
+jemalloc `resident` is an estimate, `allocated` has thread-cache/statistics
+limitations, and `retained` is **virtual address space, not resident RAM**. These
+counters overlap; do not add them to RSS or DuckDB buffer-manager totals. Private
+extension allocators may not be covered by the main binary's jemalloc counters.
+RSS remaining after purge does not by itself prove a leak.
+
 ## Setup
 
 - Hardware: Apple M4, local SSD.
