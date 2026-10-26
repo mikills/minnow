@@ -1,7 +1,7 @@
 package duckdb
 
-// Diagnostic-only SQL candidate. Production keeps queryBM25WithDB until the
-// paired CI experiment and correctness checks support adopting this shape.
+// Frozen pre-fix SQL is retained as the control for paired CI comparisons and
+// correctness checks against the production materialized query.
 import (
 	"context"
 	"database/sql"
@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func bm25Materialized(ctx context.Context, db docQueryer, text string, k int, filter *search.FilterExpr, ids []string) ([]kb.QueryResult, error) {
+func bm25Original(ctx context.Context, db docQueryer, text string, k int, filter *search.FilterExpr, ids []string) ([]kb.QueryResult, error) {
 	if k <= 0 || strings.TrimSpace(text) == "" {
 		return []kb.QueryResult{}, nil
 	}
@@ -30,18 +30,19 @@ func bm25Materialized(ctx context.Context, db docQueryer, text string, k int, fi
 	if err != nil {
 		return nil, err
 	}
+	escaped := quoteSQLStringLiteral(text)
+	condition := "fts_main_docs.match_bm25(id, " + escaped + ", fields := 'content') IS NOT NULL"
+	if where != "" {
+		where += " AND " + condition
+	} else {
+		where = " WHERE " + condition
+	}
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		WITH scored AS MATERIALIZED (
-			SELECT docs.rowid AS row_id, fts_main_docs.match_bm25(id, %s, fields := 'content') AS bm25_score
-			FROM docs%s
-		), ranked AS (
-			SELECT row_id, bm25_score FROM scored
-			WHERE bm25_score IS NOT NULL ORDER BY bm25_score DESC LIMIT %d
-		)
-		SELECT docs.id, content, ranked.bm25_score, media_refs, %s
-		FROM ranked JOIN docs ON docs.rowid = ranked.row_id
-		ORDER BY ranked.bm25_score DESC
-	`, quoteSQLStringLiteral(text), where, k, metadata), documentScopeArgs(ids)...)
+		SELECT id, content, fts_main_docs.match_bm25(id, %s, fields := 'content') AS bm25_score, media_refs, %s
+		FROM docs%s
+		ORDER BY bm25_score DESC
+		LIMIT %d
+	`, escaped, metadata, where, k), documentScopeArgs(ids)...)
 	if err != nil {
 		return nil, err
 	}
@@ -96,9 +97,9 @@ func BenchmarkBM25Shape(b *testing.B) {
 				if workload == "scoped" {
 					ids = []string{"doc-0", "doc-1"}
 				}
-				query := queryBM25WithDB
+				query := bm25Original
 				if shape == "materialized" {
-					query = bm25Materialized
+					query = queryBM25WithDB
 				}
 				// Capture the exact SQL passed to database/sql and its plan outside
 				// measurement. The recorder's metadata lookup is not benchmarked.
@@ -174,9 +175,9 @@ func TestBM25Shape(t *testing.T) {
 		{name: "empty", text: " ", k: 10}, {name: "zero", text: "alpha", k: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			want, err := queryBM25WithDB(ctx, sc.db, tc.text, tc.k, tc.filter, tc.ids)
+			want, err := bm25Original(ctx, sc.db, tc.text, tc.k, tc.filter, tc.ids)
 			require.NoError(t, err)
-			got, err := bm25Materialized(ctx, sc.db, tc.text, tc.k, tc.filter, tc.ids)
+			got, err := queryBM25WithDB(ctx, sc.db, tc.text, tc.k, tc.filter, tc.ids)
 			require.NoError(t, err)
 			if tc.name == "rank" || tc.name == "all" {
 				require.NotEmpty(t, want)
@@ -195,14 +196,14 @@ func TestBM25Shape(t *testing.T) {
 		// Record the existing precedence defect rather than asserting equivalence
 		// to it: current SQL is p0 OR (p1 AND score IS NOT NULL). The candidate
 		// correctly applies the non-NULL condition to every filtered row.
-		_, err := queryBM25WithDB(ctx, sc.db, "missing", 10, filter, nil)
+		_, err := bm25Original(ctx, sc.db, "missing", 10, filter, nil)
 		require.ErrorContains(t, err, "converting NULL")
-		got, err := bm25Materialized(ctx, sc.db, "missing", 10, filter, nil)
+		got, err := queryBM25WithDB(ctx, sc.db, "missing", 10, filter, nil)
 		require.NoError(t, err)
 		require.Empty(t, got)
-		want, err := queryBM25WithDB(ctx, sc.db, "alpha", 3, filter, nil)
+		want, err := bm25Original(ctx, sc.db, "alpha", 3, filter, nil)
 		require.NoError(t, err)
-		got, err = bm25Materialized(ctx, sc.db, "alpha", 3, filter, nil)
+		got, err = queryBM25WithDB(ctx, sc.db, "alpha", 3, filter, nil)
 		require.NoError(t, err)
 		require.Equal(t, want, got)
 	})
@@ -217,10 +218,10 @@ func TestBM25Shape(t *testing.T) {
 			parity float64
 		}{{"alpha", 1}, {"gamma", 0}} {
 			filter := &search.FilterExpr{Field: "parity", Op: search.FilterOpEq, Value: tc.parity}
-			want, err := queryBM25WithDB(ctx, db, tc.text, 1, filter, nil)
+			want, err := bm25Original(ctx, db, tc.text, 1, filter, nil)
 			require.NoError(t, err)
 			require.Len(t, want, 1)
-			got, err := bm25Materialized(ctx, db, tc.text, 1, filter, nil)
+			got, err := queryBM25WithDB(ctx, db, tc.text, 1, filter, nil)
 			require.NoError(t, err)
 			require.Equal(t, want, got, "hydration must retain physical row identity, scope and top-k")
 		}
@@ -228,9 +229,9 @@ func TestBM25Shape(t *testing.T) {
 	t.Run("without_metadata", func(t *testing.T) {
 		_, err := sc.db.ExecContext(ctx, "DROP INDEX docs_vec_idx; ALTER TABLE docs DROP metadata")
 		require.NoError(t, err)
-		want, err := queryBM25WithDB(ctx, sc.db, "alpha", 3, nil, nil)
+		want, err := bm25Original(ctx, sc.db, "alpha", 3, nil, nil)
 		require.NoError(t, err)
-		got, err := bm25Materialized(ctx, sc.db, "alpha", 3, nil, nil)
+		got, err := queryBM25WithDB(ctx, sc.db, "alpha", 3, nil, nil)
 		require.NoError(t, err)
 		require.Equal(t, want, got)
 	})

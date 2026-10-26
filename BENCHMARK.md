@@ -116,18 +116,18 @@ simulation comparisons; this diagnostic does not change production selection.
 ### BM25 query shape
 
 Dispatch **DuckDB profile** with `bm25_only=true` (other diagnostic-only switches
-false). One 2.0 test binary compares the current production BM25 helper against a
-test-only materialized CTE using the same upstream scoring macro. Only physical
+false). One 2.0 test binary compares frozen pre-fix BM25 SQL against the production
+materialized query using the same upstream scoring macro. Only physical
 row IDs/scores are materialized; payloads are joined after the top-k limit, so
 duplicate document IDs cannot multiply results or bypass filters. Full, filtered,
 and scoped workloads use one warm immutable 1024-row shard, three alternating
 paired rounds and fresh processes. Setup, plans and warmup are outside timers;
 correctness checks compare ranking, scores, payloads, filters/scopes, quoted
-terms and old schemas without metadata. A separate reproducer records the current
-OR-filter/NULL-score precedence bug corrected by the candidate. Exact SQL and EXPLAIN are saved in the
+terms and old schemas without metadata. A separate reproducer records the pre-fix
+OR-filter/NULL-score precedence bug. Exact SQL and EXPLAIN are saved in the
 `duckdb-bm25` artifact. Check for optimizer filter pushdown before attributing any
 difference to scoring once. Whole-process CPU/RSS includes setup; these timings
-are not end-to-end service benchmarks. Production SQL is unchanged by this probe.
+are not end-to-end service benchmarks.
 
 ### Native memory attribution
 

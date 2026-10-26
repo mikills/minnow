@@ -408,18 +408,21 @@ func queryBM25WithDB(
 	}
 	// match_bm25 does not support bound parameters; escape once and reuse.
 	escapedQuery := quoteSQLStringLiteral(queryText)
-	bm25Cond := "fts_main_docs.match_bm25(id, " + escapedQuery + ", fields := 'content') IS NOT NULL"
-	if whereClause != "" {
-		whereClause = whereClause + " AND " + bm25Cond
-	} else {
-		whereClause = " WHERE " + bm25Cond
-	}
+	// Expand the scoring macro once, retaining only physical row keys and scores
+	// before top-k. Document IDs need not be unique; hydrate by rowid so a join
+	// cannot multiply results or reintroduce payloads excluded by the filter.
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, content, fts_main_docs.match_bm25(id, %s, fields := 'content') AS bm25_score, media_refs, %s
-		FROM docs%s
-		ORDER BY bm25_score DESC
-		LIMIT %d
-	`, escapedQuery, metadataExpr, whereClause, k), documentScopeArgs(documentIDs)...)
+		WITH scored AS MATERIALIZED (
+			SELECT docs.rowid AS row_id, fts_main_docs.match_bm25(id, %s, fields := 'content') AS bm25_score
+			FROM docs%s
+		), ranked AS (
+			SELECT row_id, bm25_score FROM scored
+			WHERE bm25_score IS NOT NULL ORDER BY bm25_score DESC LIMIT %d
+		)
+		SELECT docs.id, content, ranked.bm25_score, media_refs, %s
+		FROM ranked JOIN docs ON docs.rowid = ranked.row_id
+		ORDER BY ranked.bm25_score DESC
+	`, escapedQuery, whereClause, k, metadataExpr), documentScopeArgs(documentIDs)...)
 	if err != nil {
 		return nil, fmt.Errorf("bm25 query failed: %w", err)
 	}

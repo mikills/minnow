@@ -35,7 +35,7 @@ def validate(output, case):
 def report(records, errors, finished):
     lines = ["## BM25 query-shape comparison", "",
              "One stable 2.0 binary, signed extensions, same hosted runner; three alternating paired rounds in fresh processes.",
-             "1024-row immutable shard; current production helper versus a test-only materialized CTE using the same FTS macro.",
+             "1024-row immutable shard; frozen pre-fix SQL versus production materialized SQL using the same FTS macro.",
              "Only physical row IDs/scores are materialized; payloads are joined after the ranked top-k limit.",
              "128MB, one DuckDB thread, GOMAXPROCS=2, GOMEMLIMIT=384MiB. Fixture setup, EXPLAIN and warmup are outside timers.",
              "Results are median ms/op; changes are median within-round percentages. This measures one warm shard, not end-to-end service latency.", ""]
@@ -53,7 +53,7 @@ def report(records, errors, finished):
     lines += ["", "Raw logs retain exact SQL, EXPLAIN, operation counts and Go allocations; .time contains whole-process CPU/RSS",
               "including fixture setup. Materialization may be affected by optimizer filter pushdown; inspect plans before attribution.",
               "Correctness compares IDs, scores, payloads, ranking, filters/scopes, quoted terms and missing metadata.",
-              "A separate reproducer records the current OR-filter/NULL-score precedence bug, which the candidate corrects."]
+              "A separate reproducer records the pre-fix OR-filter/NULL-score precedence bug corrected by production SQL."]
     if errors:
         lines += ["", "### Failed diagnostics"] + [f"- {e}" for e in errors]
     return "\n".join(lines) + "\n"
