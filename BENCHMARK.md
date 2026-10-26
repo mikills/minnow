@@ -88,6 +88,31 @@ symbols are reported as failures rather than silently replaced with Go-only data
 Each command is capped at two minutes and partial results are saved after every
 operation, so a profiler timeout does not discard completed measurements.
 
+### Same-binary parser comparison
+
+Dispatch **DuckDB profile** with `parser_only=true` and `memory_only=false`.
+It builds one stable 2.0 candidate probe and runs PEG versus legacy in fresh,
+sequential processes on one hosted runner, in three alternating paired rounds.
+Both arms load the same signed `legacy_parser` extension before selecting a
+parser; settings/security checks bracket each database workload. Both arms use
+strict parser override policy, preventing silent legacy-to-PEG fallback. The official
+Linux AMD64 download and decompressed bytes are SHA-256 pinned in the workflow,
+staged only in the diagnostic directory, and verified by DuckDB on load.
+
+Startup `memory_limit=128MB`, `threads=1`, Go controls, fixture data, and extension
+bytes match. Query-split runs verify results and HNSW for both bound directions;
+reports show per-operation medians and medians of within-round percentage
+changes. Failed runs preserve raw outputs and partial summaries; incomplete pairs
+are excluded. The `duckdb-parser` artifact includes engine/build provenance,
+input hashes, controls, plans, raw timings, and lifecycle memory snapshots.
+
+Preparation may include binding/planning; execution may include deferred planning.
+The initial open still uses PEG and both arms map `legacy_parser`, so this does
+not isolate all startup grammar residency. Post-close/GC RSS is observational,
+not proof of live allocations or a leak. Huge-page and allocator experiments are
+separate. Production parser changes still require full compatibility, query, and
+simulation comparisons; this diagnostic does not change production selection.
+
 ### Native memory attribution
 
 Dispatch **DuckDB profile** on the feature branch with `memory_only=true` and `baseline_ref=main` to

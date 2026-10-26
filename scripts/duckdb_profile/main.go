@@ -50,6 +50,10 @@ type probe struct {
 	MemoryAttribution bool              `json:"memory_attribution,omitempty"`
 	Settings          map[string]string `json:"settings,omitempty"`
 	Diagnostics       []string          `json:"diagnostics,omitempty"`
+	Parser            string            `json:"parser,omitempty"`
+	ParserChecks      int               `json:"parser_checks,omitempty"`
+	ParserSettings    map[string]string `json:"parser_settings,omitempty"`
+	Error             string            `json:"error,omitempty"`
 	memoryDB          *sql.DB
 }
 
@@ -64,18 +68,23 @@ func main() {
 	expect := flag.String("expect", "", "required engine version")
 	iterations := flag.Int("iterations", 20, "bounded operation count")
 	memoryAttribution := flag.Bool("memory-attribution", false, "collect native allocator, DuckDB and mapping counters; purge arenas after close (diagnostic only)")
+	parser := flag.String("parser", "", "CI-only 2.0 parser comparison: peg or legacy; loads signed legacy_parser in both arms")
 	flag.Parse()
 	if !allowed() {
 		fmt.Fprintln(os.Stderr, "profiling is restricted to GitHub-hosted Linux Actions runners")
 		os.Exit(1)
 	}
-	p := probe{Mode: *mode, Iterations: *iterations, QueryPath: *queryPath, MemoryAttribution: *memoryAttribution}
-	if err := p.run(*extensions, *expect); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	p := probe{Mode: *mode, Iterations: *iterations, QueryPath: *queryPath, MemoryAttribution: *memoryAttribution, Parser: *parser}
+	err := p.run(*extensions, *expect)
+	if err != nil {
+		p.Error = err.Error()
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(p); err != nil {
 		panic(err)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
@@ -159,6 +168,9 @@ func (s *sample) memory() error {
 func (p *probe) run(extensions, expect string) error {
 	if extensions == "" || expect == "" || p.Iterations < 1 || p.Iterations > 10000 {
 		return fmt.Errorf("extensions, expect, and 1..10000 iterations are required")
+	}
+	if err := validateParserControl(p.Parser, expect); err != nil {
+		return err
 	}
 	switch p.Mode {
 	case "core", "vss", "fts", "configured", "ingest", "query", "query_split":
@@ -264,6 +276,37 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 	if err != nil {
 		return err
 	}
+	if p.Parser != "" {
+		// Match the loaded code and signature-verification work in both arms.
+		// The initial open still uses PEG; this experiment cannot attribute all
+		// startup grammar residency to the parser selected afterwards.
+		if err := p.timed("load_legacy_parser", func() error {
+			_, err := db.Exec("LOAD legacy_parser")
+			return err
+		}); err != nil {
+			return err
+		}
+		if err := p.timed("select_parser", func() error {
+			// Enabling legacy implicitly changes the override policy. Pin it in
+			// both arms so only the enable flag differs and legacy cannot fall
+			// back to PEG on syntax errors.
+			if _, err := db.Exec("SET allow_parser_override_extension = 'strict'"); err != nil {
+				return err
+			}
+			_, err := db.Exec("SET enable_legacy_parser = " + strconv.FormatBool(p.Parser == "legacy"))
+			return err
+		}); err != nil {
+			return err
+		}
+		if err := p.checkParser(db); err != nil {
+			return err
+		}
+		defer func() {
+			if checkErr := p.checkParser(db); err == nil {
+				err = checkErr
+			}
+		}()
+	}
 	queries := []struct{ stage, query string }{}
 	if p.Mode == "vss" || p.Mode == "configured" || p.workloadDB() {
 		queries = append(queries, struct{ stage, query string }{"load_vss", "LOAD vss"})
@@ -340,6 +383,48 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 			}
 		}
 	}
+	return nil
+}
+
+func validateParserControl(parser, version string) error {
+	if parser == "" {
+		return nil
+	}
+	if (parser != "peg" && parser != "legacy") || version != "v2.0.0" {
+		return fmt.Errorf("parser comparison requires peg or legacy and stable v2.0.0")
+	}
+	return nil
+}
+
+func (p *probe) checkParser(db *sql.DB) error {
+	want := map[string]string{
+		"allow_parser_override_extension": "strict",
+		"enable_legacy_parser":            strconv.FormatBool(p.Parser == "legacy"),
+		"allow_unsigned_extensions":       "false", "autoload_known_extensions": "false",
+		"autoinstall_known_extensions": "false", "threads": "1", "memory_limit": "122.0 MiB",
+	}
+	// Keep the verification SQL order identical in both arms.
+	for _, name := range []string{"enable_legacy_parser", "allow_parser_override_extension", "allow_unsigned_extensions", "autoload_known_extensions",
+		"autoinstall_known_extensions", "threads", "memory_limit"} {
+		expected := want[name]
+		var got string
+		if err := db.QueryRow("SELECT current_setting(?)::VARCHAR", name).Scan(&got); err != nil {
+			return err
+		}
+		if got != expected {
+			return fmt.Errorf("parser control %s: got %q, expected %q", name, got, expected)
+		}
+	}
+	var loaded bool
+	if err := db.QueryRow("SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'legacy_parser'").Scan(&loaded); err != nil {
+		return err
+	}
+	if !loaded {
+		return fmt.Errorf("legacy_parser must be loaded in both comparison arms")
+	}
+	want["legacy_parser_loaded"] = "true"
+	p.ParserSettings = want
+	p.ParserChecks++
 	return nil
 }
 

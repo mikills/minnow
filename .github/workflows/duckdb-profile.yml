@@ -6,6 +6,7 @@ on:
       - 'scripts/duckdb_profile/**'
       - 'scripts/profile_duckdb*'
       - 'scripts/memory_duckdb*'
+      - 'scripts/parser_duckdb*'
       - .github/workflows/duckdb-profile.yml
   workflow_dispatch:
     inputs:
@@ -15,6 +16,10 @@ on:
         required: true
       memory_only:
         description: 'Only attribute native memory; skip perf, heaptrack and simulations'
+        type: boolean
+        default: false
+      parser_only:
+        description: 'Compare PEG and legacy in one 2.0 binary; separate from memory attribution'
         type: boolean
         default: false
 
@@ -27,6 +32,7 @@ concurrency:
 
 jobs:
   profile:
+    if: ${{ !inputs.parser_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -111,7 +117,7 @@ jobs:
               nm -C "../$RESULTS_DIR/$revision-profile" > "../$RESULTS_DIR/$revision.symbols.txt"
             )
           done
-          (cd candidate && go test -p=1 -parallel=1 -timeout=1m -run '^(TestMemory|TestQuerySplit)$' ./scripts/duckdb_profile)
+          (cd candidate && go test -p=1 -parallel=1 -timeout=1m -run '^(TestMemory|TestQuerySplit|TestParser)$' ./scripts/duckdb_profile)
 
       - name: Run phase diagnostics, native CPU sampling, and allocation tracing sequentially
         if: ${{ !inputs.memory_only }}
@@ -165,4 +171,77 @@ jobs:
             memory/*.sha
             memory/*.out
             memory/*.err
+          if-no-files-found: warn
+
+  parser:
+    if: ${{ inputs.parser_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: '1'
+      GOWORK: 'off'
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 384MiB
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: candidate/go.mod
+          cache-dependency-path: candidate/go.sum
+      - name: Check controls and tooling
+        env:
+          MEMORY_ONLY: ${{ inputs.memory_only }}
+        run: |
+          test "$MEMORY_ONLY" != true
+          python3 -m unittest discover -s candidate/scripts -p '*duckdb_test.py' -v
+          mkdir -p parser
+          uname -a > parser/host.txt
+          lscpu >> parser/host.txt
+          free -m >> parser/host.txt
+          go version >> parser/host.txt
+          cat /sys/kernel/mm/transparent_hugepage/enabled >> parser/host.txt
+          cat /sys/kernel/mm/transparent_hugepage/defrag >> parser/host.txt
+      - name: Stage matched signed extensions
+        run: |
+          set -euo pipefail
+          (cd candidate/extensions/v2.0.0 && sha256sum -c SHA256SUMS)
+          mkdir -p parser/extensions/v2.0.0/linux_amd64
+          cp candidate/extensions/v2.0.0/linux_amd64/*.duckdb_extension parser/extensions/v2.0.0/linux_amd64/
+          url=https://extensions.duckdb.org/v2.0.0/linux_amd64/legacy_parser.duckdb_extension.gz
+          echo "$url" > parser/legacy-parser-source.txt
+          curl --fail --location --retry 3 --max-time 120 -o parser/legacy_parser.gz "$url"
+          echo '2da013c24c51210768122ae601d3576801169a39f7b2840e858bbd711ffcbfad  parser/legacy_parser.gz' | sha256sum -c -
+          gzip -dc parser/legacy_parser.gz > parser/extensions/v2.0.0/linux_amd64/legacy_parser.duckdb_extension
+          echo 'db3a894d309dd415c9fcedf44613d4a5554cd862527dfced35c1e360214391ba  parser/extensions/v2.0.0/linux_amd64/legacy_parser.duckdb_extension' | sha256sum -c -
+      - name: Build one candidate binary outside measurement
+        working-directory: candidate
+        run: |
+          git rev-parse HEAD > ../parser/candidate.sha
+          go list -m all > ../parser/candidate.modules.txt
+          go test -p=1 -parallel=1 -timeout=1m -run '^(TestMemory|TestQuerySplit|TestParser)$' ./scripts/duckdb_profile
+          go build -p=1 -o ../parser/candidate-profile ./scripts/duckdb_profile
+          go build -p=1 -o ../parser/candidate-probe ./scripts/duckdb_compat
+          ../parser/candidate-probe > ../parser/candidate.engine.json
+          sha256sum ../parser/candidate-profile ../parser/extensions/v2.0.0/linux_amd64/*.duckdb_extension > ../parser/inputs.sha256
+      - name: Compare parsers in sequential fresh processes
+        run: python3 candidate/scripts/parser_duckdb.py --root "$GITHUB_WORKSPACE"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: duckdb-parser
+          retention-days: 7
+          path: |
+            parser/*.json
+            parser/*.md
+            parser/*.txt
+            parser/*.sha
+            parser/*.sha256
+            parser/*.out
+            parser/*.err
+            parser/legacy_parser.gz
           if-no-files-found: warn
