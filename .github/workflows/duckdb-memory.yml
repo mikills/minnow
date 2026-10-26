@@ -1,0 +1,101 @@
+name: DuckDB huge-page attribution
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/thp_*'
+      - scripts/duckdb_profile/main.go
+      - 'scripts/duckdb_profile/memory_*'
+      - .github/workflows/duckdb-memory.yml
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: 'Baseline ref with DuckDB 1.5.0'
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: duckdb-memory-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  memory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: '1'
+      GOWORK: 'off'
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 384MiB
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || inputs.baseline_ref }}
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: candidate/go.mod
+          cache-dependency-path: |
+            baseline/go.sum
+            candidate/go.sum
+      - name: Check tooling and record host policy
+        run: |
+          python3 -m unittest discover -s candidate/scripts -p '*duckdb_test.py' -v
+          mkdir -p thp
+          uname -a > thp/host.txt
+          lscpu >> thp/host.txt
+          free -m >> thp/host.txt
+          go version >> thp/host.txt
+          cat /sys/kernel/mm/transparent_hugepage/enabled >> thp/host.txt
+          cat /sys/kernel/mm/transparent_hugepage/defrag >> thp/host.txt
+          getconf PAGESIZE >> thp/host.txt
+          cc -O2 -Wall -Wextra -Werror candidate/scripts/thp_exec.c -o thp/thp-exec
+      - name: Build identical probes against both released engines
+        run: |
+          set -euo pipefail
+          for revision in baseline candidate; do
+            (
+              cd "$revision"
+              git rev-parse HEAD > "../thp/$revision.sha"
+              go list -m all > "../thp/$revision.modules.txt"
+              go build -p=1 -o "$GITHUB_WORKSPACE/thp/$revision-profile" \
+                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/main.go" \
+                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/query_split.go" \
+                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/memory_attribution.go" \
+                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_profile/memory_linux.go"
+              go build -p=1 -o "$GITHUB_WORKSPACE/thp/$revision-probe" \
+                "$GITHUB_WORKSPACE/candidate/scripts/duckdb_compat/main.go"
+              "../thp/$revision-probe" > "../thp/$revision.engine.json"
+              sha256sum "../thp/$revision-profile" > "../thp/$revision.binary.sha256"
+            )
+          done
+          (cd baseline/extensions/v1.5.0/linux_amd64 && sha256sum *.duckdb_extension) > thp/baseline.extensions.sha256
+          (cd candidate/extensions/v2.0.0 && sha256sum -c SHA256SUMS)
+          (cd candidate/extensions/v2.0.0/linux_amd64 && sha256sum *.duckdb_extension) > thp/candidate.extensions.sha256
+          (cd candidate && go test -p=1 -parallel=1 -timeout=1m -run '^TestMemory$' ./scripts/duckdb_profile)
+      - name: Compare process THP policies in fresh sequential processes
+        run: python3 candidate/scripts/thp_duckdb.py --root "$GITHUB_WORKSPACE"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: duckdb-thp
+          retention-days: 7
+          path: |
+            thp/*.json
+            thp/*.txt
+            thp/*.md
+            thp/*.sha
+            thp/*.sha256
+            thp/*.out
+            thp/*.err
+          if-no-files-found: warn

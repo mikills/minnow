@@ -49,6 +49,10 @@ values preserve the existing six-decimal literal rounding. Eviction closes every
 statement before closing its database. Schema/statement caches never apply to
 mutable or caller-owned direct database handles.
 
+Internal mutable staging handles load VSS but defer FTS: they mutate/inspect rows,
+then checkpoint and close before a separate index builder seals the snapshot.
+Builders, published readers and public direct-access handles retain both extensions.
+
 ### Native profiling
 
 The **DuckDB profile** Actions workflow runs diagnostics on one GitHub-hosted
@@ -159,6 +163,26 @@ limitations, and `retained` is **virtual address space, not resident RAM**. Thes
 counters overlap; do not add them to RSS or DuckDB buffer-manager totals. Private
 extension allocators may not be covered by the main binary's jemalloc counters.
 RSS remaining after purge does not by itself prove a leak.
+
+### Transparent huge-page attribution
+
+Dispatch **DuckDB huge-page attribution** (`duckdb-memory.yml`) with a 1.5 baseline.
+It also runs on pull requests changing this diagnostic, using the PR base engine.
+It compares default versus disabled process THP separately within each released
+engine, on one runner, in three alternating rounds of fresh sequential processes.
+A CI-only launcher sets `PR_SET_THP_DISABLE` before exec so startup allocations are
+included; the probe verifies the inherited policy at every lifecycle snapshot and
+checks signature/loading policy and limits before and after each database workload.
+Ingest also verifies row count and vector/BM25 results.
+
+The 60 runs cover core, VSS, FTS, configured and ingestion modes with the existing
+memory-attribution instrumentation. The report compares pre-purge, post-close/GC
+RSS, anonymous and huge-page residency, with Go-named mappings shown separately.
+Raw JSON retains per-path huge-page counters, all lifecycle points and allocator
+statistics. This process-wide intervention includes Go and is not a DuckDB-only
+allocator setting or throughput result. It changes no production policy and is
+separate from parser experiments. The `duckdb-thp` artifact preserves partial
+evidence and source/binary/extension hashes; unavailable controls fail the run.
 
 ## Setup
 

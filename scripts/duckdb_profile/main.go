@@ -23,20 +23,21 @@ import (
 )
 
 type sample struct {
-	Stage     string                   `json:"stage"`
-	ElapsedNS int64                    `json:"elapsed_ns"`
-	UserNS    int64                    `json:"user_ns"`
-	SystemNS  int64                    `json:"system_ns"`
-	GoHeap    uint64                   `json:"go_heap_bytes"`
-	GoSys     uint64                   `json:"go_sys_bytes"`
-	GoHeapSys uint64                   `json:"go_heap_sys_bytes"`
-	GoRelease uint64                   `json:"go_heap_released_bytes"`
-	GoStacks  uint64                   `json:"go_stack_in_use_bytes"`
-	OS        map[string]uint64        `json:"os_kib"`
-	Allocator map[string]uint64        `json:"glibc_bytes"`
-	Jemalloc  *jemallocSample          `json:"jemalloc,omitempty"`
-	DuckDB    []duckDBMemory           `json:"duckdb_memory,omitempty"`
-	Mappings  map[string]mappingMemory `json:"mappings,omitempty"`
+	Stage       string                   `json:"stage"`
+	ElapsedNS   int64                    `json:"elapsed_ns"`
+	UserNS      int64                    `json:"user_ns"`
+	SystemNS    int64                    `json:"system_ns"`
+	GoHeap      uint64                   `json:"go_heap_bytes"`
+	GoSys       uint64                   `json:"go_sys_bytes"`
+	GoHeapSys   uint64                   `json:"go_heap_sys_bytes"`
+	GoRelease   uint64                   `json:"go_heap_released_bytes"`
+	GoStacks    uint64                   `json:"go_stack_in_use_bytes"`
+	OS          map[string]uint64        `json:"os_kib"`
+	Allocator   map[string]uint64        `json:"glibc_bytes"`
+	Jemalloc    *jemallocSample          `json:"jemalloc,omitempty"`
+	DuckDB      []duckDBMemory           `json:"duckdb_memory,omitempty"`
+	Mappings    map[string]mappingMemory `json:"mappings,omitempty"`
+	THPDisabled *int                     `json:"thp_disabled,omitempty"`
 }
 
 type probe struct {
@@ -54,6 +55,9 @@ type probe struct {
 	ParserChecks      int               `json:"parser_checks,omitempty"`
 	ParserSettings    map[string]string `json:"parser_settings,omitempty"`
 	Error             string            `json:"error,omitempty"`
+	THPPolicy         string            `json:"thp_policy,omitempty"`
+	THPChecks         int               `json:"thp_checks,omitempty"`
+	THPIngestChecked  bool              `json:"thp_ingest_checked,omitempty"`
 	memoryDB          *sql.DB
 }
 
@@ -69,12 +73,13 @@ func main() {
 	iterations := flag.Int("iterations", 20, "bounded operation count")
 	memoryAttribution := flag.Bool("memory-attribution", false, "collect native allocator, DuckDB and mapping counters; purge arenas after close (diagnostic only)")
 	parser := flag.String("parser", "", "CI-only 2.0 parser comparison: peg or legacy; loads signed legacy_parser in both arms")
+	thpPolicy := flag.String("thp-policy", "", "verify inherited default or disabled THP policy; memory diagnostics only")
 	flag.Parse()
 	if !allowed() {
 		fmt.Fprintln(os.Stderr, "profiling is restricted to GitHub-hosted Linux Actions runners")
 		os.Exit(1)
 	}
-	p := probe{Mode: *mode, Iterations: *iterations, QueryPath: *queryPath, MemoryAttribution: *memoryAttribution, Parser: *parser}
+	p := probe{Mode: *mode, Iterations: *iterations, QueryPath: *queryPath, MemoryAttribution: *memoryAttribution, Parser: *parser, THPPolicy: *thpPolicy}
 	err := p.run(*extensions, *expect)
 	if err != nil {
 		p.Error = err.Error()
@@ -110,6 +115,20 @@ func (p *probe) timed(stage string, operation func() error) error {
 		}
 		if statErr := s.memory(); statErr != nil {
 			return statErr
+		}
+		if p.THPPolicy != "" {
+			state, err := readTHPDisable()
+			if err != nil {
+				return err
+			}
+			s.THPDisabled = &state
+			want := 0
+			if p.THPPolicy == "disabled" {
+				want = 1
+			}
+			if state != want {
+				return fmt.Errorf("THP policy changed: got %d, expected %d", state, want)
+			}
 		}
 	}
 	p.Samples = append(p.Samples, s)
@@ -170,6 +189,9 @@ func (p *probe) run(extensions, expect string) error {
 		return fmt.Errorf("extensions, expect, and 1..10000 iterations are required")
 	}
 	if err := validateParserControl(p.Parser, expect); err != nil {
+		return err
+	}
+	if err := p.validateTHPControl(); err != nil {
 		return err
 	}
 	switch p.Mode {
@@ -276,6 +298,16 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 	if err != nil {
 		return err
 	}
+	if p.THPPolicy != "" {
+		if err := p.checkTHPSettings(db); err != nil {
+			return err
+		}
+		defer func() {
+			if checkErr := p.checkTHPSettings(db); err == nil {
+				err = checkErr
+			}
+		}()
+	}
 	if p.Parser != "" {
 		// Match the loaded code and signature-verification work in both arms.
 		// The initial open still uses PEG; this experiment cannot attribute all
@@ -343,6 +375,25 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 		if err := p.timed(query.stage, func() error { _, err := db.Exec(query.query); return err }); err != nil {
 			return err
 		}
+	}
+	if p.THPPolicy != "" {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM docs`).Scan(&count); err != nil {
+			return err
+		}
+		if count != batches*512 {
+			return fmt.Errorf("THP ingest has %d rows, expected %d", count, batches*512)
+		}
+		for _, query := range profileQueries {
+			var id string
+			if err := db.QueryRow(query.query).Scan(&id); err != nil {
+				return err
+			}
+			if err := validateMemoryQueryID(query.stage, id, batches); err != nil {
+				return err
+			}
+		}
+		p.THPIngestChecked = true
 	}
 	if p.Mode == "query_split" {
 		return p.splitQueries(db)

@@ -9,6 +9,11 @@ package main
 #include <stdlib.h>
 #include <stdint.h>
 #include <errno.h>
+#include <sys/prctl.h>
+
+static int thp_disable_state(void) {
+    return prctl(PR_GET_THP_DISABLE, 0L, 0L, 0L, 0L);
+}
 
 // Use DuckDB's allocator, not libjemalloc from the runner or glibc. A weak
 // reference reports missing instrumentation without replacing the shipped engine.
@@ -68,6 +73,14 @@ func allocatorXML() string {
 }
 
 func trimAllocator() { C.malloc_trim(0) }
+
+func readTHPDisable() (int, error) {
+	state, err := C.thp_disable_state()
+	if state < 0 {
+		return 0, fmt.Errorf("read process THP policy: %w", err)
+	}
+	return int(state), nil
+}
 
 func readJemalloc() *jemallocSample {
 	result := &jemallocSample{Bytes: map[string]uint64{}}
