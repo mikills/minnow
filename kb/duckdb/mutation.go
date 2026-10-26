@@ -420,6 +420,10 @@ func (f *DuckDBArtifactFormat) PrepareAndOpenDB(ctx context.Context, kbID string
 	if err != nil {
 		return nil, err
 	}
+	// Public direct-access handles retain the full configured extension set.
+	if err := f.loadFTS(ctx, db); err != nil {
+		return nil, closeMutableBootstrapDB(db, err)
+	}
 	if err := f.deps.EvictCacheIfNeeded(ctx, kbID); err != nil {
 		return nil, closeMutableBootstrapDB(db, err)
 	}
@@ -633,7 +637,7 @@ func (f *DuckDBArtifactFormat) openBootstrapMutableShardDB(
 		return nil, err
 	}
 
-	db, err := f.openConfiguredDB(ctx, dbPath)
+	db, err := f.openStagingDB(ctx, dbPath)
 	if err != nil {
 		return nil, err
 	}
@@ -668,7 +672,7 @@ func (f *DuckDBArtifactFormat) openBootstrapMutableShardDB(
 // openMutableShardDB owns the handle until migration succeeds. Callers own the
 // returned handle and must close it; readers of sealed shards do not migrate.
 func (f *DuckDBArtifactFormat) openMutableShardDB(ctx context.Context, dbPath string) (*sql.DB, error) {
-	db, err := f.openConfiguredDB(ctx, dbPath)
+	db, err := f.openStagingDB(ctx, dbPath)
 	if err != nil {
 		return nil, err
 	}

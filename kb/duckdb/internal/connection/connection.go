@@ -43,6 +43,9 @@ type Config struct {
 	TempDir      string
 	OfflineExt   bool
 	Threads      int
+	// SkipFTS is for internal staging handles that only mutate or inspect rows.
+	// Published-shard readers, index builders and public handles still load FTS.
+	SkipFTS bool
 	// OnClose runs when sql.DB.Close closes the connector, which is how the
 	// process budget learns a database is no longer holding its share.
 	OnClose func()
@@ -118,8 +121,10 @@ func Configure(ctx context.Context, db *sql.DB, cfg Config) error {
 	if err := LoadVSS(ctx, db, cfg.ExtensionDir, cfg.OfflineExt); err != nil {
 		return err
 	}
-	if err := LoadFTS(ctx, db, cfg.ExtensionDir, cfg.OfflineExt); err != nil {
-		return err
+	if !cfg.SkipFTS {
+		if err := LoadFTS(ctx, db, cfg.ExtensionDir, cfg.OfflineExt); err != nil {
+			return err
+		}
 	}
 	return ConfigureRuntime(ctx, db, cfg.MemoryLimit, cfg.TempDir, cfg.Threads)
 }

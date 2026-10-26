@@ -69,6 +69,63 @@ func TestMutableOpen(t *testing.T) {
 		require.True(t, kb.HasPendingSession(req.kbDir), "opening a handle must not publish or end the session")
 	})
 
+	t.Run("staging_can_mutate_persisted_indexes_without_loading_fts", func(t *testing.T) {
+		f, req := setup(t)
+		db, err := f.openBootstrapMutableShardDB(t.Context(), req.kbDir, req.dbPath, req.embeddingDim)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		var loaded bool
+		require.NoError(t, db.QueryRow(`SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'fts'`).Scan(&loaded))
+		require.False(t, loaded)
+		_, err = db.Exec(`INSERT INTO docs VALUES ('a', 'original', [1,0,0,0,0,0,0,0], NULL, NULL),
+			('b', 'other', [0,1,0,0,0,0,0,0], NULL, NULL)`)
+		require.NoError(t, err)
+		closeDB(t, f, db)
+
+		// A reconstructed single-shard source can carry both persisted indexes.
+		db, err = f.openConfiguredDB(t.Context(), req.dbPath)
+		require.NoError(t, err)
+		require.NoError(t, buildShardIndexes(t.Context(), db))
+		require.NoError(t, checkpointAndCloseMutationDB(t.Context(), db))
+		db, err = f.openMutableShardDB(t.Context(), req.dbPath)
+		require.NoError(t, err)
+		require.NoError(t, db.QueryRow(`SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'fts'`).Scan(&loaded))
+		require.False(t, loaded)
+		_, err = db.Exec(`UPDATE docs SET content = 'revised' WHERE id = 'a'; DELETE FROM docs WHERE id = 'b'`)
+		require.NoError(t, err)
+		require.NoError(t, checkpointAndCloseMutationDB(t.Context(), db))
+
+		// Builders/readers still load FTS and can rebuild/query the changed rows.
+		db, release, err := f.openBuildDB(t.Context(), req.dbPath)
+		require.NoError(t, err)
+		defer release()
+		require.NoError(t, buildShardIndexes(t.Context(), db))
+		var count int
+		require.NoError(t, db.QueryRow(`SELECT count(*) FROM docs WHERE
+			fts_main_docs.match_bm25(id, 'revised', fields := 'content') IS NOT NULL`).Scan(&count))
+		require.Equal(t, 1, count)
+		closeDB(t, f, db)
+	})
+
+	t.Run("public_direct_access_keeps_fts", func(t *testing.T) {
+		f, req := setup(t)
+		db, err := f.prepareMutableShardDBLocked(t.Context(), req)
+		require.NoError(t, err)
+		closeDB(t, f, db)
+		require.NoError(t, writeLocalShardManifestVersion(localShardManifestVersionPath(req.kbDir), "same"))
+		f.deps.ManifestStore = &stubManifestStore{head: "same"}
+		f.deps.CacheDir = filepath.Dir(req.kbDir)
+		f.deps.EvictCacheIfNeeded = func(context.Context, string) error { return nil }
+		var lock sync.Mutex
+		f.deps.LockFor = func(string) *sync.Mutex { return &lock }
+		db, err = f.PrepareAndOpenDB(t.Context(), filepath.Base(req.kbDir))
+		require.NoError(t, err)
+		t.Cleanup(func() { closeDB(t, f, db) })
+		var loaded bool
+		require.NoError(t, db.QueryRow(`SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'fts'`).Scan(&loaded))
+		require.True(t, loaded)
+	})
+
 	for _, published := range []bool{false, true} {
 		name := "deleted_manifest_replaces_stale_rows"
 		if published {
