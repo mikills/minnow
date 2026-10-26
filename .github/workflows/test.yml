@@ -48,6 +48,10 @@ jobs:
           MINNOW_EMBEDDER=openai OPENAI_API_KEY=test docker compose config --quiet
           docker compose -f compose.yaml -f compose.build.yaml config --quiet
           sh -n install.sh
+          sh -n deploy/fly/start.sh
+
+      - name: Verify Linux pre-exec memory policy
+        run: python3 scripts/thp_launcher_test.py -v
 
       - name: Test
         # sim runs seeded scenarios for about six minutes, close enough to Go's
@@ -187,26 +191,43 @@ jobs:
           }
           trap cleanup EXIT
 
-          docker run -d --name minnow-ollama-ci \
+          assert_thp() {
+            docker exec "$1" sh -eu -c '
+              found=0
+              for status in /proc/[0-9]*/status; do
+                comm="${status%status}comm"
+                IFS= read -r name < "$comm" || continue
+                [ "$name" = minnow ] || continue
+                found=1
+                grep -Eq "^THP_enabled:[[:space:]]+$1$" "$status"
+              done
+              test "$found" = 1
+            ' sh "$2"
+          }
+
+          docker run -d --name minnow-ollama-ci --memory=2g \
             -e MINNOW_CONFIG=/etc/minnow/minnow.ollama.yaml \
+            -e MINNOW_DISABLE_THP=0 \
             -p 127.0.0.1:18082:8080 minnow:ci
           for _ in $(seq 1 30); do
             curl -fsS http://127.0.0.1:18082/healthz && break
             sleep 1
           done
           curl -fsS http://127.0.0.1:18082/healthz
+          assert_thp minnow-ollama-ci 1
           docker rm -f minnow-ollama-ci
 
-          docker run -d --name minnow-runtime-ci -e OPENAI_API_KEY \
+          docker run -d --name minnow-runtime-ci --memory=2g -e OPENAI_API_KEY \
             -p 127.0.0.1:18080:8080 minnow:ci
           for _ in $(seq 1 30); do
             curl -fsS http://127.0.0.1:18080/healthz && break
             sleep 1
           done
           curl -fsS http://127.0.0.1:18080/healthz
+          assert_thp minnow-runtime-ci 0
           docker rm -f minnow-runtime-ci
 
-          docker run -d --name minnow-fly-ci -e OPENAI_API_KEY -e MINNOW_TOKEN \
+          docker run -d --name minnow-fly-ci --memory=2g -e OPENAI_API_KEY -e MINNOW_TOKEN \
             -p 127.0.0.1:18081:8080 minnow:fly-ci
           for _ in $(seq 1 30); do
             curl -fsS http://127.0.0.1:18081/healthz && break
@@ -216,6 +237,7 @@ jobs:
             -H 'Authorization: Bearer attacker' http://127.0.0.1:18081/mcp)" = 401
           test "$(curl -sS -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer $MINNOW_TOKEN" http://127.0.0.1:18081/mcp)" != 401
+          assert_thp minnow-fly-ci 0
 
   publish-container:
     needs: [test, container]

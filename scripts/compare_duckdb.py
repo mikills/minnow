@@ -22,6 +22,9 @@ SCENARIOS = (
 WORKLOADS = tuple(("TestSim", name) for name in SCENARIOS) + (("TestTieredStorageSim", "recovery"),)
 QUERY_CASES = ("full_32", "full_512", "refs_512", "filtered_512", "scoped_512", "bm25_512", "churn_512")
 CONTROLS = {"GOMAXPROCS": "2", "GOMEMLIMIT": "384MiB", "GOWORK": "off"}
+THP_BINARIES = ("candidate.test", "candidate-query.test", "minnow-exec", "thp-exec")
+THP_CGROUP_FILES = ("memory.max", "memory.high", "memory.swap.max", "memory.current", "memory.peak",
+                    "memory.swap.current", "memory.events", "memory.pressure")
 
 
 def require_ci(env):
@@ -41,7 +44,9 @@ def validate_tests(output, parent, scenario):
 def thp_target(root, label, suffix):
     # Both arms execute the same physical binary and use the same checkout.
     policy = "default" if label == "baseline" else "disabled"
-    return [str(root / "results" / "thp-exec"), policy,
+    # The production launcher applies the policy. The CI helper only verifies
+    # its inherited state after exec, then execs the measured application.
+    return [str(root / "results" / "minnow-exec"), str(root / "results" / "thp-exec"), f"verify-{policy}",
             str(root / "results" / f"candidate{suffix}")]
 
 
@@ -63,6 +68,8 @@ def measure(root, label, round_index, workload, thp=False):
     home = root / "results" / f"{name}.home"
     home.mkdir()
     env["HOME"] = str(home)
+    if thp:
+        env["MINNOW_DISABLE_THP"] = "0" if label == "baseline" else "1"
     target = thp_target(root, label, ".test") if thp else [str(root / "results" / f"{label}.test")]
     revision = "candidate" if thp else label
     command = [
@@ -110,6 +117,8 @@ def measure_query(root, label, round_index, case, thp=False):
     home = root / "results" / f"{name}.home"
     home.mkdir()
     env = dict(os.environ, **CONTROLS, HOME=str(home))
+    if thp:
+        env["MINNOW_DISABLE_THP"] = "0" if label == "baseline" else "1"
     target = thp_target(root, label, "-query.test") if thp else [str(root / "results" / f"{label}-query.test")]
     revision = "candidate" if thp else label
     command = ["/usr/bin/time", "-f", "%e %U %S %M", "-o", str(metrics),
@@ -217,8 +226,9 @@ def thp_report(records):
     summary = aggregate(records)
     lines = ["## DuckDB 2.0 application THP comparison", "",
              "One simulation binary, one query binary, one checkout and signed extension set on one hosted runner.",
-             "Baseline = default THP; candidate = disabled before exec. Policy is checked by the launcher and inherited across exec.",
-             "Three alternating rounds of fresh sequential processes; no allocator/parser tuning or production policy change.",
+             "Baseline = inherited THP; candidate = MINNOW_DISABLE_THP=1 through the production minnow-exec launcher.",
+             "The CI helper verifies the inherited policy after launcher exec, before application exec.",
+             "Three alternating rounds of fresh sequential processes; no allocator/parser tuning.",
              "GOMAXPROCS=2, GOMEMLIMIT=384MiB, build -p=1, test -parallel=1; ordinary application DuckDB budgets remain in force.",
              "Simulation figures are medians of round sums (RSS: round maxima); changes are medians of within-round percentages.",
              "These measure simulation execution costs, not service throughput. Query timings below exclude fixture setup.", "",
@@ -249,11 +259,11 @@ def thp_schedule():
 def verify_thp_binaries(root):
     expected = {}
     for line in (root / "results/binaries.sha256").read_text().splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64})  (\.\./results/candidate(?:-query)?\.test)", line)
+        match = re.fullmatch(r"([0-9a-f]{64})  (\.\./results/[^/]+)", line)
         if not match or match[2] in expected:
             raise RuntimeError("invalid THP binary hash manifest")
         expected[match[2]] = match[1]
-    if set(expected) != {"../results/candidate.test", "../results/candidate-query.test"}:
+    if set(expected) != {f"../results/{name}" for name in THP_BINARIES}:
         raise RuntimeError("incomplete THP binary hash manifest")
     for name, digest in expected.items():
         with (root / "results" / Path(name).name).open("rb") as source:
@@ -262,11 +272,35 @@ def verify_thp_binaries(root):
             raise RuntimeError(f"measured binary changed: {name}")
 
 
-def collect_thp(root, engines, env):
+def read_thp_cgroup(cgroup):
+    return {name: (cgroup / name).read_text().strip() for name in THP_CGROUP_FILES}
+
+
+def validate_thp_cgroup(evidence):
+    expected = {"memory.max": str(2 * 1024**3), "memory.high": "max", "memory.swap.max": "0", "memory.swap.current": "0"}
+    for name, value in expected.items():
+        if evidence.get(name) != value:
+            raise RuntimeError(f"unexpected cgroup {name}: {evidence.get(name)!r}")
+    for name in ("memory.current", "memory.peak"):
+        if not re.fullmatch(r"\d+", evidence.get(name, "")):
+            raise RuntimeError(f"missing or invalid cgroup {name}")
+    events = {}
+    for line in evidence.get("memory.events", "").splitlines():
+        fields = line.split()
+        if len(fields) != 2 or fields[0] in events or not re.fullmatch(r"\d+", fields[1]):
+            raise RuntimeError("invalid cgroup memory.events")
+        events[fields[0]] = int(fields[1])
+    for key in ("oom", "oom_kill", "oom_group_kill"):
+        if events.get(key) != 0:
+            raise RuntimeError(f"missing or nonzero cgroup {key}: {events.get(key)!r}")
+
+
+def collect_thp(root, engines, env, cgroup):
     require_ci(env)
     results = root / "results"
     records, queries, errors = [], [], []
-    finished = integrity = workloads_complete = False
+    finished = integrity = cgroup_verified = workloads_complete = False
+    cgroup_evidence = {"path": str(cgroup)}
     expected_sim, expected_query = 6 * len(WORKLOADS), 6 * len(QUERY_CASES)
 
     def write(path, text):
@@ -277,7 +311,8 @@ def collect_thp(root, engines, env):
 
     def save():
         common = {"controls": CONTROLS, "engines": engines, "rounds": 3, "same_engine": True,
-                  "thp_comparison": True, "finished": finished, "binary_integrity_verified": integrity, "errors": errors}
+                  "thp_comparison": True, "finished": finished, "binary_integrity_verified": integrity,
+                  "cgroup_verified": cgroup_verified, "cgroup": cgroup_evidence, "errors": errors}
         write(results / "measurements.json", json.dumps(dict(common, seeds=SEEDS, measurements=records), indent=2) + "\n")
         write(results / "queries.json", json.dumps(dict(common, measurements=queries), indent=2) + "\n")
         text = (thp_report(records) if len(records) == expected_sim else
@@ -288,6 +323,7 @@ def collect_thp(root, engines, env):
             text = "**Incomplete THP comparison: do not treat this as a completed application comparison.**\n\n" + text
         text += f"\nValidated processes: simulations {len(records)}/{expected_sim}; queries {len(queries)}/{expected_query}.\n"
         text += f"Final binary integrity verified: {integrity}.\n"
+        text += f"Final 2 GiB/no-swap cgroup limits and OOM counters verified: {cgroup_verified}.\n"
         if errors:
             text += "\n### Failures\n" + "\n".join(f"- {error}" for error in errors) + "\n"
         write(results / "summary.md", text)
@@ -297,6 +333,10 @@ def collect_thp(root, engines, env):
     current = "initial binary integrity"
     try:
         verify_thp_binaries(root)
+        current = "initial cgroup evidence"
+        cgroup_evidence["initial"] = read_thp_cgroup(cgroup)
+        validate_thp_cgroup(cgroup_evidence["initial"])
+        save()
         for index, workload, label in thp_schedule():
             current = f"simulation {index}/{label}/{'/'.join(workload)}"
             print(current, flush=True)
@@ -322,7 +362,13 @@ def collect_thp(root, engines, env):
             integrity = True
         except (RuntimeError, OSError, ValueError) as error:
             errors.append(f"final binary integrity: {error}")
-        finished = workloads_complete and integrity and not errors
+        try:
+            cgroup_evidence["final"] = read_thp_cgroup(cgroup)
+            validate_thp_cgroup(cgroup_evidence["final"])
+            cgroup_verified = True
+        except (RuntimeError, OSError, ValueError) as error:
+            errors.append(f"final cgroup evidence: {error}")
+        finished = workloads_complete and integrity and cgroup_verified and not errors
         text = save()
         with open(env["GITHUB_STEP_SUMMARY"], "a") as output:
             output.write(text)
@@ -339,6 +385,7 @@ def main():
                         help="compare two application revisions with the identical stable 2.0 engine")
     parser.add_argument("--queries", action="store_true", help="also compare compiled warm production-query fixtures")
     parser.add_argument("--thp", action="store_true", help="same candidate binaries under default versus disabled pre-exec THP")
+    parser.add_argument("--cgroup", type=Path, help="required THP comparison cgroup: 2 GiB memory.max, no swap")
     args = parser.parse_args()
     require_ci(os.environ)
     root = args.root.resolve()
@@ -355,7 +402,13 @@ def main():
         for key in ("MALLOC_CONF", "DUCKDB_JE_MALLOC_CONF", "LD_PRELOAD", "GLIBC_TUNABLES", "GODEBUG"):
             if os.environ.get(key):
                 raise RuntimeError(f"unexpected memory/runtime override: {key}")
-        return collect_thp(root, engines, dict(os.environ))
+        if args.cgroup is None:
+            raise RuntimeError("THP comparison requires a measured cgroup")
+        cgroup = args.cgroup.resolve()
+        membership = "0::/" + str(cgroup.relative_to("/sys/fs/cgroup"))
+        if membership not in Path("/proc/self/cgroup").read_text().splitlines():
+            raise RuntimeError("THP comparison is not running inside the requested cgroup")
+        return collect_thp(root, engines, dict(os.environ), cgroup)
     records, queries = [], []
     try:
         for index in range(args.rounds):

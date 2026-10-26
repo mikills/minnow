@@ -29,8 +29,52 @@ the tested Linux x86-64 DuckDB extensions, and sets conservative defaults for a
 
 The image is currently **linux/amd64 only**. It can run under emulation on an
 Apple Silicon development machine, but hosted deployments should select x86-64.
+QEMU user-mode emulation rejects the THP policy syscalls, so opt out explicitly
+when using it (including QEMU-based Docker on Apple Silicon):
+
+```sh
+MINNOW_DISABLE_THP=0 docker compose up -d
+```
+
+For `docker run`, pass `-e MINNOW_DISABLE_THP=0`. A requested disable remains
+fail-closed on unsupported execution environments.
 
 ## Configuration
+
+### Linux transparent huge pages
+
+The runtime and Fly images enable `MINNOW_DISABLE_THP=1`. A small `minnow-exec`
+launcher disables transparent huge pages for Minnow before executing the server,
+including Go and native-library startup. Docker Compose, Fly and AWS examples
+enable it too. This affects Minnow and its descendants, not the host's global
+policy or the separate Caddy process.
+
+Set `MINNOW_DISABLE_THP=0` to opt out, or `1` to enable it (`false`/`true` also
+work). Opting out preserves the inherited kernel policy. Invalid values or a
+failed requested policy change stop startup with an error. Restart to change it.
+This is a launcher environment option, not a YAML/DuckDB setting; it does not
+replace memory limits or change extension signature verification.
+
+On the Terraform AWS deployment, keep a persistent opt-out in
+[`/opt/minnow/compose.override.yaml`](aws/README.md#transparent-huge-page-policy),
+not the generated `.env` file that secret refresh replaces.
+
+For a native Linux installation, build and use the same launcher explicitly:
+
+```sh
+cc -O2 -Wall -Wextra -Werror deploy/linux/minnow-exec.c -o minnow-exec
+MINNOW_DISABLE_THP=1 ./minnow-exec ./minnow
+```
+
+The launcher itself is opt-in when the variable is unset. Running `minnow`
+directly bypasses it; macOS execution is unchanged.
+
+On the measured THP-`always` CI host, disabling THP reduced simulation peak RSS
+by 27.9%, with 0.5% more total CPU and query latency changes from −0.9% to +1.8%.
+These are workload-specific results, not a promise of identical savings on every
+host. See [the experiment procedure](../BENCHMARK.md#transparent-huge-page-attribution).
+
+### Application configuration
 
 The image includes [`docker/minnow.yaml`](docker/minnow.yaml). To customize it,
 mount your own file read-only:

@@ -135,6 +135,8 @@ jobs:
           cat /sys/kernel/mm/transparent_hugepage/enabled >> results/host.txt
           cat /sys/kernel/mm/transparent_hugepage/defrag >> results/host.txt
           cc -O2 -Wall -Wextra -Werror candidate/scripts/thp_exec.c -o results/thp-exec
+          cc -O2 -Wall -Wextra -Werror candidate/deploy/linux/minnow-exec.c -o results/minnow-exec
+          python3 candidate/scripts/thp_launcher_test.py -v
       - name: Compile application workloads once, outside measurement
         working-directory: candidate
         run: |
@@ -150,9 +152,37 @@ jobs:
           (cd extensions/v2.0.0 && sha256sum -c SHA256SUMS)
           go test -p=1 -parallel=1 -count=1 -run '^(TestRuntime|TestExtensions|TestAppender)$' \
             ./kb/duckdb ./kb/duckdb/internal/connection
-          sha256sum ../results/candidate.test ../results/candidate-query.test > ../results/binaries.sha256
+          sha256sum ../results/candidate.test ../results/candidate-query.test \
+            ../results/minnow-exec ../results/thp-exec > ../results/binaries.sha256
       - name: Compare application costs under each THP policy
-        run: python3 candidate/scripts/compare_duckdb.py --root "$GITHUB_WORKSPACE" --same-engine --queries --thp
+        run: |
+          set -euo pipefail
+          group=/sys/fs/cgroup/minnow-thp-performance
+          sudo mkdir "$group"
+          echo '+memory' | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null
+          echo $((2 * 1024 * 1024 * 1024)) | sudo tee "$group/memory.max" > /dev/null
+          echo 0 | sudo tee "$group/memory.swap.max" > /dev/null
+          for file in memory.max memory.high memory.swap.max memory.events; do
+            echo "$file" >> results/cgroup.before.txt
+            cat "$group/$file" >> results/cgroup.before.txt
+          done
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,GITHUB_STEP_SUMMARY,GITHUB_WORKSPACE,GOMAXPROCS,GOMEMLIMIT,GOWORK,PYTHONDONTWRITEBYTECODE sh -ec '
+            echo $$ > /sys/fs/cgroup/minnow-thp-performance/cgroup.procs
+            exec setpriv --reuid="$SUDO_UID" --regid="$SUDO_GID" --init-groups \
+              python3 "$GITHUB_WORKSPACE/candidate/scripts/compare_duckdb.py" \
+                --root "$GITHUB_WORKSPACE" --same-engine --queries --thp \
+                --cgroup /sys/fs/cgroup/minnow-thp-performance
+          '
+      - name: Record cgroup memory evidence
+        if: always()
+        run: |
+          group=/sys/fs/cgroup/minnow-thp-performance
+          if [ -d "$group" ]; then
+            for file in memory.max memory.high memory.swap.max memory.current memory.peak memory.swap.current memory.events memory.pressure; do
+              echo "$file" >> results/cgroup.after.txt
+              cat "$group/$file" >> results/cgroup.after.txt
+            done
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:

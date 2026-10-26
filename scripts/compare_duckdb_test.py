@@ -9,10 +9,17 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from compare_duckdb import (QUERY_CASES, SEEDS, WORKLOADS, aggregate, collect_thp, measure, measure_query,
+from compare_duckdb import (QUERY_CASES, SEEDS, THP_BINARIES, WORKLOADS, aggregate, collect_thp, measure, measure_query,
                            main, parse_query_result, query_report, report, require_ci, thp_report,
                            thp_schedule, validate_engines, validate_tests, validate_thp_launch,
-                           verify_thp_binaries)
+                           validate_thp_cgroup, verify_thp_binaries)
+
+
+def cgroup_fixture():
+    return {"memory.max": str(2 * 1024**3), "memory.high": "max", "memory.swap.max": "0",
+            "memory.current": "1024", "memory.peak": "2048", "memory.swap.current": "0",
+            "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0",
+            "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0"}
 
 
 class ComparisonTest(unittest.TestCase):
@@ -153,9 +160,11 @@ class ComparisonTest(unittest.TestCase):
                     process.wait.return_value = 0
 
                     def spawn(command, **kwargs):
-                        target = command.index(str(root / "results/thp-exec"))
-                        self.assertEqual(command[target:target+3], [str(root / "results/thp-exec"), policy,
+                        target = command.index(str(root / "results/minnow-exec"))
+                        self.assertEqual(command[target:target+4], [str(root / "results/minnow-exec"),
+                                                                  str(root / "results/thp-exec"), f"verify-{policy}",
                                                                   str(root / "results" / f"candidate{suffix}")])
+                        self.assertEqual(kwargs["env"]["MINNOW_DISABLE_THP"], state)
                         expected_cwd = root / "candidate" / ("kb/duckdb" if query else "sim")
                         self.assertEqual(kwargs["cwd"], expected_cwd)
                         self.assertEqual(kwargs["env"]["GOMAXPROCS"], "2")
@@ -225,13 +234,18 @@ class ComparisonTest(unittest.TestCase):
     def test_thp_evidence(self):
         # All workloads are fake records: exercise persistence/failure handling,
         # never start the launcher, a database, or a benchmark process.
-        for failure in (None, "simulation", "query", "integrity", "write"):
+        for failure in (None, "simulation", "query", "integrity", "write", "cgroup_oom",
+                        "cgroup_missing", "cgroup_counter", "cgroup_unreadable"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 results = root / "results"
                 results.mkdir()
+                cgroup = root / "cgroup"
+                cgroup.mkdir()
+                for name, value in cgroup_fixture().items():
+                    (cgroup / name).write_text(value)
                 manifest = []
-                for name in ("candidate.test", "candidate-query.test"):
+                for name in THP_BINARIES:
                     content = name.encode()
                     (results / name).write_bytes(content)
                     manifest.append(f"{hashlib.sha256(content).hexdigest()}  ../results/{name}\n")
@@ -242,6 +256,13 @@ class ComparisonTest(unittest.TestCase):
                 counts = {"simulation": 0, "query": 0}
                 writes = []
                 replace = Path.replace
+                read_text = Path.read_text
+
+                def read_evidence(path, *args, **kwargs):
+                    if (failure == "cgroup_unreadable" and path == cgroup / "memory.events"
+                            and counts["query"] == 6 * len(QUERY_CASES)):
+                        raise PermissionError("unreadable cgroup counters")
+                    return read_text(path, *args, **kwargs)
 
                 def atomic_replace(source, target):
                     self.assertEqual(source.name, target.name + ".tmp")
@@ -275,23 +296,33 @@ class ComparisonTest(unittest.TestCase):
                 def query(root, label, index, case, thp):
                     self.assertTrue(thp)
                     check_progress("query")
-                    if failure == "integrity" and counts["query"] == 6 * len(QUERY_CASES):
-                        (results / "candidate-query.test").write_bytes(b"changed")
+                    if counts["query"] == 6 * len(QUERY_CASES):
+                        if failure == "integrity":
+                            (results / "candidate-query.test").write_bytes(b"changed")
+                        elif failure == "cgroup_oom":
+                            (cgroup / "memory.events").write_text("oom 1\noom_kill 0\noom_group_kill 0")
+                        elif failure == "cgroup_missing":
+                            (cgroup / "memory.events").unlink()
+                        elif failure == "cgroup_counter":
+                            (cgroup / "memory.events").write_text("oom_kill 0\noom_group_kill 0")
                     return {"label": label, "round": index, "case": case,
                             "ns_per_op": 1000, "process_peak_rss_mib": 128}
 
                 with patch("compare_duckdb.measure", side_effect=simulation), \
                         patch("compare_duckdb.measure_query", side_effect=query), \
-                        patch.object(Path, "replace", atomic_replace), patch("builtins.print"):
+                        patch.object(Path, "replace", atomic_replace), \
+                        patch.object(Path, "read_text", read_evidence), patch("builtins.print"):
                     if failure:
                         with self.assertRaisesRegex(RuntimeError, "comparison incomplete"):
-                            collect_thp(root, {}, env)
+                            collect_thp(root, {}, env, cgroup)
                     else:
-                        collect_thp(root, {}, env)
+                        collect_thp(root, {}, env, cgroup)
                 for filename, kind in (("measurements.json", "simulation"), ("queries.json", "query")):
                     saved = json.loads((results / filename).read_text())
                     self.assertEqual(saved["finished"], failure is None)
                     self.assertEqual(saved["binary_integrity_verified"], failure != "integrity")
+                    self.assertEqual(saved["cgroup_verified"], not (failure or "").startswith("cgroup_"))
+                    self.assertEqual(saved["cgroup"]["initial"], cgroup_fixture())
                     self.assertEqual(len(saved["measurements"]), counts[kind])
                     self.assertEqual(bool(saved["errors"]), failure is not None)
                 text = (results / "summary.md").read_text()
@@ -305,8 +336,20 @@ class ComparisonTest(unittest.TestCase):
                 elif failure == "write":
                     self.assertEqual(writes, ["interrupted"])
                     self.assertIn("interrupted atomic replacement", text)
+                elif (failure or "").startswith("cgroup_"):
+                    self.assertIn("final cgroup evidence:", text)
                 elif failure is None:
                     self.assertEqual(counts, {"simulation": 6 * len(WORKLOADS), "query": 6 * len(QUERY_CASES)})
+
+    def test_thp_cgroup(self):
+        validate_thp_cgroup(cgroup_fixture())
+        for name, value in (("memory.max", "max"), ("memory.high", "1024"), ("memory.swap.max", "max"),
+                            ("memory.swap.current", "4096"), ("memory.peak", "-1"),
+                            ("memory.events", "oom 0\noom 0\noom_kill 0\noom_group_kill 0"),
+                            ("memory.events", "oom 0\noom_kill 1\noom_group_kill 0"),
+                            ("memory.events", "oom 0\noom_kill 0\noom_group_kill 1")):
+            with self.subTest(name=name, value=value), self.assertRaises(RuntimeError):
+                validate_thp_cgroup(dict(cgroup_fixture(), **{name: value}))
 
 
 if __name__ == "__main__":

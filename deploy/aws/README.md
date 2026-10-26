@@ -68,6 +68,26 @@ $(terraform output -raw ssm_start_session)
 
 ## Operational notes
 
+### Transparent huge-page policy
+
+The image and Compose examples enable `MINNOW_DISABLE_THP=1`. To keep an opt-out
+across secret refreshes on the Terraform instance, add or merge this setting into
+`/opt/minnow/compose.override.yaml` through Session Manager:
+
+```yaml
+services:
+  minnow:
+    environment:
+      MINNOW_DISABLE_THP: "0"
+```
+
+Then run `cd /opt/minnow && sudo docker compose up -d --force-recreate`.
+Compose automatically loads this override alongside `compose.yaml`. Secret
+rotation replaces `/opt/minnow/.env`, so that generated file is not the place for
+durable policy overrides. Remove the override or set it to `"1"` to re-enable.
+
+### Maintenance
+
 - `prevent_destroy` and ignored AMI/user-data drift stop ordinary Terraform
   updates from replacing the stateful instance. Apply container/secret changes
   through Session Manager. Before deliberate replacement or teardown, take and

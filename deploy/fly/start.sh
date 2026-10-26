@@ -20,7 +20,8 @@ install -d -o minnow -g minnow -m 0750 \
 export HOME=/var/lib/minnow
 export XDG_CONFIG_HOME=/var/lib/minnow/caddy-config
 
-setpriv --reuid=minnow --regid=minnow --init-groups /usr/local/bin/minnow &
+setpriv --reuid=minnow --regid=minnow --init-groups \
+  /usr/local/bin/minnow-exec /usr/local/bin/minnow &
 minnow_pid=$!
 
 setpriv --reuid=minnow --regid=minnow --init-groups \

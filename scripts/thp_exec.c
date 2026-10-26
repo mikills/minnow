@@ -13,17 +13,23 @@ int main(int argc, char **argv) {
         fputs("THP diagnostics require a GitHub-hosted Actions runner\n", stderr);
         return 1;
     }
-    if (argc < 3 || (strcmp(argv[1], "default") && strcmp(argv[1], "disabled"))) {
-        fputs("usage: thp-exec default|disabled executable [args...]\n", stderr);
+    if (argc < 3) {
+        fputs("usage: thp-exec [verify-]default|disabled executable [args...]\n", stderr);
         return 1;
     }
+    int verify_only = !strncmp(argv[1], "verify-", 7);
+    const char *policy = argv[1] + (verify_only ? 7 : 0);
+    if (strcmp(policy, "default") && strcmp(policy, "disabled")) {
+        fputs("invalid THP diagnostic policy\n", stderr);
+        return 1;
+    }
+    int disabled = !strcmp(policy, "disabled");
     int before = prctl(PR_GET_THP_DISABLE, 0L, 0L, 0L, 0L);
-    if (before != 0) {
+    if (before != (verify_only ? disabled : 0)) {
         fprintf(stderr, "unexpected inherited THP disable state: %d\n", before);
         return 1;
     }
-    int disabled = !strcmp(argv[1], "disabled");
-    if (disabled && prctl(PR_SET_THP_DISABLE, 1L, 0L, 0L, 0L)) {
+    if (!verify_only && disabled && prctl(PR_SET_THP_DISABLE, 1L, 0L, 0L, 0L)) {
         perror("disable transparent huge pages");
         return 1;
     }

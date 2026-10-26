@@ -198,12 +198,20 @@ To measure the application trade-off, dispatch the same workflow with
 binaries from one checkout; the baseline-ref input is unused in this mode.
 The existing 96 seed cases per round and seven warm-query cases run sequentially
 in three alternating rounds. The launcher checks/logs its policy before exec,
-which Linux preserves across exec. Binary hashes are checked after measurement.
+which Linux preserves across exec. The application comparison now applies the
+policy through the shipped `minnow-exec` launcher; a CI-only helper verifies its
+inherited state after exec without changing it. Both arms run as the runner user
+inside the same 2 GiB cgroup with swap disabled. The artifact includes its limits,
+peak usage, pressure and OOM counters. Application and launcher hashes are checked
+before and after measurement.
 Measurements are saved atomically after every process. Reports remain marked
-incomplete until every simulation/query pair and final binary-integrity check pass.
+incomplete until every simulation/query pair, final binary-integrity check and
+cgroup-limit/OOM-counter validation pass. Missing cgroup evidence fails the run.
 This run uses ordinary application budgets and no allocator/mapping inspection;
 it reports paired CPU/elapsed/peak-RSS and query latency in `duckdb-thp-performance`.
-It is an experiment only; no production startup or global host policy changes.
+The comparison does not change the global host policy. Shipped Linux deployments
+enable the launcher's `MINNOW_DISABLE_THP=1` option; see
+[deployment configuration](deploy/README.md#linux-transparent-huge-pages) for opt-out.
 
 ## Setup
 
