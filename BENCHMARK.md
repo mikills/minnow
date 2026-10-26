@@ -117,7 +117,9 @@ simulation comparisons; this diagnostic does not change production selection.
 
 Dispatch **DuckDB profile** with `bm25_only=true` (other diagnostic-only switches
 false). One 2.0 test binary compares the current production BM25 helper against a
-test-only materialized CTE using the same upstream scoring macro. Full, filtered,
+test-only materialized CTE using the same upstream scoring macro. Only physical
+row IDs/scores are materialized; payloads are joined after the top-k limit, so
+duplicate document IDs cannot multiply results or bypass filters. Full, filtered,
 and scoped workloads use one warm immutable 1024-row shard, three alternating
 paired rounds and fresh processes. Setup, plans and warmup are outside timers;
 correctness checks compare ranking, scores, payloads, filters/scopes, quoted

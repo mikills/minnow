@@ -32,12 +32,16 @@ func bm25Materialized(ctx context.Context, db docQueryer, text string, k int, fi
 	}
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 		WITH scored AS MATERIALIZED (
-			SELECT id, content, fts_main_docs.match_bm25(id, %s, fields := 'content') AS bm25_score, media_refs, %s
+			SELECT docs.rowid AS row_id, fts_main_docs.match_bm25(id, %s, fields := 'content') AS bm25_score
 			FROM docs%s
+		), ranked AS (
+			SELECT row_id, bm25_score FROM scored
+			WHERE bm25_score IS NOT NULL ORDER BY bm25_score DESC LIMIT %d
 		)
-		SELECT id, content, bm25_score, media_refs, metadata FROM scored
-		WHERE bm25_score IS NOT NULL ORDER BY bm25_score DESC LIMIT %d
-	`, quoteSQLStringLiteral(text), metadata, where, k), documentScopeArgs(ids)...)
+		SELECT docs.id, content, ranked.bm25_score, media_refs, %s
+		FROM ranked JOIN docs ON docs.rowid = ranked.row_id
+		ORDER BY ranked.bm25_score DESC
+	`, quoteSQLStringLiteral(text), where, k, metadata), documentScopeArgs(ids)...)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +205,25 @@ func TestBM25Shape(t *testing.T) {
 		got, err = bm25Materialized(ctx, sc.db, "alpha", 3, filter, nil)
 		require.NoError(t, err)
 		require.Equal(t, want, got)
+	})
+	t.Run("duplicate_ids", func(t *testing.T) {
+		db := openHandleReuseTestDB(t, newHandleReuseTestFormat(t))
+		_, err := db.ExecContext(ctx, `CREATE TABLE docs (id TEXT, content TEXT, media_refs TEXT, metadata TEXT);
+			INSERT INTO docs VALUES ('same', 'alpha', NULL, '{"parity":1}'), ('same', 'gamma', NULL, '{"parity":0}');
+			PRAGMA create_fts_index('docs', 'id', 'content', stemmer='none', stopwords='none')`)
+		require.NoError(t, err)
+		for _, tc := range []struct {
+			text   string
+			parity float64
+		}{{"alpha", 1}, {"gamma", 0}} {
+			filter := &search.FilterExpr{Field: "parity", Op: search.FilterOpEq, Value: tc.parity}
+			want, err := queryBM25WithDB(ctx, db, tc.text, 1, filter, nil)
+			require.NoError(t, err)
+			require.Len(t, want, 1)
+			got, err := bm25Materialized(ctx, db, tc.text, 1, filter, nil)
+			require.NoError(t, err)
+			require.Equal(t, want, got, "hydration must retain physical row identity, scope and top-k")
+		}
 	})
 	t.Run("without_metadata", func(t *testing.T) {
 		_, err := sc.db.ExecContext(ctx, "DROP INDEX docs_vec_idx; ALTER TABLE docs DROP metadata")

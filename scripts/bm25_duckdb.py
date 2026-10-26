@@ -36,6 +36,7 @@ def report(records, errors, finished):
     lines = ["## BM25 query-shape comparison", "",
              "One stable 2.0 binary, signed extensions, same hosted runner; three alternating paired rounds in fresh processes.",
              "1024-row immutable shard; current production helper versus a test-only materialized CTE using the same FTS macro.",
+             "Only physical row IDs/scores are materialized; payloads are joined after the ranked top-k limit.",
              "128MB, one DuckDB thread, GOMAXPROCS=2, GOMEMLIMIT=384MiB. Fixture setup, EXPLAIN and warmup are outside timers.",
              "Results are median ms/op; changes are median within-round percentages. This measures one warm shard, not end-to-end service latency.", ""]
     if not finished or errors or len(records) != 18:
