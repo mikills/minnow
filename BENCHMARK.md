@@ -193,6 +193,18 @@ allocator setting or throughput result. It changes no production policy and is
 separate from parser experiments. The `duckdb-thp` artifact preserves partial
 evidence and source/binary/extension hashes; unavailable controls fail the run.
 
+To measure the application trade-off, dispatch the same workflow with
+`performance_only=true`. Both arms execute the same physical 2.0 simulation/query
+binaries from one checkout; the baseline-ref input is unused in this mode.
+The existing 96 seed cases per round and seven warm-query cases run sequentially
+in three alternating rounds. The launcher checks/logs its policy before exec,
+which Linux preserves across exec. Binary hashes are checked after measurement.
+Measurements are saved atomically after every process. Reports remain marked
+incomplete until every simulation/query pair and final binary-integrity check pass.
+This run uses ordinary application budgets and no allocator/mapping inspection;
+it reports paired CPU/elapsed/peak-RSS and query latency in `duckdb-thp-performance`.
+It is an experiment only; no production startup or global host policy changes.
+
 ## Setup
 
 - Hardware: Apple M4, local SSD.

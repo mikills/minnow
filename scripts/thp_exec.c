@@ -31,6 +31,8 @@ int main(int argc, char **argv) {
         fputs("THP policy verification failed\n", stderr);
         return 1;
     }
+    fprintf(stderr, "THP_DISABLE_BEFORE_EXEC=%d\n", disabled);
+    fflush(stderr);
     execvp(argv[2], &argv[2]);
     perror("exec THP diagnostic");
     return 1;

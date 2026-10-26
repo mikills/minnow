@@ -13,6 +13,10 @@ on:
         description: 'Baseline ref with DuckDB 1.5.0'
         required: true
         default: main
+      performance_only:
+        description: 'Compare actual 2.0 simulations and warm queries under default versus disabled THP'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,6 +27,7 @@ concurrency:
 
 jobs:
   memory:
+    if: ${{ !inputs.performance_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -98,4 +103,67 @@ jobs:
             thp/*.sha256
             thp/*.out
             thp/*.err
+          if-no-files-found: warn
+
+  performance:
+    if: ${{ inputs.performance_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: '1'
+      GOWORK: 'off'
+      GOMAXPROCS: '2'
+      GOMEMLIMIT: 384MiB
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: candidate/go.mod
+          cache-dependency-path: candidate/go.sum
+      - name: Check tooling and record host policy
+        run: |
+          python3 -m unittest discover -s candidate/scripts -p '*duckdb_test.py' -v
+          mkdir -p results
+          uname -a > results/host.txt
+          lscpu >> results/host.txt
+          free -m >> results/host.txt
+          go version >> results/host.txt
+          cat /sys/kernel/mm/transparent_hugepage/enabled >> results/host.txt
+          cat /sys/kernel/mm/transparent_hugepage/defrag >> results/host.txt
+          cc -O2 -Wall -Wextra -Werror candidate/scripts/thp_exec.c -o results/thp-exec
+      - name: Compile application workloads once, outside measurement
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > ../results/candidate.sha
+          cp ../results/candidate.sha ../results/baseline.sha
+          go list -m all > ../results/candidate.modules.txt
+          go test -p=1 -c -o "$GITHUB_WORKSPACE/results/candidate.test" ./sim
+          go test -p=1 -c -o "$GITHUB_WORKSPACE/results/candidate-query.test" ./kb/duckdb
+          go build -p=1 -o "$GITHUB_WORKSPACE/results/candidate-probe" ./scripts/duckdb_compat
+          ../results/candidate-probe -expect v2.0.0 > ../results/candidate.engine.json
+          cp ../results/candidate.engine.json ../results/baseline.engine.json
+          (cd extensions/v2.0.0 && sha256sum -c SHA256SUMS)
+          go test -p=1 -parallel=1 -count=1 -run '^(TestRuntime|TestExtensions|TestAppender)$' \
+            ./kb/duckdb ./kb/duckdb/internal/connection
+          sha256sum ../results/candidate.test ../results/candidate-query.test > ../results/binaries.sha256
+      - name: Compare application costs under each THP policy
+        run: python3 candidate/scripts/compare_duckdb.py --root "$GITHUB_WORKSPACE" --same-engine --queries --thp
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: duckdb-thp-performance
+          retention-days: 7
+          path: |
+            results/*.json
+            results/*.txt
+            results/*.md
+            results/*.sha
+            results/*.sha256
+            results/*.time
+            results/*.log
           if-no-files-found: warn
