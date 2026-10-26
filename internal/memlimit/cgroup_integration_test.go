@@ -121,7 +121,14 @@ func TestCgroupIntegration(t *testing.T) {
 
 	t.Run("crossing the mark wakes the watcher, and quiet blocks it", func(t *testing.T) {
 		ceiling := Detect().Ceiling
-		watcher, err := Watch(dir, ceiling)
+		// A brief excursion above 95% of memory.max can produce less than the
+		// trigger's 150ms of stall (63ms on one runner), even when every page is
+		// touched. Use a lower test-only budget and a larger relative overage,
+		// with ample headroom below the real hard limit. The production trigger
+		// and Watch's backstop calculation remain under test.
+		const testBudget int64 = 256 << 20
+		require.GreaterOrEqual(t, ceiling, 4*testBudget, "the test needs hard-limit headroom")
+		watcher, err := Watch(dir, testBudget)
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, watcher.Close()) })
 		require.Equal(t, "memory.pressure", watcher.Source())
@@ -129,42 +136,69 @@ func TestCgroupIntegration(t *testing.T) {
 		requirePrivatePressure(t, watcher.(*Watcher))
 		pressure := filepath.Join(dir, "memory.pressure")
 		before := pressureTotal(t, pressure)
-		t.Logf("watcher source=%s enforced=%t some total=%d", watcher.Source(), watcher.Enforced(), before)
+		t.Logf("watcher source=%s enforced=%t memory.high=%s memory.max=%d some total=%d",
+			watcher.Source(), watcher.Enforced(), readValue(t, filepath.Join(dir, "memory.high")), ceiling, before)
 
-		hog := make([][]byte, 0, 64)
-		for range cap(hog) {
-			block := make([]byte, 32<<20)
-			for i := range block {
-				block[i] = 1
-			}
-			hog = append(hog, block)
-		}
+		hog := make([][]byte, 0, 384) // At most 384MiB against ~243MiB memory.high.
+		t.Cleanup(func() {
+			hog = nil
+			debug.FreeOSMemory()
+		})
 		// Wait treats a timeout as success for the governor's periodic sampling.
-		// An infinite wait plus a watchdog makes a missed notification fail here.
+		// Start the infinite waiter and watchdog before allocating: memory.high
+		// can throttle each charge for seconds. Stop adding pressure as soon as
+		// the notification arrives, and bound overshoot to one small allocation.
+		done := make(chan struct{})
+		var waitErr error
+		var stopped bool
+		start := time.Now()
 		expired := make(chan struct{})
 		watchdog := time.AfterFunc(20*time.Second, func() {
 			watcher.Interrupt()
 			close(expired)
 		})
-		start := time.Now()
-		err = watcher.Wait(-1)
+		go func() {
+			waitErr = watcher.Wait(-1)
+			// Cancel at notification time, not after the allocator finishes its
+			// current throttled chunk. A late Interrupt would poison quiet checks.
+			stopped = watchdog.Stop()
+			if !stopped {
+				<-expired
+			}
+			close(done)
+		}()
+		t.Cleanup(func() {
+			watcher.Interrupt()
+			<-done // Joins the waiter and watchdog before Close.
+		})
+	pressure:
+		for range cap(hog) {
+			select {
+			case <-done:
+				break pressure
+			default:
+			}
+			block := make([]byte, 1<<20)
+			for i := range block {
+				block[i] = 1
+			}
+			hog = append(hog, block)
+		}
+		<-done
 		elapsed := time.Since(start)
 		runtime.KeepAlive(hog)
-		stopped := watchdog.Stop()
-		if !stopped {
-			<-expired
-		}
 		after := pressureTotal(t, pressure)
-		t.Logf("pressure wait=%s err=%v some total=%d -> %d", elapsed, err, before, after)
+		t.Logf("pressure stimulus/wait=%s allocated=%dMiB err=%v some total=%d -> %d",
+			elapsed, len(hog), waitErr, before, after)
 		require.True(t, stopped, "pressure notification did not arrive before the watchdog")
-		require.NoError(t, err, "reclaiming past memory.high did not wake the watcher")
-		require.Greater(t, after, before, "the allocation did not produce memory stalls")
+		require.NoError(t, waitErr, "reclaiming past memory.high did not wake the watcher")
+		require.GreaterOrEqual(t, after-before, uint64(150000), "the allocation did not produce enough memory stalls")
 
 		hog = nil
 		debug.FreeOSMemory()
 		require.Eventually(t, func() bool {
 			usage := Current(dir)
-			return usage.Ok && float64(usage.Bytes) < float64(ceiling)*0.5
+			return usage.Ok && usage.Bytes < testBudget/2
 		}, 20*time.Second, 200*time.Millisecond, "memory was never returned")
 
 		// Low usage alone does not establish quiet: reclaim can still be stalling
