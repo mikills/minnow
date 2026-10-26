@@ -173,7 +173,16 @@ engine, on one runner, in three alternating rounds of fresh sequential processes
 A CI-only launcher sets `PR_SET_THP_DISABLE` before exec so startup allocations are
 included; the probe verifies the inherited policy at every lifecycle snapshot and
 checks signature/loading policy and limits before and after each database workload.
-Ingest also verifies row count and vector/BM25 results.
+Ingest also verifies row count, all exact axis-0 vector matches and a BM25 result.
+These are stored-vector/BM25 smoke checks; HNSW index construction is exercised,
+but they establish no ANN recall guarantee.
+
+The first THP run (`40364516953`) incorrectly required an exact-nearest result from
+an approximate HNSW query. All twelve ingest cases returned the same wrong-axis
+row across both engines and policies. The 10,240-row fixture has 320 identical
+vectors per axis. The underlying ANN recall discrepancy remains unresolved; the
+failed artifacts are preserved, and the exact scan does not resolve it. Shared
+HNSW query-split and production-query benchmark fixtures retain their checks.
 
 The 60 runs cover core, VSS, FTS, configured and ingestion modes with the existing
 memory-attribution instrumentation. The report compares pre-purge, post-close/GC

@@ -28,6 +28,9 @@ type mappingMemory struct {
 	AnonHugePages uint64 `json:"anon_huge_pages_kib"`
 }
 
+const memoryVectorCheck = `SELECT min(id), count(*) FROM docs
+	WHERE array_distance(embedding, [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]::FLOAT[32]) = 0`
+
 func validateMemoryQueryID(stage, id string, batches int) error {
 	parts := strings.Split(id, "-")
 	if len(parts) != 3 || parts[0] != "doc" || batches <= 0 {

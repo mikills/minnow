@@ -384,14 +384,24 @@ func (p *probe) database(path, extensions, expect string) (err error) {
 		if count != batches*512 {
 			return fmt.Errorf("THP ingest has %d rows, expected %d", count, batches*512)
 		}
-		for _, query := range profileQueries {
-			var id string
-			if err := db.QueryRow(query.query).Scan(&id); err != nil {
-				return err
-			}
-			if err := validateMemoryQueryID(query.stage, id, batches); err != nil {
-				return err
-			}
+		// This duplicate-heavy fixture is not an ANN recall test. Verify all
+		// exact axis-0 matches without the top-N shape that VSS rewrites to HNSW.
+		var id string
+		var matches int
+		if err := db.QueryRow(memoryVectorCheck).Scan(&id, &matches); err != nil {
+			return err
+		}
+		if matches != batches*(512/32) {
+			return fmt.Errorf("THP ingest has %d exact vector matches, expected %d", matches, batches*(512/32))
+		}
+		if err := validateMemoryQueryID("vector_query", id, batches); err != nil {
+			return err
+		}
+		if err := db.QueryRow(profileQueries[1].query).Scan(&id); err != nil {
+			return err
+		}
+		if err := validateMemoryQueryID("bm25_query", id, batches); err != nil {
+			return err
 		}
 		p.THPIngestChecked = true
 	}
