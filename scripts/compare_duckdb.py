@@ -73,8 +73,8 @@ def measure(root, label, round_index, workload):
             "system_s": system, "rss_mib": rss / 1024}
 
 
-def parse_query_result(output, case):
-    pattern = (rf"^BenchmarkWarmShardQuery/{re.escape(case)}(?:-\d+)?\s+(\d+)\s+"
+def parse_query_result(output, case, parent="BenchmarkWarmShardQuery"):
+    pattern = (rf"^{re.escape(parent)}/{re.escape(case)}(?:-\d+)?\s+(\d+)\s+"
                r"([\d.]+) ns/op\s+([\d.]+) B/op\s+([\d.]+) allocs/op\s*$")
     rows = re.findall(pattern, output, re.MULTILINE)
     if len(rows) != 1 or "--- SKIP:" in output or "--- FAIL:" in output:
