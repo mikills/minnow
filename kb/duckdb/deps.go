@@ -80,6 +80,9 @@ func NewDepsFromKB(k *kb.KB, opts ...DepOption) DuckDBArtifactDeps {
 		UnpinShardForRead: func(kbID, shardKey string) {
 			k.UnpinShardForRead(kbID, shardKey)
 		},
+		RecordShardHit: func(path string) {
+			k.RecordShardHit(path)
+		},
 		ReconcileShardBlobs: func(ctx context.Context, kbID string, active []kb.SnapshotShardMetadata) error {
 			return k.EnqueueOrphanedShardBlobs(ctx, kbID, active, time.Time{})
 		},

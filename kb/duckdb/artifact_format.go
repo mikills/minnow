@@ -61,8 +61,10 @@ type DuckDBArtifactDeps struct {
 	// PinShardForRead/UnpinShardForRead hold a shard live across a query.
 	// Nil means queries run without explicit pins (the 2m grace window plus
 	// the pin-aware GC confirm remain the protection).
-	PinShardForRead            func(kbID, shardKey string)
-	UnpinShardForRead          func(kbID, shardKey string)
+	PinShardForRead   func(kbID, shardKey string)
+	UnpinShardForRead func(kbID, shardKey string)
+	// RecordShardHit records per-shard opens; nil means untracked (legacy LRU).
+	RecordShardHit             func(path string)
 	AcquireWriteLease          func(ctx context.Context, kbID string) (kb.WriteLeaseManager, *kb.WriteLease, error)
 	EnqueueReplacedShardsForGC func(kbID string, shards []kb.SnapshotShardMetadata, now time.Time)
 	ReconcileShardBlobs        func(ctx context.Context, kbID string, active []kb.SnapshotShardMetadata) error
@@ -222,10 +224,11 @@ func (f *DuckDBArtifactFormat) fetchVectorsFromShards(ctx context.Context, kbID 
 		if len(remaining) == 0 {
 			break
 		}
-		conn, err := f.openCachedShardConn(ctx, kbID, shard)
+		conn, localPath, err := f.openCachedShardConn(ctx, kbID, shard)
 		if err != nil {
 			return nil, fmt.Errorf("fetch vectors shard %s: %w", shard.ShardID, err)
 		}
+		f.recordShardHit(localPath)
 		metaByID, err := queryMetadataByIDs(ctx, conn, remaining)
 		conn.mu.Unlock()
 		if err != nil {
@@ -300,10 +303,11 @@ func (f *DuckDBArtifactFormat) searchBM25AllShards(
 
 	allResults := make([]kb.QueryResult, 0)
 	for _, shard := range manifest.Shards {
-		conn, err := f.openCachedShardConn(ctx, kbID, shard)
+		conn, localPath, err := f.openCachedShardConn(ctx, kbID, shard)
 		if err != nil {
 			return nil, fmt.Errorf("open shard %s for bm25: %w", shard.ShardID, err)
 		}
+		f.recordShardHit(localPath)
 		rows, err := queryBM25WithDB(ctx, conn, queryText, k, filter, documentIDs)
 		conn.mu.Unlock()
 		if err != nil {
@@ -469,11 +473,12 @@ func (f *DuckDBArtifactFormat) queryGraphSingleShard(
 	shard kb.SnapshotShardMetadata,
 	options kb.ExpansionOptions,
 ) ([]kb.ExpandedResult, error) {
-	conn, err := f.openCachedShardConn(ctx, req.KBID, shard)
+	conn, localPath, err := f.openCachedShardConn(ctx, req.KBID, shard)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.mu.Unlock()
+	f.recordShardHit(localPath)
 
 	return searchExpandedWithDB(
 		ctx, conn.db, req.QueryVec, req.Options.TopK, options, req.Options.DocumentIDs,

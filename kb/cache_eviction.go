@@ -57,6 +57,84 @@ func (l *KB) cacheEntryHoldsLiveState(kbID string) bool {
 	return HasPendingSession(filepath.Join(l.CacheDir, kbID))
 }
 
+// maxShardHitEntries bounds the hit map with halving pressure: past it
+// counts halve and only zero-count entries drop, so stale entries cool off.
+const maxShardHitEntries = 8192
+
+// shardHitDecayInterval bounds guarded promotion in time: counts halve at
+// most once per interval, so old heat can't permanently outrank recent use.
+// Time-based, not per-sweep, so bulk ingest can't fast-forward the clock.
+const shardHitDecayInterval = 10 * time.Minute
+
+// RecordShardHit notes one open of a local shard path; safe for concurrent use.
+func (l *KB) RecordShardHit(path string) {
+	if path == "" {
+		return
+	}
+	l.shardHitMu.Lock()
+	defer l.shardHitMu.Unlock()
+	if l.shardHitCounts == nil {
+		l.shardHitCounts = map[string]uint64{}
+	}
+	if len(l.shardHitCounts) == 0 {
+		// Fresh generation after a drain: restart the decay window so a
+		// stale clock never halves new counts on their first sweep.
+		l.shardHitLastDecay = nowFrom(l.Clock)
+	}
+	l.shardHitCounts[path]++
+	if len(l.shardHitCounts) > maxShardHitEntries {
+		for p, n := range l.shardHitCounts {
+			if n >>= 1; n == 0 {
+				delete(l.shardHitCounts, p)
+			} else {
+				l.shardHitCounts[p] = n
+			}
+		}
+	}
+}
+
+// snapshotShardHitCounts copies the hit map for one sweep, decaying counts
+// at most once per shardHitDecayInterval. The copy keeps eviction from
+// holding the counter lock during filesystem work.
+func (l *KB) snapshotShardHitCounts() map[string]uint64 {
+	l.shardHitMu.Lock()
+	defer l.shardHitMu.Unlock()
+	now := nowFrom(l.Clock)
+	if l.shardHitLastDecay.IsZero() {
+		// Backstop; RecordShardHit normally seeds the clock, so this only
+		// skips one penalty.
+		l.shardHitLastDecay = now
+	} else if now.Sub(l.shardHitLastDecay) >= shardHitDecayInterval {
+		l.shardHitLastDecay = now
+		for p, n := range l.shardHitCounts {
+			if n >>= 1; n == 0 {
+				delete(l.shardHitCounts, p)
+			} else {
+				l.shardHitCounts[p] = n
+			}
+		}
+	}
+	if len(l.shardHitCounts) == 0 {
+		return nil
+	}
+	out := make(map[string]uint64, len(l.shardHitCounts))
+	for p, n := range l.shardHitCounts {
+		out[p] = n
+	}
+	return out
+}
+
+// forgetShardHit drops the count for an evicted path so a redownloaded
+// shard re-earns protection instead of resurrecting ancient history.
+func (l *KB) forgetShardHit(path string) {
+	if path == "" {
+		return
+	}
+	l.shardHitMu.Lock()
+	defer l.shardHitMu.Unlock()
+	delete(l.shardHitCounts, path)
+}
+
 func (l *KB) evictCacheSweepOnce(protectedEntry string, incomingBytes int64) cacheevict.SweepResult {
 	l.mu.Lock()
 	maxBytes := l.MaxCacheBytes
@@ -74,6 +152,7 @@ func (l *KB) evictCacheSweepOnce(protectedEntry string, incomingBytes int64) cac
 		MinFreeBytes:         minFreeBytes,
 		IncomingBytes:        incomingBytes,
 		Protected:            protectedCacheEntries(protectedEntry),
+		HitCounts:            l.snapshotShardHitCounts(),
 		Unevictable:          l.cacheEntryHoldsLiveState,
 		Now:                  l.Clock.Now(),
 		Remove: func(entry cacheevict.Entry, reason cacheevict.Reason) bool {
@@ -85,6 +164,12 @@ func (l *KB) evictCacheSweepOnce(protectedEntry string, incomingBytes int64) cac
 	}
 	for i := 0; i < result.SizeEvictions; i++ {
 		l.recordCacheEvictionSize()
+	}
+	for i := 0; i < result.ProbationEvictions; i++ {
+		l.recordCacheEvictionProbation()
+	}
+	for i := 0; i < result.GuardedEvictions; i++ {
+		l.recordCacheEvictionGuarded()
 	}
 	for i := 0; i < result.RemoveErrors; i++ {
 		l.recordCacheEvictionError()
@@ -133,7 +218,11 @@ func (l *KB) removeCacheEntry(entry cacheevict.Entry, force bool) bool {
 		}
 	}()
 
-	return removeCacheDir(entry.Path)
+	removed := removeCacheDir(entry.Path)
+	if removed {
+		l.forgetShardHit(entry.Path)
+	}
+	return removed
 }
 
 func removeCacheDir(path string) bool {
@@ -167,6 +256,18 @@ func (l *KB) recordCacheEvictionSize() {
 	l.mu.Unlock()
 }
 
+func (l *KB) recordCacheEvictionProbation() {
+	l.mu.Lock()
+	l.cacheEvictionsProbationTotal++
+	l.mu.Unlock()
+}
+
+func (l *KB) recordCacheEvictionGuarded() {
+	l.mu.Lock()
+	l.cacheEvictionsGuardedTotal++
+	l.mu.Unlock()
+}
+
 func (l *KB) recordCacheEvictionError() {
 	l.mu.Lock()
 	l.cacheEvictionErrorsTotal++
@@ -188,12 +289,14 @@ type CacheEvictionMetricsSnapshot = cacheevict.MetricsSnapshot
 func (l *KB) CacheEvictionMetricsSnapshot() CacheEvictionMetricsSnapshot {
 	l.mu.Lock()
 	snapshot := CacheEvictionMetricsSnapshot{
-		CacheBytesCurrent:        l.cacheBytesCurrent,
-		CacheHeldBytes:           l.cacheHeldBytes,
-		CacheEvictionsTTLTotal:   l.cacheEvictionsTTLTotal,
-		CacheEvictionsSizeTotal:  l.cacheEvictionsSizeTotal,
-		CacheEvictionErrorsTotal: l.cacheEvictionErrorsTotal,
-		CacheBudgetExceededTotal: l.cacheBudgetExceededTotal,
+		CacheBytesCurrent:            l.cacheBytesCurrent,
+		CacheHeldBytes:               l.cacheHeldBytes,
+		CacheEvictionsTTLTotal:       l.cacheEvictionsTTLTotal,
+		CacheEvictionsSizeTotal:      l.cacheEvictionsSizeTotal,
+		CacheEvictionsProbationTotal: l.cacheEvictionsProbationTotal,
+		CacheEvictionsGuardedTotal:   l.cacheEvictionsGuardedTotal,
+		CacheEvictionErrorsTotal:     l.cacheEvictionErrorsTotal,
+		CacheBudgetExceededTotal:     l.cacheBudgetExceededTotal,
 	}
 	cacheDir := l.CacheDir
 	l.mu.Unlock()
