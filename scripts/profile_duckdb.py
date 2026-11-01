@@ -205,8 +205,8 @@ def main():
     results.mkdir(exist_ok=True)
     engines = {label: json.loads((results / f"{label}.engine.json").read_text())["version"]
                for label in ("baseline", "candidate")}
-    if engines != {"baseline": "v1.5.0", "candidate": "v2.0.0"}:
-        raise RuntimeError(f"expected 1.5.0 versus stable 2.0.0, got {engines}")
+    if engines != {"baseline": "v2.0.0", "candidate": "v2.0.0"}:
+        raise RuntimeError(f"expected stable 2.0.0 on both revisions, got {engines}")
     env = dict(os.environ, **CONTROLS)
     records, errors, completed = [], [], []
 
