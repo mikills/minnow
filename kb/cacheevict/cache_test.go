@@ -193,6 +193,75 @@ func TestCache(t *testing.T) {
 		require.FileExists(t, newPath)
 	})
 
+	t.Run("frequency evicts probation before guarded", func(t *testing.T) {
+		// Hot shard is OLDER: pure LRU would evict it first. Hit counts must
+		// protect it while the newer zero-hit shard goes.
+		now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		entries := []Entry{
+			{KBID: "hot-old", Path: "/c/hot", Bytes: 80, LastTouch: now.Add(-2 * time.Hour)},
+			{KBID: "cold-new", Path: "/c/cold", Bytes: 80, LastTouch: now.Add(-time.Minute)},
+		}
+		var removed []string
+		result := sweepEntries(entries, Config{
+			MaxBytes:  100,
+			Protected: map[string]bool{},
+			Now:       now,
+			HitCounts: map[string]uint64{"/c/hot": 5},
+			Remove: func(entry Entry, _ Reason) bool {
+				removed = append(removed, entry.KBID)
+				return true
+			},
+		})
+		require.Equal(t, []string{"cold-new"}, removed)
+		require.Equal(t, int64(80), result.CurrentBytes)
+		require.False(t, result.OverBudget)
+	})
+
+	t.Run("one hit stays in probation", func(t *testing.T) {
+		// A single hit is just the first query: still evictable.
+		now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		entries := []Entry{
+			{KBID: "once-old", Path: "/c/once", Bytes: 80, LastTouch: now.Add(-2 * time.Hour)},
+			{KBID: "never-new", Path: "/c/never", Bytes: 80, LastTouch: now.Add(-time.Minute)},
+		}
+		var removed []string
+		result := sweepEntries(entries, Config{
+			MaxBytes:  100,
+			Protected: map[string]bool{},
+			Now:       now,
+			HitCounts: map[string]uint64{"/c/once": 1},
+			Remove: func(entry Entry, _ Reason) bool {
+				removed = append(removed, entry.KBID)
+				return true
+			},
+		})
+		require.Equal(t, []string{"once-old"}, removed)
+		require.Equal(t, int64(80), result.CurrentBytes)
+	})
+
+	t.Run("ttl ignores hit counts", func(t *testing.T) {
+		now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		entries := []Entry{
+			{KBID: "hot-expired", Path: "/c/hot", Bytes: 80, LastTouch: now.Add(-2 * time.Hour)},
+			{KBID: "cold-fresh", Path: "/c/cold", Bytes: 80, LastTouch: now.Add(-time.Minute)},
+		}
+		removed := map[string]Reason{}
+		result := sweepEntries(entries, Config{
+			MaxBytes:  1000,
+			TTL:       time.Hour,
+			Protected: map[string]bool{},
+			Now:       now,
+			HitCounts: map[string]uint64{"/c/hot": 99},
+			Remove: func(entry Entry, reason Reason) bool {
+				removed[entry.KBID] = reason
+				return true
+			},
+		})
+		require.Equal(t, ReasonTTL, removed["hot-expired"])
+		require.Empty(t, removed["cold-fresh"])
+		require.False(t, result.OverBudget)
+	})
+
 	t.Run("scan returns directory sizes", func(t *testing.T) {
 		root := t.TempDir()
 		path := filepath.Join(root, "kb-a")
@@ -228,12 +297,6 @@ func sweepEntries(entries []Entry, cfg Config) SweepResult {
 	for _, entry := range entries {
 		total += entry.Bytes
 	}
-	candidates, result := removeExpired(cfg, entries, total)
-	if cfg.MaxBytes > 0 {
-		result.CurrentBytes = removeOverBudget(cfg, candidates, result.CurrentBytes, &result)
-	}
-	result.MaxBytes = cfg.MaxBytes
-	result.ProtectedEntries = len(cfg.Protected)
-	result.OverBudget = cfg.MaxBytes > 0 && result.CurrentBytes > cfg.MaxBytes
-	return result
+	// Exercise the production path, not a reimplementation of it.
+	return sweepScanned(cfg, entries, total)
 }

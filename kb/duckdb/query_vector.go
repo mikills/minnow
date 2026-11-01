@@ -399,11 +399,12 @@ func (f *DuckDBArtifactFormat) querySingleShardTopK(
 ) ([]kb.QueryResult, error) {
 	f.pinShardForRead(kbID, shard.Key)
 	defer f.unpinShardForRead(kbID, shard.Key)
-	conn, err := f.openCachedShardConn(ctx, kbID, shard)
+	conn, localPath, err := f.openCachedShardConn(ctx, kbID, shard)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.mu.Unlock()
+	f.recordShardHit(localPath)
 	results, err := queryTopKWithDB(ctx, conn, in.queryVec, in.k, vectorQueryOpts{
 		filter: in.filter, documentIDs: in.documentIDs,
 	})
@@ -421,11 +422,12 @@ func (f *DuckDBArtifactFormat) querySingleShardTopKRefs(
 ) ([]rankedDocRef, error) {
 	f.pinShardForRead(kbID, shard.Key)
 	defer f.unpinShardForRead(kbID, shard.Key)
-	conn, err := f.openCachedShardConn(ctx, kbID, shard)
+	conn, localPath, err := f.openCachedShardConn(ctx, kbID, shard)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.mu.Unlock()
+	f.recordShardHit(localPath)
 	refs, err := queryTopKRefsWithDB(ctx, conn, in.queryVec, in.k, vectorQueryOpts{
 		filter: in.filter, documentIDs: in.documentIDs,
 	})
@@ -443,7 +445,7 @@ func (f *DuckDBArtifactFormat) hydrateShardRankedResults(
 ) ([]kb.QueryResult, error) {
 	f.pinShardForRead(kbID, shard.Key)
 	defer f.unpinShardForRead(kbID, shard.Key)
-	conn, err := f.openCachedShardConn(ctx, kbID, shard)
+	conn, _, err := f.openCachedShardConn(ctx, kbID, shard)
 	if err != nil {
 		return nil, err
 	}
@@ -455,11 +457,21 @@ func (f *DuckDBArtifactFormat) hydrateShardRankedResults(
 	return results, nil
 }
 
+// recordShardHit records one logical (query, shard) access: call it once,
+// right after a successful open, even if the query itself fails. The refs
+// phase records for both phases, so hydrate must not. Nil-safe.
+func (f *DuckDBArtifactFormat) recordShardHit(localPath string) {
+	if localPath == "" || f.deps.RecordShardHit == nil {
+		return
+	}
+	f.deps.RecordShardHit(localPath)
+}
+
 func (f *DuckDBArtifactFormat) openCachedShardConn(
 	ctx context.Context,
 	kbID string,
 	shard kb.SnapshotShardMetadata,
-) (*shardConn, error) {
+) (*shardConn, string, error) {
 	for ensureAttempts := 0; ; ensureAttempts++ {
 		localPath, hit, err := f.ensureLocalShardFile(ctx, kbID, shard)
 		if err != nil {
@@ -469,12 +481,12 @@ func (f *DuckDBArtifactFormat) openCachedShardConn(
 			if errors.Is(err, os.ErrNotExist) && ensureAttempts < 3 {
 				select {
 				case <-ctx.Done():
-					return nil, ctx.Err()
+					return nil, "", ctx.Err()
 				case <-time.After(10 * time.Millisecond):
 					continue
 				}
 			}
-			return nil, fmt.Errorf("ensure shard file %s: %w", shard.ShardID, err)
+			return nil, "", fmt.Errorf("ensure shard file %s: %w", shard.ShardID, err)
 		}
 		f.deps.Metrics.RecordShardCacheAccess(kbID, hit)
 		conn, err := f.pool.GetOrOpen(ctx, localPath, f.budget().CachedDatabases(), func(ctx context.Context, path string) (*sql.DB, error) {
@@ -485,12 +497,15 @@ func (f *DuckDBArtifactFormat) openCachedShardConn(
 		})
 		if !errors.Is(err, errShardConnPoolEvicting) && !errors.Is(err, os.ErrNotExist) {
 			if err != nil {
-				return nil, fmt.Errorf("open shard %s: %w", shard.ShardID, err)
+				return nil, "", fmt.Errorf("open shard %s: %w", shard.ShardID, err)
 			}
-			return conn, nil
+			// Hit recording stays with the caller: hydrate re-opens shards
+			// already counted by the refs phase, and eviction retries must
+			// not double-count one logical access.
+			return conn, localPath, nil
 		}
 		if err := f.pool.waitForEviction(ctx, localPath); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		// The evictor may have removed the file after the first ensure. Loop so
 		// the shard cache can materialize it again before opening DuckDB.

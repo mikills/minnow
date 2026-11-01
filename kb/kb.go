@@ -87,15 +87,23 @@ type KB struct {
 
 	MediaContentTypeAllowlist []string
 
-	cacheBytesCurrent        int64
-	cacheHeldBytes           int64
-	cacheEvictionsTTLTotal   uint64
-	cacheEvictionsSizeTotal  uint64
-	cacheEvictionErrorsTotal uint64
-	cacheBudgetExceededTotal uint64
-	cacheReserveMu           sync.Mutex
-	cacheReservedBytes       int64
-	shardMetrics             *metrics.ShardRegistry
+	cacheBytesCurrent            int64
+	cacheHeldBytes               int64
+	cacheEvictionsTTLTotal       uint64
+	cacheEvictionsSizeTotal      uint64
+	cacheEvictionsProbationTotal uint64
+	cacheEvictionsGuardedTotal   uint64
+	cacheEvictionErrorsTotal     uint64
+	cacheBudgetExceededTotal     uint64
+	cacheReserveMu               sync.Mutex
+	cacheReservedBytes           int64
+	// shardHitCounts is advisory: it resets on restart (pure-LRU fallback)
+	// and is pressure-bounded with halving decay.
+	shardHitMu     sync.Mutex
+	shardHitCounts map[string]uint64
+	// shardHitLastDecay bounds promotion in time (see shardHitDecayInterval).
+	shardHitLastDecay time.Time
+	shardMetrics      *metrics.ShardRegistry
 
 	formatMu          sync.RWMutex
 	formatRegistry    map[string]ArtifactFormat

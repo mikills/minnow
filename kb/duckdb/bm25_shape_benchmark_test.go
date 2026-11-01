@@ -70,7 +70,7 @@ func BenchmarkBM25Shape(b *testing.B) {
 			b.Run(workload+"_"+shape, func(b *testing.B) {
 				f, shard := warmShardBenchmarkFixture(b, 512)
 				ctx := context.Background()
-				sc, err := f.openCachedShardConn(ctx, "fixture", shard)
+				sc, _, err := f.openCachedShardConn(ctx, "fixture", shard)
 				require.NoError(b, err)
 				defer sc.mu.Unlock()
 				check := func() {

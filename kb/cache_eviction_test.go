@@ -20,6 +20,9 @@ func TestCacheEviction(t *testing.T) {
 	t.Run("ttl_evicts_expired", testCacheTTLEvictsExpired)
 	t.Run("ttl_evicts_empty_dirs", testCacheTTLEvictsEmptyDirs)
 	t.Run("ttl_composes_with_size_budget", testCacheTTLComposesSizeBudget)
+	t.Run("frequency_protects_hot_shard", testCacheFrequencyProtectsHotShard)
+	t.Run("frequency_forgets_evicted_shard", testCacheFrequencyForgetsEvictedShard)
+	t.Run("frequency_decay_demotes_stale_guard", testCacheFrequencyDecayDemotesStaleGuard)
 	t.Run("metrics", testCacheMetrics)
 }
 
@@ -132,6 +135,107 @@ func testCacheTTLComposesSizeBudget(t *testing.T) {
 	require.NoError(t, newerErr)
 }
 
+func testCacheFrequencyProtectsHotShard(t *testing.T) {
+	cacheDir := t.TempDir()
+	kb := NewKB(&LocalBlobStore{Root: t.TempDir()}, cacheDir, WithMaxCacheBytes(150))
+
+	now := time.Now().UTC()
+	// Hot entry is oldest: pure LRU would evict it first. Per-shard layout,
+	// matching what scanQueryShards produces in production.
+	require.NoError(t, writeCacheShardForTest(cacheDir, "kb-hot", "hot.duckdb", 100, now.Add(-3*time.Hour)))
+	require.NoError(t, writeCacheShardForTest(cacheDir, "kb-cold", "cold.duckdb", 100, now.Add(-1*time.Hour)))
+
+	// Five recorded opens of the hot shard; none of cold.
+	hotPath := filepath.Join(cacheDir, "kb-hot", "query-shards", "hot.duckdb")
+	for range 5 {
+		kb.RecordShardHit(hotPath)
+	}
+
+	require.NoError(t, kb.SweepCache(context.Background()))
+
+	_, hotErr := os.Stat(hotPath)
+	require.NoError(t, hotErr, "re-opened shard must survive size eviction")
+	_, coldErr := os.Stat(filepath.Join(cacheDir, "kb-cold", "query-shards", "cold.duckdb"))
+	assert.ErrorIs(t, coldErr, os.ErrNotExist, "unopened shard goes first")
+}
+
+func testCacheFrequencyForgetsEvictedShard(t *testing.T) {
+	cacheDir := t.TempDir()
+	kb := NewKB(&LocalBlobStore{Root: t.TempDir()}, cacheDir, WithMaxCacheBytes(150))
+
+	now := time.Now().UTC()
+	require.NoError(t, writeCacheShardForTest(cacheDir, "kb-a", "a.duckdb", 100, now.Add(-3*time.Hour)))
+	require.NoError(t, writeCacheShardForTest(cacheDir, "kb-b", "b.duckdb", 100, now.Add(-2*time.Hour)))
+	aPath := filepath.Join(cacheDir, "kb-a", "query-shards", "a.duckdb")
+	bPath := filepath.Join(cacheDir, "kb-b", "query-shards", "b.duckdb")
+	for range 3 {
+		kb.RecordShardHit(aPath)
+		kb.RecordShardHit(bPath)
+	}
+
+	// Both guarded: oldest-first within the segment evicts A.
+	require.NoError(t, kb.SweepCache(context.Background()))
+	_, aErr := os.Stat(aPath)
+	assert.ErrorIs(t, aErr, os.ErrNotExist)
+	_, bErr := os.Stat(bPath)
+	require.NoError(t, bErr)
+
+	// A returns with a single open and must not resurrect its evicted count of 3.
+	require.NoError(t, writeCacheShardForTest(cacheDir, "kb-a", "a.duckdb", 100, now))
+	kb.RecordShardHit(aPath)
+	require.NoError(t, writeCacheShardForTest(cacheDir, "kb-c", "c.duckdb", 100, now))
+	cPath := filepath.Join(cacheDir, "kb-c", "query-shards", "c.duckdb")
+
+	require.NoError(t, kb.SweepCache(context.Background()))
+	_, bErr = os.Stat(bPath)
+	require.NoError(t, bErr, "guarded shard survives")
+	_, aErr = os.Stat(aPath)
+	assert.ErrorIs(t, aErr, os.ErrNotExist, "redownloaded shard re-earns from zero")
+	_, cErr := os.Stat(cPath)
+	assert.ErrorIs(t, cErr, os.ErrNotExist)
+
+	m := kb.CacheEvictionMetricsSnapshot()
+	assert.Equal(t, uint64(3), m.CacheEvictionsSizeTotal)
+	assert.Equal(t, uint64(2), m.CacheEvictionsProbationTotal)
+	assert.Equal(t, uint64(1), m.CacheEvictionsGuardedTotal)
+}
+
+func testCacheFrequencyDecayDemotesStaleGuard(t *testing.T) {
+	fakeClock := NewFakeClock(time.Now().UTC())
+	cacheDir := t.TempDir()
+	kb := NewKB(&LocalBlobStore{Root: t.TempDir()}, cacheDir, WithMaxCacheBytes(150), WithClock(fakeClock))
+
+	now := time.Now().UTC()
+	require.NoError(t, writeCacheShardForTest(cacheDir, "kb-stale", "stale.duckdb", 100, now.Add(-3*time.Hour)))
+	require.NoError(t, writeCacheShardForTest(cacheDir, "kb-fresh", "fresh.duckdb", 100, now.Add(-1*time.Hour)))
+	stalePath := filepath.Join(cacheDir, "kb-stale", "query-shards", "stale.duckdb")
+	for range 2 {
+		kb.RecordShardHit(stalePath)
+	}
+
+	// Eleven quiet minutes: the two-hit event cools to one and the stale
+	// shard falls back to probation behind the fresher entry.
+	fakeClock.Advance(11 * time.Minute)
+	require.NoError(t, kb.SweepCache(context.Background()))
+
+	_, staleErr := os.Stat(stalePath)
+	assert.ErrorIs(t, staleErr, os.ErrNotExist, "decayed guard no longer outranks recent use")
+	_, freshErr := os.Stat(filepath.Join(cacheDir, "kb-fresh", "query-shards", "fresh.duckdb"))
+	require.NoError(t, freshErr)
+}
+
+func writeCacheShardForTest(cacheDir, kbID, name string, sizeBytes int, ts time.Time) error {
+	dir := filepath.Join(cacheDir, kbID, "query-shards")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, make([]byte, sizeBytes), 0o644); err != nil {
+		return err
+	}
+	return os.Chtimes(path, ts, ts)
+}
+
 func writeCacheSnapshotForTest(cacheDir, kbID string, dbBytes, metaBytes int, ts time.Time) error {
 	kbPath := filepath.Join(cacheDir, kbID)
 	if err := os.MkdirAll(kbPath, 0o755); err != nil {
@@ -174,6 +278,8 @@ func testCacheMetricsEvictionAndBudget(t *testing.T) {
 	m := kb.CacheEvictionMetricsSnapshot()
 	assert.Equal(t, uint64(1), m.CacheEvictionsTTLTotal)
 	assert.Equal(t, uint64(1), m.CacheEvictionsSizeTotal)
+	assert.Equal(t, uint64(1), m.CacheEvictionsProbationTotal)
+	assert.Equal(t, uint64(0), m.CacheEvictionsGuardedTotal)
 	assert.Equal(t, uint64(0), m.CacheEvictionErrorsTotal)
 	assert.Equal(t, uint64(0), m.CacheBudgetExceededTotal)
 	assert.GreaterOrEqual(t, m.CacheBytesCurrent, int64(90))
@@ -181,6 +287,7 @@ func testCacheMetricsEvictionAndBudget(t *testing.T) {
 	metricsText := kb.CacheEvictionOpenMetricsText()
 	assert.Contains(t, metricsText, "minnow_cache_evictions_total{reason=\"ttl\"}")
 	assert.Contains(t, metricsText, "minnow_cache_evictions_total{reason=\"size\"}")
+	assert.Contains(t, metricsText, "minnow_cache_size_evictions_segment_total{segment=\"probation\"}")
 	assert.Contains(t, metricsText, "minnow_cache_budget_exceeded_total")
 }
 

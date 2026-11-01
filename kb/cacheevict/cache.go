@@ -37,6 +37,14 @@ type Config struct {
 	// Protected accepts either a KB ID (protect all its entries) or an exact
 	// entry path (protect one shard).
 	Protected map[string]bool
+	// HitCounts maps entry Path to open count for frequency-aware size
+	// eviction. Shards opened 0-1 times sit in probation, evicted
+	// oldest-first before anything opened 2+ times, so a one-open scan
+	// burst cannot displace a re-queried working set. Query-less pre-warm
+	// records nothing; nil means legacy pure-LRU. Missing entries count
+	// as zero, TTL ignores counts, and counts decay over time, so
+	// guarded means re-opened recently.
+	HitCounts map[string]uint64
 	// Unevictable reports KBs whose bytes must not count toward MaxBytes.
 	Unevictable func(kbID string) bool
 	Now         time.Time
@@ -49,14 +57,16 @@ type DiskUsage struct {
 }
 
 type MetricsSnapshot struct {
-	CacheBytesCurrent        int64
-	CacheHeldBytes           int64
-	CacheEvictionsTTLTotal   uint64
-	CacheEvictionsSizeTotal  uint64
-	CacheEvictionErrorsTotal uint64
-	CacheBudgetExceededTotal uint64
-	DiskCapacityBytes        int64
-	DiskAvailableBytes       int64
+	CacheBytesCurrent            int64
+	CacheHeldBytes               int64
+	CacheEvictionsTTLTotal       uint64
+	CacheEvictionsSizeTotal      uint64
+	CacheEvictionsProbationTotal uint64
+	CacheEvictionsGuardedTotal   uint64
+	CacheEvictionErrorsTotal     uint64
+	CacheBudgetExceededTotal     uint64
+	DiskCapacityBytes            int64
+	DiskAvailableBytes           int64
 }
 
 func OpenMetricsText(m MetricsSnapshot) string {
@@ -64,6 +74,9 @@ func OpenMetricsText(m MetricsSnapshot) string {
 		"# TYPE minnow_cache_evictions_total counter",
 		fmt.Sprintf("minnow_cache_evictions_total{reason=\"ttl\"} %d", m.CacheEvictionsTTLTotal),
 		fmt.Sprintf("minnow_cache_evictions_total{reason=\"size\"} %d", m.CacheEvictionsSizeTotal),
+		"# TYPE minnow_cache_size_evictions_segment_total counter",
+		fmt.Sprintf("minnow_cache_size_evictions_segment_total{segment=\"probation\"} %d", m.CacheEvictionsProbationTotal),
+		fmt.Sprintf("minnow_cache_size_evictions_segment_total{segment=\"guarded\"} %d", m.CacheEvictionsGuardedTotal),
 		"# TYPE minnow_cache_eviction_errors_total counter",
 		fmt.Sprintf("minnow_cache_eviction_errors_total %d", m.CacheEvictionErrorsTotal),
 		"# TYPE minnow_cache_budget_exceeded_total counter",
@@ -116,7 +129,11 @@ type SweepResult struct {
 	OverBudget       bool
 	TTLEvictions     int
 	SizeEvictions    int
-	RemoveErrors     int
+	// ProbationEvictions + GuardedEvictions == SizeEvictions: the segments
+	// partition size evictions.
+	ProbationEvictions int
+	GuardedEvictions   int
+	RemoveErrors       int
 }
 
 func Sweep(cfg Config) SweepResult {
@@ -151,7 +168,13 @@ func sweepScanned(cfg Config, entries []Entry, total int64) SweepResult {
 	if limitActive {
 		sizeCfg := cfg
 		sizeCfg.MaxBytes = effectiveMax
-		result.CurrentBytes = removeOverBudget(sizeCfg, candidates, result.CurrentBytes, &result)
+		probation, guarded := partitionByHits(candidates, cfg.HitCounts)
+		before := result.SizeEvictions
+		result.CurrentBytes = removeOverBudget(sizeCfg, probation, result.CurrentBytes, &result)
+		result.ProbationEvictions = result.SizeEvictions - before
+		before = result.SizeEvictions
+		result.CurrentBytes = removeOverBudget(sizeCfg, guarded, result.CurrentBytes, &result)
+		result.GuardedEvictions = result.SizeEvictions - before
 	}
 	result.MaxBytes = effectiveMax
 	result.ProtectedEntries = len(cfg.Protected)
@@ -271,6 +294,25 @@ func removeExpired(cfg Config, entries []Entry, total int64) ([]Entry, SweepResu
 		remaining = append(remaining, entry)
 	}
 	return remaining, result
+}
+
+// guardedHitThreshold is the open count promoting a shard out of the
+// probation segment. One open is just the first query (or a single
+// scan touch); the second open proves re-query and earns protection.
+const guardedHitThreshold = 2
+
+// partitionByHits splits oldest-first candidates into probation (fewer than
+// guardedHitThreshold hits, including unknown) and guarded segments,
+// preserving oldest-first order within each.
+func partitionByHits(candidates []Entry, hits map[string]uint64) (probation, guarded []Entry) {
+	for _, entry := range candidates {
+		if hits[entry.Path] < guardedHitThreshold {
+			probation = append(probation, entry)
+			continue
+		}
+		guarded = append(guarded, entry)
+	}
+	return probation, guarded
 }
 
 func removeOverBudget(cfg Config, entries []Entry, total int64, result *SweepResult) int64 {
